@@ -11,6 +11,11 @@
 #    Program.cs and compiled into a console harness, run against fake homes.
 #    Needs a .NET 9 SDK (`dotnet` on PATH, or DOTNET=/path/to/dotnet); without
 #    one that part SKIPs (BURNGLASS_REQUIRE_DOTNET=1 turns the skip into a FAIL).
+#    The same harness also compiles MeterScale + SummaryTransform and checks
+#    the popover payload against fixture summaries: per-SOURCE spend rows in
+#    the dashboard's order, colours (--s1..--s6, dark) and labels (sourceMeta >
+#    built-in > raw key), and the alert thresholds / meter tones the strip,
+#    the popover and the dashboard share.
 # 2. release.yml: test/packaging/release-workflow.py (python3 + PyYAML).
 #
 # Overrides, for proving a regression against an older tree:
@@ -97,14 +102,16 @@ cat > "$H/harness.csproj" <<'XML'
   </ItemGroup>
 </Project>
 XML
-# Cut `static class AppPaths` and `static class WebAssets` out of the real
-# Program.cs (brace matching that skips comments, strings and char literals).
-if ! node - "$STRIP_DIR/Program.cs" "$H/Extracted.cs" <<'JS'
-const fs = require('fs');
+# Cut `static class AppPaths` and `WebAssets` (required), plus `MeterScale` and
+# `SummaryTransform` (the popover payload; optional, so STRIP_DIR can still
+# point at an older tree for the home checks) out of the real Program.cs
+# (brace matching that skips comments, strings and char literals).
+if ! node - "$STRIP_DIR/Program.cs" "$H" <<'JS'
+const fs = require('fs'), path = require('path');
 const src = fs.readFileSync(process.argv[2], 'utf8');
-function cut(name) {
+function cut(name, optional) {
   const m = new RegExp('^static class ' + name + '\\b', 'm').exec(src);
-  if (!m) throw new Error('no static class ' + name);
+  if (!m) { if (optional) return null; throw new Error('no static class ' + name); }
   let i = src.indexOf('{', m.index), depth = 0;
   for (; i < src.length; i++) {
     const c = src[i], n = src[i + 1];
@@ -119,7 +126,10 @@ function cut(name) {
   }
   throw new Error('unbalanced ' + name);
 }
-fs.writeFileSync(process.argv[3], 'namespace BurnglassStrip;\n\n' + cut('AppPaths') + '\n\n' + cut('WebAssets') + '\n');
+const head = 'using System.Globalization;\nusing System.Text.Json;\nusing System.Text.Json.Nodes;\n\nnamespace BurnglassStrip;\n\n';
+fs.writeFileSync(path.join(process.argv[3], 'Extracted.cs'), head + cut('AppPaths') + '\n\n' + cut('WebAssets') + '\n');
+const ms = cut('MeterScale', true), st = cut('SummaryTransform', true);
+if (ms && st) fs.writeFileSync(path.join(process.argv[3], 'ExtractedUi.cs'), head + ms + '\n\n' + st + '\n');
 JS
 then
   fail "could not extract AppPaths/WebAssets from $STRIP_DIR/Program.cs"
@@ -131,10 +141,18 @@ namespace BurnglassStrip;
 // What the strip does at startup, minus the UI: resolve the home, extract the
 // popover UI (WebAssets.Dir), create the WebView2 profile folder the popover
 // uses (PopoverForm.InitWebAsync; ScratchPathOf when the build has it).
+// Any argument makes it a UiHarness command instead (compiled only when the
+// tree has MeterScale + SummaryTransform).
 static class Harness
 {
-    static int Main()
+    static int Main(string[] args)
     {
+        if (args.Length > 0)
+        {
+            var ui = Type.GetType("BurnglassStrip.UiHarness");
+            if (ui == null) { Console.WriteLine("NO-UI-HARNESS"); return 3; }
+            return (int)ui.GetMethod("Run")!.Invoke(null, new object[] { args })!;
+        }
         Console.WriteLine("HOME=" + AppPaths.Home);
         Console.WriteLine("DIR=" + WebAssets.Dir);
         var scratch = typeof(AppPaths).GetMethod("ScratchPathOf");
@@ -147,6 +165,46 @@ static class Harness
     }
 }
 CS
+if [ -f "$H/ExtractedUi.cs" ]; then
+  cat > "$H/UiHarness.cs" <<'CS'
+using System.Globalization;
+using System.Text.Json;
+
+namespace BurnglassStrip;
+
+// `transform <summary.json>` prints SummaryTransform.ToUi of the file;
+// `tones <thresholds-json> <pct>...` prints the sanitized thresholds, then each
+// pct's MeterScale.Tone; `used <used> <limit>` prints MeterScale.UsedPct.
+static class UiHarness
+{
+    public static int Run(string[] args)
+    {
+        var inv = CultureInfo.InvariantCulture;
+        if (args.Length >= 2 && args[0] == "transform")
+        {
+            Console.Write(SummaryTransform.ToUi(File.ReadAllText(args[1])));
+            return 0;
+        }
+        if (args.Length >= 2 && args[0] == "tones")
+        {
+            using var doc = JsonDocument.Parse(args[1]);
+            var th = MeterScale.Sanitize(doc.RootElement);
+            Console.WriteLine("TH=" + string.Join(",", th.Select(t => t.ToString(inv))));
+            foreach (var a in args.Skip(2))
+                Console.WriteLine(a + "=" + MeterScale.Tone(double.Parse(a, inv), th));
+            return 0;
+        }
+        if (args.Length >= 3 && args[0] == "used")
+        {
+            Console.WriteLine(MeterScale.UsedPct(double.Parse(args[1], inv), double.Parse(args[2], inv)));
+            return 0;
+        }
+        Console.WriteLine("usage: transform <file> | tones <json> <pct>... | used <used> <limit>");
+        return 2;
+    }
+}
+CS
+fi
 if ! DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 "$DOTNET" build "$H/harness.csproj" -c Release -o "$H/out" > "$H/build.log" 2>&1; then
   grep -E "error" "$H/build.log" | sed 's|^.*/harness/||' | sort -u | head -20
   fail "strip harness does not compile (see errors above)"
@@ -268,6 +326,113 @@ run "$S"
 [ "$(cat "$S/.burnglass/strip-web/index.html" 2>/dev/null)" = HARNESS-UI-2 ] && [ ! -e "$S/.pulse" ] \
   && pass "fresh machine: UI in ~/.burnglass/strip-web, no ~/.pulse created" \
   || fail "fresh machine: DIR=$(val "$S" DIR)"
+
+# ---------------------------------------------------------------------------
+echo "--- strip popover payload (SummaryTransform + MeterScale from $STRIP_DIR/Program.cs)"
+ui() { "$DOTNET" "$H/out/harness.dll" "$@"; }
+if [ ! -f "$H/ExtractedUi.cs" ]; then
+  fail "no MeterScale + SummaryTransform in $STRIP_DIR/Program.cs (popover payload unchecked)"
+else
+  # A: the dashboard's data as /api/summary carries it. 9 daily buckets (the
+  # last is today), 8 listed sources + one ("stray") only in the daily data.
+  cat > "$T/summary-a.json" <<'JSON'
+{
+  "allSources": ["claude-desktop", "cli", "codex", "continue", "foreman", "gemini", "roo", "zed"],
+  "sourceMeta": { "foreman": { "label": "FOREMAN" }, "zed": {} },
+  "alertThresholds": [95, 0, 150, "x", 70.5, -3],
+  "periods": [
+    { "key": "today", "bySource": { "codex": { "cost": 999 } } },
+    { "key": "last30",
+      "bySource": {
+        "claude-desktop": { "cost": 2178.09, "tokens": 1200000 }, "cli": { "cost": 0, "tokens": 0 },
+        "codex": { "cost": 3.45, "tokens": 90000 }, "continue": { "cost": 1.5, "tokens": 10 },
+        "foreman": { "cost": 0, "tokens": 0 }, "gemini": { "cost": 0.25, "tokens": 10 },
+        "roo": { "cost": 0.75, "tokens": 10 }, "zed": { "cost": 0, "tokens": 0 } },
+      "daily": [
+        { "date": "2026-09-17", "bySource": { "claude-desktop": 100, "continue": 1.5 } },
+        { "date": "2026-09-18", "bySource": { "claude-desktop": 200, "roo": 0.75 } },
+        { "date": "2026-09-19", "bySource": { "claude-desktop": 300 } },
+        { "date": "2026-09-20", "bySource": { "claude-desktop": 400 } },
+        { "date": "2026-09-21", "bySource": { "claude-desktop": 500 } },
+        { "date": "2026-09-22", "bySource": { "claude-desktop": 600 } },
+        { "date": "2026-09-23", "bySource": { "claude-desktop": 50.09, "codex": 1 } },
+        { "date": "2026-09-24", "bySource": { "claude-desktop": 20, "codex": 2 } },
+        { "date": "2026-09-25", "bySource": { "claude-desktop": 8, "codex": 0.45, "gemini": 0.25, "stray": 0.1 } }
+      ] }
+  ],
+  "meters": { "enabled": true, "status": "ok", "buckets": [
+    { "key": "five_hour", "label": "Claude · 5-hour session", "pct": 70.5, "resetsAt": 4102444800000, "projLeftAtReset": 12.4 },
+    { "key": "seven_day", "label": "Claude · weekly", "pct": 36, "resetsAt": 4102444800000, "projLeftAtReset": null },
+    { "key": "iguana_necktie", "label": "Claude · iguana necktie", "pct": 100, "resetsAt": 4102444800000 },
+    { "key": "model_scoped:fable", "label": "Claude · weekly · Fable", "pct": 0, "resetsAt": 4102444800000 } ] },
+  "codexMeters": { "buckets": [
+    { "key": "codex_secondary", "label": "Codex · weekly", "pct": 11, "resetsAt": 4102444800000 },
+    { "key": "codex_primary", "label": "Codex · session (5h)", "pct": 50, "stale": true } ] }
+}
+JSON
+  # B: an older server - no allSources / sourceMeta / alertThresholds.
+  printf '%s' '{"periods":[{"key":"last30","bySource":{"b":{"cost":1},"a":{"cost":2},"B":{"cost":3}},"daily":[]}],"alertThresholds":"80"}' > "$T/summary-b.json"
+  printf '%s' 'not json' > "$T/summary-c.json"
+  ui transform "$T/summary-a.json" > "$T/ui-a.json" 2>&1
+  ui transform "$T/summary-b.json" > "$T/ui-b.json" 2>&1
+  ui transform "$T/summary-c.json" > "$T/ui-c.json" 2>&1
+  node - "$T" <<'JS' || FAILS=$((FAILS + 1))
+const fs = require('fs'), path = require('path');
+const T = process.argv[2];
+let bad = 0;
+const says = (c, m) => { console.log((c ? 'PASS: ' : 'FAIL: ') + m); if (!c) bad++; };
+const read = (n) => { try { return JSON.parse(fs.readFileSync(path.join(T, n), 'utf8')); } catch (e) { return { __err: String(e) }; } };
+const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+// web/src/styles.css dark --s1..--s6, in order.
+const S = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#008300'];
+
+const a = read('ui-a.json');
+const src = a.sources || [];
+says(eq(src.map((s) => s.id), ['claude-desktop', 'cli', 'codex', 'continue', 'foreman', 'gemini', 'roo', 'zed', 'stray']),
+  'sources: allSources order, then an unlisted source that has spend (got ' + src.map((s) => s.id).join(',') + ')');
+says(eq(src.map((s) => s.color), [0, 1, 2, 3, 4, 5, 6, 7, 8].map((i) => S[i % 6])),
+  'sources: colour = the dashboard series (--s1..--s6) by allSources position, wrapping at 6');
+says(eq(src.map((s) => s.label), ['Claude Desktop', 'Claude CLI', 'Codex', 'Continue', 'FOREMAN', 'Gemini CLI', 'Roo Code', 'zed', 'stray']),
+  'sources: labels = sourceMeta label > built-in label > raw key (got ' + src.map((s) => s.label).join(' | ') + ')');
+const by = Object.fromEntries(src.map((s) => [s.id, s]));
+const amt = (id) => by[id] ? [by[id].today, by[id].week7, by[id].cost30] : null;
+says(eq(amt('claude-desktop'), [8, 1878.09, 2178.09]), 'sources: claude-desktop today / 7 calendar days / 30d = ' + JSON.stringify(amt('claude-desktop')));
+says(eq(amt('codex'), [0.45, 3.45, 3.45]), 'sources: codex amounts = ' + JSON.stringify(amt('codex')));
+says(eq(amt('roo'), [0, 0, 0.75]) && eq(amt('continue'), [0, 0, 1.5]), 'sources: spend outside the last 7 daily buckets counts only toward 30d');
+says(eq(amt('cli'), [0, 0, 0]) && eq(amt('foreman'), [0, 0, 0]), 'sources: zero-spend sources keep their row (and colour slot)');
+says(eq(amt('stray'), [0.1, 0.1, 0]), 'sources: a daily-only source gets today/7d from the daily buckets');
+says(eq(a.thresholds, [70.5, 95]), 'thresholds: alertThresholds sanitized to (0,100] ascending (got ' + JSON.stringify(a.thresholds) + ')');
+const prov = (a.providers || []).map((p) => p.providerId);
+says(prov[0] === 'claude' && prov[1] === 'codex', 'providers: Claude + Codex sections unchanged (got ' + prov.join(',') + ')');
+const cl = ((a.providers || [])[0] || {}).lines || [];
+const meters = cl.filter((l) => l.type === 'progress');
+says(eq(meters.map((m) => [m.label, m.used]), [['Session', 71], ['Weekly', 36], ['Iguana necktie', 100], ['Fable', 0]]),
+  'claude meters: labels + used % (70.5 rounds up like the dashboard) = ' + JSON.stringify(meters.map((m) => [m.label, m.used])));
+says(meters[0] && meters[0].projected === 88 && meters.slice(1).every((m) => !('projected' in m)),
+  'claude meters: projLeftAtReset 12.4 -> projected 88% used at reset; absent/null -> no projected');
+const cx = (((a.providers || [])[1] || {}).lines || []).filter((l) => l.type === 'progress');
+says(eq(cx.map((m) => [m.label, m.used]), [['Weekly', 11]]), 'codex meters: stale window dropped, weekly 11% used');
+
+const b = read('ui-b.json');
+says(eq((b.sources || []).map((s) => [s.id, s.label, s.color]), [['B', 'B', S[0]], ['a', 'a', S[1]], ['b', 'b', S[2]]]),
+  'older server (no allSources): period sources, ordinal-sorted like a JS sort(), raw labels');
+says(eq(b.thresholds, [80, 95]), 'older server (no / malformed alertThresholds): default thresholds [80,95]');
+const c = read('ui-c.json');
+says(eq(c, { providers: [], errors: [] }), 'unparseable summary: the empty wrapper, no throw');
+process.exit(bad ? 1 : 0);
+JS
+  out=$(ui tones '[80,95]' 0 79 79.99 80 94.9 95 100 | tr '\n' ' ')
+  [ "$out" = "TH=80,95 0=0 79=0 79.99=0 80=1 94.9=1 95=2 100=2 " ] \
+    && pass "tones: plain < 80 <= warn < 95 <= crit (lib.js meterTone)" || fail "tones [80,95]: $out"
+  out=$(ui tones '[90]' 89 90 100 | tr '\n' ' ')
+  [ "$out" = "TH=90 89=0 90=1 100=1 " ] && pass "tones: a single threshold only ever warns" || fail "tones [90]: $out"
+  out=$(ui tones '[95,"x",null,0,101,60]' 59 60 95 | tr '\n' ' ')
+  [ "$out" = "TH=60,95 59=0 60=1 95=2 " ] && pass "tones: thresholds filtered to (0,100] and sorted" || fail "tones mixed: $out"
+  out=$(ui tones '{}' 80 95 | tr '\n' ' ')
+  [ "$out" = "TH=80,95 80=1 95=2 " ] && pass "tones: no thresholds -> 80/95" || fail "tones {}: $out"
+  out="$(ui used 70.5 100) $(ui used 0.5 1) $(ui used 150 100) $(ui used -5 100) $(ui used 5 0)"
+  [ "$out" = "71 50 100 0 0" ] && pass "used %: rounds halves up, clamps 0..100, limit 0 -> 0" || fail "used %: $out"
+fi
 
 [ $FAILS -eq 0 ] && echo "packaging: all passed" || echo "packaging: $FAILS failure(s)"
 exit $((FAILS > 0))
