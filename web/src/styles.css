@@ -216,7 +216,15 @@ code, .code {
 .wm .wm-g { fill: var(--accent); }
 .brand-name { margin: 0; line-height: 0; }
 .brand-name .wm { margin: 1px 0 3px; }
-.brand-sub { font-size: var(--fs-2xs); line-height: var(--lh-2xs); color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Sub-line parts WRAP, never ellipsize: the version (v2.0.0-rc.1) must stay whole
+   at every width. Each part carries a "·" in the 12 px gap to its left; the
+   list is pulled 12 px left inside an overflow-clipped box, so the dot of a
+   part that starts a line falls outside it and is clipped. A single part wider
+   than the box (an absurd version string) breaks inside itself, still whole. */
+.brand-sub { font-size: var(--fs-2xs); line-height: var(--lh-2xs); color: var(--text-3); overflow: hidden; min-width: 0; }
+.brand-sub .bs { display: flex; flex-wrap: wrap; margin-left: -12px; }
+.brand-sub .bs-it { position: relative; margin-left: 12px; min-width: 0; overflow-wrap: anywhere; }
+.brand-sub .bs-it::before { content: '·'; content: '·' / ''; position: absolute; left: -12px; width: 12px; text-align: center; }
 /* whole-page state glyph (stopped / unreachable); the loading state shows the mark */
 .state-ic { width: 40px; height: 40px; border-radius: var(--r-md); display: grid; place-items: center; flex: none; background: var(--panel-2); border: 1px solid var(--line-2); color: var(--text-2); }
 .state-ic.warn { background: var(--warn-soft); border-color: var(--warn-line); color: var(--warn); }

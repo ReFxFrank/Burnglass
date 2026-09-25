@@ -12,7 +12,7 @@
 // =============================================================================
 import { useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import {
-  BRAND, FORMER_BRAND, exeName, homeNoticeDismissed, dismissHomeNotice, useSummary, makeColorMap, srcLabel, money, num, clockTime, hm, ago, prettyModel, effortLabel,
+  BRAND, FORMER_BRAND, exeName, launchInfo, homeNoticeDismissed, dismissHomeNotice, noticeDismissed, dismissNotice, useSummary, makeColorMap, srcLabel, money, num, clockTime, hm, ago, prettyModel, effortLabel,
   alertThresholds, readGraphicsMode, effectiveLite, applyGraphicsMode, useTheme, motionReduced,
   readSourceFilter, writeSourceFilter, readPeriod, writePeriod,
   fireAlertNotifications, requestAlertPermission, notifyPermission,
@@ -20,6 +20,7 @@ import {
 import { Icon, BrandMark, Wordmark } from './icons.jsx';
 import { Btn, IconBtn, Pill, Sheet, StopButton, WarnBar, Empty, Swatch, Est, Seg, Panel, Section, cx } from './ui.jsx';
 import { MiniOverview } from './mini.jsx';
+import { integrationIssues, INTEGRATION_NAME, INTEGRATION_SETUP_FLAG } from './notices.js';
 
 import Alerts from './sections/Alerts.jsx';
 import Kpis from './sections/Kpis.jsx';
@@ -178,10 +179,20 @@ export default function App() {
   }, [data, jumped, miniView]);
 
   if (stopped) {
+    const run = launchInfo(data);
     return (
       <PageState icon="power" title={`${BRAND} is stopped`}>
-        This page can’t restart a stopped server. To start {BRAND} again, double-click <code>{exeName(data)}</code> or
-        your “{BRAND}” Desktop / Start Menu shortcut (create the shortcuts once with <code>{exeName(data)} --install-shortcuts</code>).
+        {run.shortcuts ? (
+          <>
+            This page can’t restart a stopped server. To start {BRAND} again, double-click <code>{run.file}</code> or
+            your “{BRAND}” Desktop / Start Menu shortcut (create the shortcuts once with <code>{run.cmd} --install-shortcuts</code>).
+          </>
+        ) : (
+          <>
+            This page can’t restart a stopped server. To start {BRAND} again, run <code>{run.cmd}</code>{' '}
+            {run.source ? <>in the {BRAND} folder</> : <>from the folder it is in</>}.
+          </>
+        )}
       </PageState>
     );
   }
@@ -237,7 +248,9 @@ export default function App() {
             {error && (
               <WarnBar>
                 Server unreachable ({error}), showing data from {clockTime(data.generatedAt)}. Retrying every 10 s — if you
-                stopped it, double-click <code>{exeName(data)}</code> to start it again.
+                stopped it, {launchInfo(data).shortcuts
+                  ? <>double-click <code>{exeName(data)}</code></>
+                  : <>run <code>{launchInfo(data).cmd}</code></>} to start it again.
               </WarnBar>
             )}
             {data.selfCheck && !data.selfCheck.ok && (
@@ -343,10 +356,16 @@ export default function App() {
 // running on the old folder and retries next start) shows until it heals.
 // payload.integrations: Claude Code's status line / effort hook pointing at an
 // exe that no longer exists — Burnglass never edits ~/.claude, so it says so.
+// ONE bar per missing file (the documented effort hook is registered under two
+// hook events, so the payload repeats it; notices.integrationIssues groups
+// them), each dismissible: its signature is stored under
+// pulse-dismissed-notices, so a dismissed issue stays hidden on reload while a
+// different one still shows. The System panel keeps listing it "(missing)".
 const HOME_NOTICE_MS = 14 * 86400000;
 function HomeNotices({ data }) {
   const mig = data.homeMigration;
   const [hidden, setHidden] = useState(null); // the `at` dismissed this session
+  const [hiddenSigs, setHiddenSigs] = useState(() => new Set()); // issues dismissed this session
   const bars = [];
   if (mig && mig.status === 'failed') {
     bars.push(
@@ -368,19 +387,48 @@ function HomeNotices({ data }) {
       </WarnBar>,
     );
   }
-  for (const i of data.integrations || []) {
-    if (!i || i.exists !== false) continue;
-    const what = i.kind === 'statusline' ? 'status line' : 'effort hook';
-    const flag = i.kind === 'statusline' ? '--statusline-setup' : '--effort-setup';
+  // `node server.js` from source, the exe's own name (./name on Linux/macOS)
+  // when packaged — the same command the server's log line prints.
+  const cmd = launchInfo(data).cmd;
+  for (const issue of integrationIssues(data.integrations)) {
+    if (hiddenSigs.has(issue.sig) || noticeDismissed(issue.sig)) continue;
+    const kinds = issue.kinds.filter((k) => INTEGRATION_SETUP_FLAG[k]);
+    if (!kinds.length) continue;
+    const what = kinds.map((k) => INTEGRATION_NAME[k]).join(' and ');
+    const dismiss = () => {
+      dismissNotice(issue.sig);
+      setHiddenSigs((cur) => new Set(cur).add(issue.sig));
+    };
     bars.push(
-      <WarnBar key={i.kind + (i.event || '') + i.target}>
-        Claude Code’s {what} runs <code>{i.target}</code>, which no longer exists. Run{' '}
-        <code>{exeName(data)} {flag}</code> and paste the command it prints into Claude Code’s settings.json
+      <WarnBar
+        key={issue.sig}
+        action={<Btn size="sm" variant="ghost" onClick={dismiss} aria-label={`Dismiss the ${what} notice`}>Dismiss</Btn>}
+      >
+        Claude Code’s {what} {kinds.length > 1 ? 'run' : 'runs'} <code>{issue.target}</code>, which no longer exists. Run{' '}
+        {kinds.map((k, n) => (
+          // the flag never splits at its "--" (a line break lands on a space)
+          <span key={k}>{n ? ' and ' : null}<code>{cmd} <span className="nowrap">{INTEGRATION_SETUP_FLAG[k]}</span></code></span>
+        ))}{' '}
+        and paste the {kinds.length > 1 ? 'commands they print' : 'command it prints'} into Claude Code’s settings.json
         ({BRAND} never edits it for you).
       </WarnBar>,
     );
   }
   return bars.length ? <>{bars}</> : null;
+}
+
+// ---- brand sub-line (rail + mobile header) -------------------------------------------
+// "Every agent’s burn · v2.0.0" / "v2.0.0 · updated 12:02". The parts WRAP
+// instead of being cut: a pre-release like v2.0.0-rc.1 does not fit the
+// 240 px rail beside the tagline, and an ellipsis there removed exactly the
+// part that tells one build from another. The "·" separators are drawn
+// in CSS and clipped when a part starts a line (styles.css .bs).
+function BrandSub({ version, children }) {
+  return (
+    <div className="brand-sub" title={version ? `${BRAND} v${version}` : undefined}>
+      <span className="bs">{children}</span>
+    </div>
+  );
 }
 
 // ---- rail ----------------------------------------------------------------------------
@@ -394,7 +442,10 @@ function Rail({ data, periods, period, onPeriod, srcFilter, onFilter, colorMap, 
           <BrandMark size={30} />
           <div className="mh-brand">
             <div className="brand-name"><Wordmark label={BRAND} /></div>
-            <div className="brand-sub">Every agent’s burn · <span className="mono">v{data.version}</span></div>
+            <BrandSub version={data.version}>
+              <span className="bs-it">Every agent’s burn</span>
+              <span className="bs-it mono">v{data.version}</span>
+            </BrandSub>
           </div>
         </div>
 
@@ -667,7 +718,10 @@ function MobileHeader({ data, error, period, srcSummary, multiSource, onOpen }) 
           <BrandMark size={30} />
           <div className="mh-brand">
             <h1 className="brand-name"><Wordmark label={BRAND} /></h1>
-            <div className="brand-sub">v{data.version} · updated {hm(data.generatedAt)}</div>
+            <BrandSub version={data.version}>
+              <span className="bs-it">v{data.version}</span>
+              <span className="bs-it">updated {hm(data.generatedAt)}</span>
+            </BrandSub>
           </div>
           <span className="sp" />
           {upd.status === 'available' && (

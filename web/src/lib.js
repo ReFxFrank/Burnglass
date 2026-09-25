@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { addDismissed, isDismissed } from './notices.js';
 
 // =============================================================================
 // lib.js — shared, framework-light helpers for the dashboard (formatters,
@@ -14,20 +15,15 @@ export const BRAND = 'Burnglass';
 // The pre-2.0 name — ONLY for copy about the rename itself (the one-time
 // "settings were copied" notice). Everything else says BRAND.
 export const FORMER_BRAND = 'Pulse';
-// The executable users double-click to start the server again (stopped page,
-// System panel copy). A DEFAULT only: prefer payload.exeName, the running
-// exe's real filename — a self-updated v1 install is still called pulse.exe
-// (null when running from source).
-export const EXE_NAME = 'burnglass.exe';
+// The exe users double-click to start the server again (EXE_NAME, a DEFAULT
+// only), the running exe's own file name (exeName(data) — a self-updated v1
+// install is still pulse.exe) and the COMMAND that runs this server
+// (launchInfo(data).cmd: `node server.js` from source, `./burnglass-linux`
+// on Linux, `burnglass.exe` on Windows) live in the pure notices.js, so a
+// Node test can import them without React.
+export { EXE_NAME, exeName, launchInfo } from './notices.js';
 // The Windows taskbar-strip companion's executable (System panel help copy).
 export const STRIP_EXE_NAME = 'burnglass-strip.exe';
-
-// The exe name to show in help copy: the running exe's own filename when the
-// server reports one (a self-updated v1 install is still pulse.exe), else the
-// default. `data` may be null (whole-page states before the first payload).
-export function exeName(data) {
-  return (data && typeof data.exeName === 'string' && data.exeName) || EXE_NAME;
-}
 // A path inside the server's REAL home folder (payload.home: ~/.burnglass, a
 // pinned BURNGLASS_HOME/PULSE_HOME, or ~/.pulse while a failed move is retried).
 // Never hard-code ~/.pulse or ~/.burnglass in copy — use this. Joins with the
@@ -416,6 +412,14 @@ export function writePeriod(key) { if (key) lsSet(PERIOD_KEY, key); }
 const HOME_NOTICE_KEY = 'pulse-home-notice';
 export function homeNoticeDismissed(at) { return lsGet(HOME_NOTICE_KEY) === String(at); }
 export function dismissHomeNotice(at) { lsSet(HOME_NOTICE_KEY, String(at)); }
+
+// Per-issue dismissals of page-level fix-it notices (a Claude Code status line /
+// effort hook running a file that no longer exists): JSON {signature: ms},
+// newest 24 kept (notices.js). A dismissed issue stays hidden on reload; a
+// DIFFERENT issue (another file, or another integration running it) shows.
+const NOTICE_DISMISS_KEY = 'pulse-dismissed-notices';
+export function noticeDismissed(sig) { return isDismissed(lsGet(NOTICE_DISMISS_KEY), sig); }
+export function dismissNotice(sig) { lsSet(NOTICE_DISMISS_KEY, addDismissed(lsGet(NOTICE_DISMISS_KEY), sig)); }
 
 // ---- theme: 'system' | 'dark' | 'light' → <html data-theme> ---------------------------
 // 'system' removes the attribute so prefers-color-scheme decides (dark is the

@@ -27,7 +27,8 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { Section, Panel, Btn, Badge, Switch, Seg, Field, Input, InfoTip, StopButton, cx } from '../ui.jsx';
 import { Icon } from '../icons.jsx';
-import { BRAND, FORMER_BRAND, STRIP_EXE_NAME, exeName, homePath, BP, ago, clockTime, dur, hm, postJson, useLogs, useMedia } from '../lib.js';
+import { BRAND, FORMER_BRAND, STRIP_EXE_NAME, exeName, launchInfo, homePath, BP, ago, clockTime, dur, hm, postJson, useLogs, useMedia } from '../lib.js';
+import { integrationRows } from '../notices.js';
 import { MeshyKeyForm } from './Meshy.jsx';
 import './System.css';
 
@@ -126,7 +127,10 @@ function ServerColumn({ data, gfx, theme, onStopped }) {
   }
 
   const uptime = data.generatedAt && data.serverStartTs ? dur(data.generatedAt - data.serverStartTs) : '—';
-  const hooks = (Array.isArray(data.integrations) ? data.integrations : []).filter((h) => h && h.target);
+  // One row per integration + file: the documented effort hook is registered
+  // under two hook events, which the payload lists separately.
+  const hooks = integrationRows(data.integrations);
+  const run = launchInfo(data);
   const hist = data.history || {};
   const gfxOptions = [
     { value: 'auto', label: `Auto · ${gfx && gfx.lite ? 'lite' : 'rich'}`, title: 'Picks Lite when the browser renders in software' },
@@ -176,7 +180,11 @@ function ServerColumn({ data, gfx, theme, onStopped }) {
             <dt>Claude Code</dt>
             <dd className="sys-hooks">
               {hooks.map((h) => (
-                <span key={h.kind + (h.event || '') + h.target} className={cx('sys-hook', h.exists === false && 'sys-err')} title={h.target || undefined}>
+                <span
+                  key={h.kind + '\u0000' + h.target}
+                  className={cx('sys-hook', h.exists === false && 'sys-err')}
+                  title={h.events.length ? `${h.target}\nHook events: ${h.events.join(', ')}` : h.target}
+                >
                   {h.kind === 'statusline' ? 'status line' : 'effort hook'}
                   {' → '}
                   <span className="mono">{baseName(h.target)}</span>
@@ -214,10 +222,17 @@ function ServerColumn({ data, gfx, theme, onStopped }) {
         <StopButton onStopped={onStopped} disabled={busy === 'install'} />
       </div>
       <p className={cx('sys-note', note && note.tone)} role="status" aria-live="polite">{note ? note.text : ''}</p>
-      <p className="hint sys-restart">
-        To start again, run <code className="nowrap">{exeName(data)}</code>. Its <code className="nowrap">--install-shortcuts</code> flag
-        adds Desktop “{BRAND}” and “{BRAND} - Stop” shortcuts.
-      </p>
+      {run.shortcuts ? (
+        <p className="hint sys-restart">
+          To start again, run <code className="nowrap">{run.cmd}</code>. Its <code className="nowrap">--install-shortcuts</code> flag
+          adds Desktop “{BRAND}” and “{BRAND} - Stop” shortcuts.
+        </p>
+      ) : (
+        <p className="hint sys-restart">
+          To start again, run <code className="nowrap">{run.cmd}</code>
+          {run.source ? <> in the {BRAND} folder</> : <> from the folder it is in</>}.
+        </p>
+      )}
 
       <div className="appearance">
         <h3>Appearance</h3>
@@ -438,7 +453,7 @@ function Integrations({ data, notify, thresholds, ovr }) {
               : `Startup entry removed. ${BRAND} no longer starts with Windows.`), 'Could not change the startup setting: ')}
           >
             Adds a per-user <code className="nowrap" title="HKCU\Software\Microsoft\Windows\CurrentVersion\Run">HKCU\…\Run</code> entry
-            that launches <code className="nowrap">{exeName(data)} --no-open</code> at login. No admin rights needed; remove it here or in Task Manager.
+            that launches <code className="nowrap">{launchInfo(data).cmd} --no-open</code> at login. No admin rights needed; remove it here or in Task Manager.
           </ToggleRow>
         ) : null}
 
@@ -468,7 +483,7 @@ function Integrations({ data, notify, thresholds, ovr }) {
               if (!n) return 'Strip off. It exits within a minute.';
               return r.strip && r.strip.path
                 ? `${BRAND} Strip starting on your taskbar. Drag it anywhere; click it for the popover.`
-                : { text: `On, but ${STRIP_EXE_NAME} was not found. Put it next to ${exeName(data)} (or set "stripPath" in ${homePath(data, 'config.json')}).`, tone: 'warn' };
+                : { text: `On, but ${STRIP_EXE_NAME} was not found. Put it ${launchInfo(data).source ? 'in ' + homePath(data, 'bin') : 'next to ' + exeName(data)} (or set "stripPath" in ${homePath(data, 'config.json')}).`, tone: 'warn' };
             }, 'Strip toggle failed: ')}
           >
             Taskbar strip companion with a popover dashboard.

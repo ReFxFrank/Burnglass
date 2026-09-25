@@ -91,7 +91,8 @@ can see and breaks that handoff:
   are parsed by old trays/strips — additive changes only).
 - Mutex names `PulseTray<port>` and `PulseStrip_SingleInstance`.
 - localStorage keys `pulse-graphics`, `pulse-alerted`, `pulse-source-filter`,
-  `pulse-period`, `pulse-theme` (+ the new `pulse-home-notice`, same prefix).
+  `pulse-period`, `pulse-theme` (+ the new `pulse-home-notice` and
+  `pulse-dismissed-notices`, same prefix).
 - `PULSE_*` env vars (permanent aliases; `BURNGLASS_*` wins, an empty
   `BURNGLASS_X=` never masks a real `PULSE_X`); the `PULSE_VERSION` constant
   name (make-exe's drift check greps it; `BURNGLASS_VERSION` also accepted).
@@ -149,7 +150,10 @@ can see and breaks that handoff:
   checkboxes, all-time, Mini view, Stop), top bar, `<1024` mobile header +
   bottom `Sheet`s, page-level `WarnBar`s (unreachable, self-check,
   `HomeNotices` = the one-time migration notice / failed-migration warning /
-  missing status-line or hook exe), the whole-page states (loading,
+  missing status-line or hook exe — ONE bar per missing file via
+  `integrationIssues` (the documented effort hook sits under TWO hook
+  events, so the payload repeats it), each dismissible per issue signature
+  stored in `pulse-dismissed-notices`), the whole-page states (loading,
   unreachable, stopped, no data) and the `#mini` route. Sections receive the
   same `SectionProps` `{id, data, period, colorMap, srcFilter, thresholds,
   notify, gfx, theme, onStopped, onPeriod}`.
@@ -171,9 +175,18 @@ can see and breaks that handoff:
   `meterTone`, `exportHref`, `postJson` (adds `X-Pulse`), prefs, `useSummary`).
 - Brand in copy: `BRAND` only (never a literal product name; `FORMER_BRAND`
   exists solely for rename copy); paths via `homePath(data, sub)` (from
-  `payload.home` — NEVER a literal `~/.pulse`/`~/.burnglass`); exe names via
-  `exeName(data)` (`payload.exeName`, a self-updated install is still
-  `pulse.exe`) with `EXE_NAME` as the fallback.
+  `payload.home` — NEVER a literal `~/.pulse`/`~/.burnglass`); exe FILE
+  names via `exeName(data)` (`payload.exeName`, a self-updated install is
+  still `pulse.exe`) with `EXE_NAME` as the fallback; any COMMAND the user
+  should type via `launchInfo(data)` — `.cmd` is `node server.js` from
+  source (`packaged === false`, exeName null), `./burnglass-linux` for a
+  POSIX binary, the (quoted if needed) name for a Windows exe; double-click /
+  `--install-shortcuts` copy only when `.shortcuts` (packaged Windows).
+  These + `integrationIssues`/`integrationRows` live in the React-free
+  `notices.js` (re-exported by lib.js; unit-tested by
+  `test/web-notices.test.sh`). The brand sub-line (`BrandSub`) WRAPS its
+  parts instead of ellipsizing, so a pre-release version (`v2.0.0-rc.1`)
+  is never cut in the 240 px rail.
 - Colour only from tokens (no hex in JSX/section CSS); source colours
   `--s1…6` for SOURCES only; `--warn`/`--crit` for status only; the ember
   orange never becomes a UI token (it lives only inside the mark assets).
@@ -330,6 +343,10 @@ only: `BURNGLASS_EXE_ICON=0` (make-exe skips the Windows icon stamping).
   server logs (there's an assertion for that).
 - UI checks when needed: Playwright with the preinstalled Chromium
   (`executablePath: '/opt/pw-browsers/chromium'`, `--no-sandbox`).
+  `test/web-notices.test.sh` part 2 is the committed one: it drives the
+  COMMITTED `web/dist` (so run `npm run build` after changing web/src) and
+  SKIPs cleanly where Playwright/Chromium are missing; `WEB_TEST_SERVER`
+  points it at another server copy (e.g. a scratch build).
 - `test/migration.test.sh` is the only suite WITHOUT a `*_HOME` pin (fake
   `$HOME`, implicit `~/.pulse` → `~/.burnglass` path); it owns ports
   5831–5845 and fails fast if one is busy. Any change to `appHome`,
