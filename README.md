@@ -72,8 +72,7 @@ small executable, needs no configuration, and your usage data never leaves your 
 - 🎮 **Discord Rich Presence** (opt-in): your usage, model · effort · live sessions, and
   animated art that follows what Claude is doing.
 - 🪟 **Windows extras**: a no-admin installer, start with Windows, a tray icon whose status
-  dot follows your 5-hour limit, the **Burnglass Strip** taskbar companion, or OpenUsage
-  launched alongside Burnglass.
+  dot follows your 5-hour limit, and the **Burnglass Strip** taskbar companion.
 - 🧊 **Meshy 3D credits** (opt-in): balance and credit usage, kept in credits and never
   mixed into dollars.
 
@@ -271,7 +270,7 @@ on the new version. A source checkout links to the release instead.
 
 It's also where every opt-in switch lives: account meters, Discord presence (with its
 image fields), Meshy credits, desktop alerts, and on Windows Start with Windows, the tray
-icon, Burnglass Strip and OpenUsage launch.
+icon and Burnglass Strip.
 
 <div align="center">
   <img src=".github/assets/server.png" alt="System section: server facts, updates, integrations, Discord images and the log" width="920" />
@@ -565,15 +564,18 @@ script.
   the state, so it reads without color, and crisp icons are drawn for 16 to 32 px (100% to
   200% scaling). The tooltip shows today's spend and your 5h / weekly %. Left-click opens the mini overview as an app window. Right-click offers dashboard,
   mini and Stop. Windows hides new tray icons behind the `^` chevron, so drag Burnglass out
-  once to pin it. If the icon goes missing, the System section's log says why.
+  once to pin it. If the icon can't start, its row in the System section says why (the exit
+  code, PowerShell's own message such as a Group Policy or antivirus block, and a hint) and
+  offers Retry. The tray's own output is in `~/.burnglass/tray-error.log`.
 - **Burnglass Strip** (opt-in): your usage right on the taskbar. It's a slim transparent strip
   with each provider's **% used** (rotating with today's spend), turning amber at your first
   alert threshold and red at the last (80% / 95% by default). Clicking it opens a
   **popover** in the dashboard's look: "% used" meter bars with threshold ticks, the
   projection at reset and reset countdowns, a spend donut by source in the dashboard's
   source colors and labels (custom labels included), spend rows and daily trend bars with
-  today highlighted. It's fed by your local Burnglass server, so its values match the
-  dashboard. A one-click update of Burnglass updates the strip too (see below).
+  today highlighted. It opens like a Windows 11 flyout, rising into place with its data
+  already filled in (no motion when Windows' "Animation effects" are off). It's fed by your
+  local Burnglass server, so its values match the dashboard. A one-click update of Burnglass updates the strip too (see below).
   Get `burnglass-strip.exe` from the release (or tick it in the installer), put it next to
   `burnglass.exe` (or in `~/.burnglass/bin`; an older `pulse-strip.exe` there or in
   `~/.pulse/bin` is found too), and flip **Burnglass Strip** on in the System section
@@ -587,11 +589,6 @@ script.
   calendar days, while the dashboard uses a rolling 168 hours. It's ported from
   [openusage-windows](https://github.com/CheesyPoofs346/openusage-windows) (MIT).
   Credit where due: their strip design is excellent.
-- **OpenUsage companion** (opt-in): prefer the real
-  [OpenUsage for Windows](https://github.com/CheesyPoofs346/openusage-windows)? Burnglass can
-  start it together with the server. Flip the System-section toggle or set
-  `{"openusage": true}` (plus `"openusagePath"` if it lives somewhere unusual). Burnglass only
-  *starts* the app when it isn't already running. It never installs, updates or closes it.
 
 ## 🧊 Meshy 3D credits (opt-in)
 
@@ -765,7 +762,6 @@ Everything is optional. Most settings have a dashboard control, so you rarely ne
 | `meshy` · `meshyApiKey` | off | Meshy credits and your API key (set from the dashboard). |
 | `tray` | off | Windows tray icon. |
 | `strip` · `stripPath` | off | Launch Burnglass Strip · its exe location. |
-| `openusage` · `openusagePath` | off | Launch OpenUsage · its exe location. |
 
 ## 🌐 API
 
@@ -786,11 +782,11 @@ Everything is optional. Most settings have a dashboard control, so you rarely ne
 | `/api/meshy/enable` · `/api/meshy/disable` | POST | Toggle Meshy credits; enable takes an optional JSON body `{ "key": "…" }` (empty clears the key). |
 | `/api/budget/set?amount&period` | POST | Set or clear the spend budget (`amount<=0` clears it). |
 | `/api/plan/set?amount&label` | POST | Set or clear the plan cost and label (`amount<=0` clears both). |
-| `/api/tray/enable` · `/api/tray/disable` | POST | Toggle the tray icon (Windows). Likewise `/api/startup/…`, `/api/strip/…` and `/api/openusage/…` for Start with Windows, Burnglass Strip and the OpenUsage companion. |
+| `/api/tray/enable` · `/api/tray/disable` | POST | Toggle the tray icon (Windows). Likewise `/api/startup/…` and `/api/strip/…` for Start with Windows and Burnglass Strip. |
 
 Every POST route requires `X-Pulse: 1` (the header keeps its pre-2.0 name so older
 companions keep working; `X-Burnglass: 1` is accepted too), a loopback client, and a
-loopback `Host` header. The payload also reports `brand`, `home` (the data folder in use),
+loopback `Host` header. An `/api/…` path that doesn't exist answers a JSON 404. The payload also reports `brand`, `home` (the data folder in use),
 `exeName`, `homeMigration` and `integrations` (the Claude Code status line and effort hook
 check).
 

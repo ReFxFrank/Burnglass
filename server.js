@@ -7117,6 +7117,7 @@ function startTray(port) {
     if (out !== null) { try { fs.closeSync(out); } catch (_) {} }
   }
 }
+
 // ---- WINDOWS BUILTINS (tasklist / taskkill / reg / powershell) ------------
 // A Windows builtin by ABSOLUTE path under %SystemRoot%\System32. A bare
 // name is looked up in the CURRENT folder first (libuv's search_path, like
@@ -7148,6 +7149,7 @@ function imagesRunning(names, cb) {
     cb(false);
   }
 }
+
 // ---- PULSE STRIP (opt-in, Windows) ---------------------------------------
 // Pulse's own taskbar strip + popover: pulse-strip.exe, a compiled companion
 // (strip/ in the repo — ported from openusage-windows under MIT, fed by this

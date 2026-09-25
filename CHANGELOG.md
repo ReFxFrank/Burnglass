@@ -49,7 +49,7 @@ know when you update from Pulse 1.x:
   one click. The GitHub repository moves to `ReFxFrank/Burnglass`; old links
   redirect.
 - **Kept on purpose:** port 4747, every CLI flag, every `/api` route and
-  response shape, the `X-Pulse: 1` request header (`X-Burnglass: 1` is also
+  response shape (apart from the retired OpenUsage toggle, see below), the `X-Pulse: 1` request header (`X-Burnglass: 1` is also
   accepted), your browser preferences, the tray and strip lock names, and the
   Discord client id. The log file is now `burnglass.log`.
 
@@ -121,6 +121,31 @@ instead of the old fixed 60 / 85.
   `~/.pulse/bin` is not touched: a current copy goes into `~/.burnglass/bin`
   and is used from then on. Nothing happens with `--no-update-check` /
   `"updateCheck": false` or when `stripPath` points at your own strip.
+- **The popover opens like a Windows 11 flyout.** It appears at full size
+  with its data already in place and rises 12 px into position while its
+  content fades in from the top. It no longer grows out of a corner with
+  text cut off at the edge. On Windows 11 the corners are rounded by Windows,
+  with its own border and shadow. Closing is still instant, and with
+  Windows' "Animation effects" turned off the popover simply appears.
+
+**The tray icon says why it isn't there.** When the icon can't start,
+System > Integrations now shows why: the exit code, PowerShell's own message
+(for example a Group Policy or antivirus block), a hint for the likely cause,
+where the logs are, and a **Retry** button. The row reads *Icon running*,
+*Starting…* or *Not running* instead of just "On". The tray's output goes to
+`~/.burnglass/tray-error.log`, and the server log gets one line saying how it
+ended. The tray's relaunch after an update now starts PowerShell by full path,
+and taking over the icon from a tray that crashed no longer depends on an
+ignored error.
+
+**Removed: the OpenUsage launcher.** Burnglass Strip replaces it. The System
+toggle, the `openusage` / `openusagePath` config keys and POST
+`/api/openusage/…` are gone. If you had `"openusage": true`,
+OpenUsageTray.exe is no longer started with Burnglass. A copy that is already
+running is left alone, and the old keys stay in your `config.json`, ignored.
+An `/api/…` address Burnglass doesn't know now answers a JSON 404 instead of
+the dashboard page. The strip is still credited as a port of
+openusage-windows (MIT).
 
 **Fixes and smaller changes**
 
