@@ -983,12 +983,17 @@ function claudeConvStep(rec, open) {
     if (Array.isArray(content)) {
       let results = 0;
       for (const b of content) if (b && b.type === 'tool_result') { open.delete(b.tool_use_id); results++; }
-      if (results) return 'tool_result';
+      // Parallel / sequential calls resolve one line at a time: while others
+      // are still open, a tool is still running.
+      if (results) return open.size ? 'tool_use' : 'tool_result';
     }
     const txt = userText(rec).trim();
     if (!txt) return null;
     if (/^\[Request interrupted by user/.test(txt)) { open.clear(); return 'interrupt'; }
     if (parseLocalCommand(txt)) return 'command';
+    // `!` shell mode and `#` memory lines are the user's own actions, not a
+    // prompt the model is answering.
+    if (/^<(?:bash-input|bash-stdout|bash-stderr|user-memory-input)>/.test(txt)) return 'command';
     open.clear(); // a new prompt: anything still "open" was abandoned
     return 'prompt';
   }
@@ -1539,7 +1544,7 @@ function codexConvStep(type, p, open) {
   }
   if (t === 'function_call_output' || t === 'custom_tool_call_output' || t === 'local_shell_call_output') {
     if (typeof p.call_id === 'string') open.delete(p.call_id);
-    return 'tool_result';
+    return open.size ? 'tool_use' : 'tool_result'; // other calls still running
   }
   return null;
 }
@@ -4977,6 +4982,26 @@ function pidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try { process.kill(pid, 0); return true; } catch (e) { return !!e && e.code === 'EPERM'; }
 }
+// A crash, kill or reboot leaves <pid>.json behind, and the OS later reuses
+// the pid — so "that pid is alive" is not enough. A record is only trusted
+// when its file was written during THIS boot and (on Linux, where /proc gives
+// the start time for free) after its process started; computeAgentState
+// additionally caps how old a busy/waiting record may be.
+function bootTimeMs() { return Date.now() - os.uptime() * 1000; }
+// Linux: a process's real start time = boot (btime in /proc/stat) + field 22
+// of /proc/<pid>/stat in clock ticks (USER_HZ, 100). NOT the /proc/<pid>
+// directory's ctime — procfs stamps that when the inode is first looked up.
+let procBtime = null;
+function pidStartedAfter(pid, ms) {
+  if (process.platform !== 'linux') return false;
+  try {
+    if (procBtime === null) procBtime = Number((fs.readFileSync('/proc/stat', 'utf8').match(/^btime (\d+)/m) || [])[1]) || 0;
+    if (!procBtime) return false;
+    const st = fs.readFileSync('/proc/' + pid + '/stat', 'utf8');
+    const ticks = Number(st.slice(st.lastIndexOf(')') + 2).split(' ')[19]); // comm may contain spaces/parens
+    return Number.isFinite(ticks) && (procBtime + ticks / 100) * 1000 > ms + 2000;
+  } catch (_) { return false; }
+}
 let claudeRegistryMemo = { at: 0, list: [] };
 function claudeLiveRegistry(now) {
   if (now - claudeRegistryMemo.at < liveStateMemoMs()) return claudeRegistryMemo.list;
@@ -4984,14 +5009,21 @@ function claudeLiveRegistry(now) {
   const dir = path.join(claudeDir(), 'sessions');
   let names = [];
   try { names = fs.readdirSync(dir); } catch (_) {}
-  for (const n of names.slice(0, 256)) {
-    if (!/^\d{1,10}\.json$/.test(n)) continue;
-    let j = null;
-    try { j = JSON.parse(fs.readFileSync(path.join(dir, n), 'utf8')); } catch (_) { continue; }
+  // Filter by name and by the pid in the NAME (Claude Code names the file
+  // after its own pid) BEFORE capping: the directory also holds a
+  // <pid>.<hash>.key peer-token file per session (never read) and leftovers.
+  const live = names.filter((n) => /^\d{1,10}\.json$/.test(n) && pidAlive(parseInt(n, 10))).slice(0, 256);
+  const boot = bootTimeMs() - 60 * 1000;
+  for (const n of live) {
+    const f = path.join(dir, n);
+    let st, j = null;
+    try { st = fs.statSync(f); } catch (_) { continue; }
+    if (!st.isFile() || st.size > 64 * 1024 || st.mtimeMs < boot) continue; // written before this boot → leftover
+    const pid = parseInt(n, 10);
+    if (pidStartedAfter(pid, st.mtimeMs)) continue; // pid reused by a newer process
+    try { j = JSON.parse(fs.readFileSync(f, 'utf8')); } catch (_) { continue; }
     if (!j || typeof j !== 'object' || typeof j.status !== 'string') continue;
-    const pid = Number.isInteger(j.pid) ? j.pid : parseInt(n, 10);
-    if (!pidAlive(pid)) continue; // a crash leaves the file behind
-    list.push({ sessionId: typeof j.sessionId === 'string' ? j.sessionId : '', status: j.status });
+    list.push({ sessionId: typeof j.sessionId === 'string' ? j.sessionId : '', status: j.status, writtenAt: st.mtimeMs });
   }
   claudeRegistryMemo = { at: now, list };
   return list;
@@ -4999,11 +5031,18 @@ function claudeLiveRegistry(now) {
 
 // One session's state from its transcript alone (null = not live).
 function convState(c, now) {
-  if (!c || !c.kind || now - c.ts > LIVE_STATE_MAX_AGE_MS) return null;
+  if (!c) return null;
+  const sideLive = !!c.sideTs && now - c.sideTs <= SIDE_ACTIVE_MS;
+  // A long Agent/Task run: the main thread is quiet but its subagents write.
+  if (!c.kind || now - c.ts > LIVE_STATE_MAX_AGE_MS) return sideLive ? 'working' : null;
   if (c.kind === 'tool_use' && c.open.length) return c.open.some((n) => WAITING_TOOLS.has(n)) ? 'waiting' : 'working';
-  if (c.kind === 'prompt' || c.kind === 'tool_result' || c.kind === 'tool_use') return 'thinking';
-  return c.sideTs && now - c.sideTs <= SIDE_ACTIVE_MS ? 'working' : 'idle';
+  if (c.kind === 'prompt' || c.kind === 'tool_result' || c.kind === 'tool_use') return sideLive ? 'working' : 'thinking';
+  return sideLive ? 'working' : 'idle';
 }
+// How long a registry record may go without any sign of life before it is
+// treated as a leftover (Windows/macOS have no cheap process start time).
+const REG_BUSY_MAX_MS = 6 * 60 * 60 * 1000;
+const REG_IDLE_MAX_MS = 24 * 60 * 60 * 1000;
 
 // → { provider, state, sessions, source } for the most urgent live session,
 // or null. Ranking: waiting > working > thinking > idle.
@@ -5011,32 +5050,44 @@ function computeAgentState(conv, now) {
   conv = conv || {};
   const states = [];
   const reg = claudeLiveRegistry(now);
+  let trusted = 0;
   for (const r of reg) {
     const c = conv[r.sessionId];
+    const sideLive = !!(c && c.sideTs) && now - c.sideTs <= SIDE_ACTIVE_MS;
+    const lastSign = Math.max(r.writtenAt, c ? c.ts : 0, c ? c.sideTs : 0);
     let state = null;
-    if (r.status === 'waiting') state = 'waiting';
-    else if (r.status === 'busy' || r.status === 'shell') {
-      const open = c && c.kind === 'tool_use' ? c.open : [];
-      state = open.some((n) => WAITING_TOOLS.has(n)) ? 'waiting'
-        : open.length || r.status === 'shell' ? 'working' : 'thinking';
+    if (r.status === 'waiting') {
+      if (now - r.writtenAt <= REG_IDLE_MAX_MS) state = 'waiting';
+    } else if (r.status === 'busy' || r.status === 'shell') {
+      if (now - lastSign <= REG_BUSY_MAX_MS) {
+        const open = c ? c.open : [];
+        state = open.some((n) => WAITING_TOOLS.has(n)) ? 'waiting'
+          : open.length || sideLive || r.status === 'shell' ? 'working' : 'thinking';
+      }
     } else if (r.status === 'idle') {
-      state = c && c.sideTs && now - c.sideTs <= SIDE_ACTIVE_MS ? 'working' : 'idle';
+      if (now - lastSign <= REG_IDLE_MAX_MS) state = sideLive ? 'working' : 'idle';
     }
-    if (state) states.push({ provider: 'claude', state, source: 'claude-status' });
+    if (state) { trusted++; states.push({ provider: 'claude', state, source: 'claude-status' }); }
   }
-  // The registry is authoritative for Claude whenever it lists any live
-  // session: a session missing from it has exited. Otherwise (older Claude
-  // Code, or a build that doesn't write it) fall back to the transcripts.
+  // The registry is authoritative for Claude whenever it lists a trusted
+  // live session: a session missing from it has exited. Otherwise (older
+  // Claude Code, a build that doesn't write it, only leftovers) fall back to
+  // the transcripts.
   for (const sid in conv) {
     const c = conv[sid];
-    if (c.provider === 'claude' && reg.length) continue;
+    if (c.provider === 'claude' && trusted) continue;
     const state = convState(c, now);
     if (state) states.push({ provider: c.provider, state, source: 'transcript' });
   }
   if (!states.length) return null;
   let best = states[0];
-  for (const s of states) if (LIVE_STATE_RANK[s.state] > LIVE_STATE_RANK[best.state]) best = s;
-  return { provider: best.provider, state: best.state, sessions: states.length, source: best.source };
+  const byProvider = {};
+  for (const s of states) {
+    if (LIVE_STATE_RANK[s.state] > LIVE_STATE_RANK[best.state]) best = s;
+    const cur = byProvider[s.provider];
+    if (!cur || LIVE_STATE_RANK[s.state] > LIVE_STATE_RANK[cur]) byProvider[s.provider] = s.state;
+  }
+  return { provider: best.provider, state: best.state, sessions: states.length, source: best.source, byProvider };
 }
 
 // Human model name for the presence line: claude-opus-5-5 → "Opus 5.5",
@@ -5131,17 +5182,28 @@ const DISCORD_STATE_TEXT = { working: 'working', thinking: 'thinking', waiting: 
 // show honestly, and every image swap makes viewers reload a GIF. Once one of
 // the two is on screen, the other must persist for the hold before taking
 // over. Waiting and idle switch at once: those you want to see immediately.
-let discordShownState = { state: null, since: 0 };
+// The same goes for the PROVIDER: with Claude and Codex both mid-turn the
+// top-ranked one alternates with Claude's tool/think phase, so while the
+// shown provider is still busy, another busy one doesn't take over inside
+// the hold. The hold only ever applies within one provider.
+let discordShownState = { prov: null, state: null, since: 0 };
 function discordStateHoldMs() {
   const v = Number(process.env.PULSE_DISCORD_STATE_HOLD_MS);
   return Number.isFinite(v) && v >= 0 ? v : 45 * 1000;
 }
-function heldAgentState(next, now) {
+// ag = computeAgentState() result or null → the { prov, state } to show.
+function heldAgentState(ag, now) {
   const cur = discordShownState;
   const busy = (st) => st === 'working' || st === 'thinking';
-  if (busy(next) && busy(cur.state) && next !== cur.state && now - cur.since < discordStateHoldMs()) return cur.state;
-  if (next !== cur.state) discordShownState = { state: next, since: now };
-  return next;
+  let prov = ag ? ag.provider : null;
+  let state = ag ? ag.state : null;
+  if (ag && cur.prov && busy(cur.state) && now - cur.since < discordStateHoldMs()) {
+    const curNow = ag.byProvider ? ag.byProvider[cur.prov] : null; // the shown provider, right now
+    if (prov !== cur.prov && busy(state) && busy(curNow)) { prov = cur.prov; state = curNow; }
+    if (prov === cur.prov && busy(state) && state !== cur.state) state = cur.state;
+  }
+  if (prov !== cur.prov || state !== cur.state) discordShownState = { prov, state, since: now };
+  return { prov, state };
 }
 
 function buildDiscordActivity() {
@@ -5167,9 +5229,10 @@ function buildDiscordActivity() {
   // A session that is working or waiting on you keeps its provider's art
   // even after 15 quiet minutes: a pending permission prompt writes nothing.
   const ag = cfg.discordShowState === false ? null : s.agentState;
+  const shown = heldAgentState(ag, Date.now());
   let prov = s.activeProvider;
-  if (ag && ag.state !== 'idle') prov = ag.provider;
-  const live = heldAgentState(ag && ag.provider === prov ? ag.state : null, Date.now());
+  if (shown.prov && shown.state && shown.state !== 'idle') prov = shown.prov;
+  const live = shown.prov === prov ? shown.state : null;
   const claudeArt = (live && DISCORD_STATE_SLOTS[live] && cfg[DISCORD_STATE_SLOTS[live]]) || cfg.discordClaudeImage || 'claude';
   const asset = prov === 'codex' ? (cfg.discordCodexImage || 'codex')
     : prov === 'claude' ? claudeArt

@@ -17,12 +17,20 @@ FX=$TMP/fx.js
 cat > "$FX" <<'EOF'
 // node fx.js <scenario> — rewrites the fixture files for one scenario.
 const fs = require('fs'), path = require('path');
-const [CL, CX, scen, livePid] = process.argv.slice(2);
+const [CL, CX, scen, livePid, otherPid] = process.argv.slice(2);
 const now = Date.now();
 const iso = (secAgo) => new Date(now - secAgo * 1000).toISOString();
 const w = (f, lines) => { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, lines.map((l) => JSON.stringify(l)).join('\n') + '\n'); };
 const rm = (f) => { try { fs.unlinkSync(f); } catch (_) {} };
-const reg = (pid, sid, status) => fs.writeFileSync(path.join(CL, 'sessions', pid + '.json'), JSON.stringify({ pid: Number(pid), sessionId: sid, status, statusUpdatedAt: now }));
+const reg = (pid, sid, status, ageSec) => {
+  const f = path.join(CL, 'sessions', pid + '.json');
+  fs.writeFileSync(f, JSON.stringify({ pid: Number(pid), sessionId: sid, status, statusUpdatedAt: now }));
+  if (ageSec) { const t = (now - ageSec * 1000) / 1000; fs.utimesSync(f, t, t); }
+};
+const twoTools = (s) => ({ type: 'assistant', timestamp: iso(s), sessionId: 's1', cwd: '/p', requestId: 'rp',
+  message: { id: 'mp', model: 'claude-opus-5-5', stop_reason: 'tool_use', usage,
+    content: [{ type: 'tool_use', id: 'tA', name: 'Bash', input: {} }, { type: 'tool_use', id: 'tB', name: 'Bash', input: {} }] } });
+const shellEcho = (s, tag, body) => ({ type: 'user', timestamp: iso(s), sessionId: 's1', cwd: '/p', message: { role: 'user', content: '<' + tag + '>' + body + '</' + tag + '>' } });
 const usage = { input_tokens: 100, output_tokens: 50 };
 const prompt = (s, sid = 's1') => ({ type: 'user', timestamp: iso(s), sessionId: sid, cwd: '/p', message: { role: 'user', content: 'do the thing' } });
 const toolUse = (s, id, name, sid = 's1') => ({ type: 'assistant', timestamp: iso(s), sessionId: sid, cwd: '/p', requestId: 'r' + id,
@@ -67,6 +75,39 @@ switch (scen) {
     rollout('child', { session_id: 'root-1', id: 'child-1', parent_thread_id: 'root-1',
       source: { subagent: { thread_spawn: { parent_thread_id: 'root-1', depth: 1 } } } }, [
       ev(5, 'response_item', { type: 'function_call', name: 'shell', arguments: '{}', call_id: 'k1' })]); break;
+  // review regressions (v1.34.0)
+  case 'parallel-partial': clearReg(); clearCodex(); rm(sub); reg(livePid, 's1', 'busy');
+    w(main, [prompt(30), twoTools(20), toolResult(10, 'tA')]); break; // tB still running
+  case 'parallel-partial-noreg': clearReg(); break;
+  case 'codex-partial': reg(livePid, 's1', 'idle'); w(main, [prompt(60), reply(50, 'y')]);
+    rollout('parent', { session_id: 'root-1', id: 'root-1', source: 'cli' }, [
+      ev(40, 'event_msg', { type: 'task_started' }),
+      ev(30, 'response_item', { type: 'function_call', name: 'shell', arguments: '{}', call_id: 'cA' }),
+      ev(29, 'response_item', { type: 'function_call', name: 'shell', arguments: '{}', call_id: 'cB' }),
+      ev(20, 'response_item', { type: 'function_call_output', call_id: 'cA', output: 'ok' })]); break;
+  case 'side-past-expiry': clearReg(); clearCodex(); w(main, [prompt(1300), toolUse(1250, 'ag', 'Agent')]); w(sub, [side(5)]); break;
+  case 'bash-mode': rm(sub); w(main, [prompt(120), reply(110, 'b'), shellEcho(60, 'bash-input', 'git status'), shellEcho(59, 'bash-stdout', 'clean')]); break;
+  case 'stale-reg': clearReg(); rm(sub); w(main, [prompt(60), reply(50, 'c')]);
+    reg(otherPid, 'old', 'waiting', 30 * 3600); // written 30 h ago, pid now belongs to something else
+    rollout('parent', { session_id: 'root-1', id: 'root-1', source: 'cli' }, [
+      ev(40, 'event_msg', { type: 'task_started' }),
+      ev(30, 'response_item', { type: 'function_call', name: 'shell', arguments: '{}', call_id: 'c1' })]); break;
+  case 'stale-reg-busy': clearReg(); reg(otherPid, 'old', 'busy', 30 * 3600); break;
+  case 'reused-pid': clearReg(); reg(otherPid, 'old', 'waiting', 600); break; // written BEFORE that process started
+  case 'many-dead': clearReg(); clearCodex();
+    for (let i = 0; i < 300; i++) { const p = 3000001 + i; reg(p, 'dead' + i, 'waiting');
+      fs.writeFileSync(path.join(CL, 'sessions', p + '.abc.key'), '{}'); }
+    reg(livePid, 's1', 'waiting'); break;
+  // Discord: provider hop + cross-provider hold
+  case 'hop-start': clearReg(); rm(sub); reg(livePid, 's1', 'idle'); w(main, [prompt(60), reply(50, 'h')]);
+    rollout('parent', { session_id: 'root-1', id: 'root-1', source: 'cli' }, [
+      ev(40, 'event_msg', { type: 'task_started' }),
+      ev(30, 'response_item', { type: 'function_call', name: 'shell', arguments: '{}', call_id: 'c1' })]); break;
+  case 'hop-claude-tool': reg(livePid, 's1', 'busy'); w(main, [prompt(3), toolUse(2, 'h1', 'Bash')]); break;
+  case 'hop-claude-result': reg(livePid, 's1', 'busy'); w(main, [prompt(3), toolUse(2, 'h1', 'Bash'), toolResult(1, 'h1')]); break;
+  case 'cross': reg(livePid, 's1', 'busy'); w(main, [prompt(1)]);
+    rollout('parent', { session_id: 'root-1', id: 'root-1', source: 'cli' }, [
+      ev(40, 'event_msg', { type: 'task_started' }), ev(10, 'event_msg', { type: 'task_complete' })]); break;
   // Discord part
   case 'd-quiet-waiting': clearCodex(); reg(livePid, 's1', 'waiting');
     w(main, [prompt(1300), toolUse(1250, 't3', 'Bash')]); rm(sub); break; // last write 21 min ago
@@ -74,7 +115,8 @@ switch (scen) {
   default: throw new Error('unknown scenario ' + scen);
 }
 EOF
-fx() { node "$FX" "$CL" "$CX" "$1" "$$"; sleep 0.05; }
+sleep 300 & OTHER=$!   # an unrelated live process, started AFTER the stale files' timestamps
+fx() { node "$FX" "$CL" "$CX" "$1" "$$" "$OTHER"; sleep 0.05; }
 q() { curl -s "http://127.0.0.1:$PORT/api/summary" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const a=JSON.parse(s).agentState;console.log(a?a.provider+":"+a.state:"null")})'; }
 RES=$TMP/results.txt; : > "$RES"
 chk() { echo "$1 $2" >> "$RES"; }
@@ -97,6 +139,15 @@ fx no-registry-stale;  chk no-registry-stale "$(q)"
 fx codex-working;      chk codex-working "$(q)"
 fx codex-done;         chk codex-done "$(q)"
 fx codex-child;        chk codex-child "$(q)"
+fx parallel-partial;       chk parallel-partial "$(q)"
+fx parallel-partial-noreg; chk parallel-partial-noreg "$(q)"
+fx codex-partial;          chk codex-partial "$(q)"
+fx side-past-expiry;       chk side-past-expiry "$(q)"
+fx bash-mode;              chk bash-mode "$(q)"
+fx stale-reg;              chk stale-reg "$(q)"
+fx stale-reg-busy;         chk stale-reg-busy "$(q)"
+fx reused-pid;             chk reused-pid "$(q)"
+fx many-dead;              chk many-dead "$(q)"
 kill $SRV 2>/dev/null; wait $SRV 2>/dev/null
 
 # ---------------- Part 2: Discord state art ----------------
@@ -126,12 +177,17 @@ fx d-quiet-waiting; sleep 1; mark quiet-waiting
 fx d-recent; sleep 1; mark recent-idle
 node -e 'const f=process.argv[1],c=JSON.parse(require("fs").readFileSync(f,"utf8"));c.discordShowState=false;require("fs").writeFileSync(f,JSON.stringify(c))' "$PH/config.json"
 fx busy-tool; sleep 1; mark showstate-off
+node -e 'const f=process.argv[1],c=JSON.parse(require("fs").readFileSync(f,"utf8"));delete c.discordShowState;require("fs").writeFileSync(f,JSON.stringify(c))' "$PH/config.json"
+fx hop-start; sleep 1; mark hop-before
+for i in 1 2 3; do fx hop-claude-tool; sleep 0.5; fx hop-claude-result; sleep 0.5; done
+mark hop-after
+fx cross; sleep 1; mark cross
 IMG=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H 'X-Pulse: 1' -H 'Content-Type: application/json' \
   --data '{"claudeWaiting":"https://x.test/waiting2.gif"}' "http://127.0.0.1:$PORT/api/discord/images")
 echo "POSTSLOT $IMG" >> "$RES"
 cp "$PH/config.json" "$TMP/cfg-after.json"
 kill $SRV 2>/dev/null; wait $SRV 2>/dev/null
-kill $MOCK 2>/dev/null
+kill $MOCK $OTHER 2>/dev/null
 
 node -e '
 const fs = require("fs");
@@ -145,7 +201,11 @@ const want = {
   "idle-subagent": "claude:working", "idle-subagent-old": "claude:idle", "crashed-other": "claude:idle",
   "no-registry-prompt": "claude:thinking", "no-registry-ask": "claude:waiting", "no-registry-stale": "null",
   "codex-working": "codex:working", "codex-done": "claude:idle", "codex-child": "codex:working",
+  "parallel-partial": "claude:working", "parallel-partial-noreg": "claude:working", "codex-partial": "codex:working",
+  "side-past-expiry": "claude:working", "bash-mode": "claude:idle", "stale-reg": "codex:working",
+  "stale-reg-busy": "codex:working", "many-dead": "claude:waiting",
 };
+if (process.platform === "linux") want["reused-pid"] = "codex:working"; // /proc start time: file predates the process
 const why = {
   "busy-tool": "status busy + an unresolved tool call", "busy-result": "status busy, tool resolved -> model thinking",
   "waiting": "status waiting (pending permission prompt)", "idle-subagent": "status idle but a subagent wrote 5 s ago",
@@ -153,6 +213,11 @@ const why = {
   "no-registry-prompt": "dead-pid registry file ignored -> transcript fallback: prompt", "no-registry-ask": "fallback: open AskUserQuestion",
   "no-registry-stale": "fallback: 20-min-old open tool is not live", "codex-working": "Codex turn with an unanswered call outranks Claude idle",
   "codex-done": "Codex task_complete -> idle, Claude idle", "codex-child": "a busy Codex subagent rollout makes its parent session working",
+  "parallel-partial": "2 parallel tools, 1 result back -> still working", "parallel-partial-noreg": "same via transcript fallback",
+  "codex-partial": "Codex: 2 calls, 1 output -> still working", "side-past-expiry": "main quiet 20 min but a subagent wrote 5 s ago -> working",
+  "bash-mode": "a ! shell echo after a finished turn is not a prompt", "stale-reg": "30-h-old waiting file on a reused pid is ignored; Codex wins",
+  "stale-reg-busy": "30-h-old busy file on a reused pid is ignored", "reused-pid": "file written before its pid process started is ignored (Linux)",
+  "many-dead": "300 dead registry files + .key files do not hide the live session",
 };
 for (const k of Object.keys(want)) ok(got[k] === want[k], k + ": " + why[k] + " (" + got[k] + ")");
 
@@ -168,8 +233,15 @@ ok(img("quiet-waiting") === "https://x.test/waiting.gif | Claude Code · waiting
    "D: a prompt pending for 20 quiet minutes still shows waiting, not Pulse idle (" + img("quiet-waiting") + ")");
 ok(img("recent-idle") === "https://x.test/claude.gif | Using Claude Code", "D: between turns -> the Claude Code image (" + img("recent-idle") + ")");
 ok(img("showstate-off") === "https://x.test/claude.gif | Using Claude Code", "D: discordShowState:false ignores live state (" + img("showstate-off") + ")");
+const hopImgs = [];
+for (let i = marks["hop-before"]; i < marks["hop-after"]; i++) { const f = frames[i];
+  if (f.op === 1 && f.payload.cmd === "SET_ACTIVITY" && f.payload.args.activity) hopImgs.push(f.payload.args.activity.assets.large_image); }
+ok(img("hop-before").startsWith("codex |") && hopImgs.every((x) => x === "codex"),
+   "D: Claude flipping tool/think while Codex works does not hop the art between providers (" + [img("hop-before")].concat(hopImgs).join(" ; ") + ")");
+ok(img("cross") === "https://x.test/thinking.gif | Claude Code · thinking",
+   "D: the hold never carries a state across providers (" + img("cross") + ")");
 const sets = frames.filter((f) => f.op === 1 && f.payload.cmd === "SET_ACTIVITY");
-ok(sets.length <= 14, "D: only real changes are sent (" + sets.length + " SET_ACTIVITY frames over ~10 s of 300 ms ticks)");
+ok(sets.length <= 20, "D: only real changes are sent (" + sets.length + " SET_ACTIVITY frames over ~10 s of 300 ms ticks)");
 const post = res.find((r) => r[0] === "POSTSLOT");
 const cfg = JSON.parse(fs.readFileSync(T + "/cfg-after.json", "utf8"));
 ok(post && post[1] === "200" && cfg.discordClaudeWaitingImage === "https://x.test/waiting2.gif", "D: /api/discord/images sets a state slot");

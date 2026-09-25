@@ -23,7 +23,17 @@
   other must last 45 s before the image changes (waiting and idle switch at
   once) — fewer GIF reloads for your viewers. `{"discordShowState": false}`
   turns it off. New `payload.agentState` = `{provider, state, sessions,
-  source}`; the panel shows what it currently detects.
+  source, byProvider}`; the panel shows what it currently detects.
+  Hardened before release (review): parallel or back-to-back tool calls stay
+  *working* until the LAST one returns; a long Agent/Task run whose main
+  thread has been quiet for 15+ minutes stays working while its subagents
+  write; `!` shell-mode and `#` memory lines are not prompts; a status file
+  left behind by a crash, kill or reboot is ignored even when the OS has
+  reused its process id (written before this boot, or — on Linux — before
+  that process started, or busy for 6 h / waiting for 24 h with no sign of
+  life), and it never switches off the transcript fallback; with Claude and
+  Codex both mid-turn the art no longer hops between them every update, and
+  the 45 s hold never carries a state from one provider to the other.
 
 ## v1.33.0
 

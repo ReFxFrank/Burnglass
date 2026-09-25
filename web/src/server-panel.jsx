@@ -417,7 +417,7 @@ export function ServerPanel({ data, onStopped, gfx, delay = 0.36 }) {
               animated WebP to animate it (uploaded art assets can’t animate), an art-asset key, or leave a
               field empty for the built-in art. Discord fetches the link, not Pulse, and anyone who can see
               your presence can see where it’s hosted. Avoid Discord attachment links — they expire. The
-              Claude state images follow what Claude Code is doing (read from its own status file);
+              Claude state images follow what Claude Code is doing (read from its own status file);{' '}
               <code>{'{"discordShowState": false}'}</code> turns that off.
               {data.agentState && (
                 <span> Right now: <b style={{ color: 'var(--text-2)' }}>
