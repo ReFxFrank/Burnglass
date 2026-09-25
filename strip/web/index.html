@@ -156,15 +156,48 @@ html,body{background:var(--tray);color:var(--text);font-family:var(--font);
 .empty{color:var(--text2);text-align:center;padding:26px 16px;font-size:13px}
 .hidden{display:none}
 
-/* Popover open: the panel grows OUT of its bottom-right corner (toward the strip) — a real scale-up
-   "drag", not a fade-flash. CRITICAL: no `animation-fill-mode` — content is visible by default
-   (opacity:1), so a skipped animation can never blank the popover. */
-#app{transform-origin:100% 100%;opacity:1}
-body.opening #app{animation:popopen .44s cubic-bezier(.16,1,.3,1)}
-@keyframes popopen{
-  0%{opacity:0;transform:scale(.55)}
-  22%{opacity:1}
-  100%{opacity:1;transform:scale(1)}
+/* ---------- Open motion: a Windows 11 flyout ----------
+   The HOST moves the window itself: it appears at its final size and rises ~12 px into place (position
+   only — the window is never resized while it animates, so the page never reflows). Inside, each block
+   (#app's children: Total Spend, each provider, the footer) fades in and rises 6 px, top to bottom, one
+   --step apart (the stagger index --i is capped at 4, so the last block starts <= 88 ms in); the meter
+   fills and the donut then draw in once. Calm and quick: no scale, no overshoot, nothing loops.
+   Visibility rules (CRITICAL — an open must never end blank):
+   - the resting state (no class on body) is fully visible;
+   - every animation uses fill-mode BACKWARDS only: it holds the first frame during its stagger delay
+     and hands the element back to its own, visible style the moment it ends, is removed, or never
+     starts. Never `forwards`/`both`, never a hidden resting style;
+   - body.preopen = the same animations PAUSED on that first frame, while the host keeps the window
+     cloaked (invisible) until the page has painted it. playOpen() resumes them; primeOpen() arms a
+     safety timer that does it anyway, and resetOpen() (every close) drops both classes;
+   - reduced motion (Windows "Animation effects" off -> prefers-reduced-motion) switches every
+     animation and transition off, so the content is simply there. */
+:root{
+  --ease-decel:cubic-bezier(.1,.9,.2,1);   /* Fluent "decelerate max": the window slide and the rise */
+  --ease-fill:cubic-bezier(.33,1,.68,1);   /* ease-out cubic: data drawing in (meters, donut) */
+  --rise-ms:180ms;
+  --step:22ms;
+}
+@property --sweep{syntax:"<angle>";inherits:false;initial-value:360deg}
+body.opening #app > *{animation:rise var(--rise-ms) var(--ease-decel) backwards;
+  animation-delay:calc(var(--i,0) * var(--step))}
+body.opening .meter .f{transform-origin:0 50%;animation:meterfill 300ms var(--ease-fill) backwards;
+  animation-delay:calc(var(--i,0) * var(--step) + 40ms)}
+body.opening .meter .p{animation:fadein 160ms ease-out backwards;
+  animation-delay:calc(var(--i,0) * var(--step) + 220ms)}
+/* The ring draws clockwise from 12 o'clock (the svg is rotated -90deg, so the mask starts at 90deg). */
+body.opening .donut svg{
+  -webkit-mask-image:conic-gradient(from 90deg,#000 var(--sweep),transparent 0);
+  mask-image:conic-gradient(from 90deg,#000 var(--sweep),transparent 0);
+  animation:sweep 320ms var(--ease-fill) backwards;
+  animation-delay:calc(var(--i,0) * var(--step) + 40ms)}
+body.preopen #app, body.preopen #app *{animation-play-state:paused !important}
+@keyframes rise{from{opacity:0;transform:translateY(6px)}}
+@keyframes meterfill{from{transform:scaleX(0)}}
+@keyframes fadein{from{opacity:0}}
+@keyframes sweep{from{--sweep:0deg}to{--sweep:360deg}}
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{animation:none !important;transition:none !important}
 }
 
 /* micro-animations (enhancement only, never hold an invisible state; nothing loops) */
@@ -201,13 +234,73 @@ body.opening #app{animation:popopen .44s cubic-bezier(.16,1,.3,1)}
 // so host calls never throw. No light theme, no toggle, no persistence.
 window.setTheme = function(){};
 
-// Called by the host each time the popover is shown, to replay the spring-open.
-window.playOpen = function(){
-  const b=document.body;
-  b.classList.remove("opening"); void b.offsetWidth; // restart the animation
-  b.classList.add("opening");
-  setTimeout(()=>b.classList.remove("opening"), 360);
+/* ---------- open motion (driven by the host, see the CSS "Open motion" block) ----------
+   Host sequence per open: primeOpen(token, motion) inside the same script that renders the data —
+   paints the first frame (content hidden, animations paused) and posts {primed: token} once it is on
+   screen, so the host can un-cloak a window whose first visible frame is already final — then
+   playOpen(motion) as the window starts to rise. resetOpen() on every close. Any step may be missing
+   (an older host, a lost message): the content still ends up fully visible. */
+const OPEN_TOTAL_MS = 560;    // longest delay + duration above (88 + 40 + 320 = 448) plus slack
+const PRIME_SAFETY_MS = 900;  // a primed page never waits longer than this for playOpen
+const OPEN_ANIMS = new Set(["rise","meterfill","fadein","sweep"]);
+let OPEN_TIMER = 0, PRIME_TIMER = 0;
+
+function reducedMotion(){
+  try{ return window.matchMedia("(prefers-reduced-motion: reduce)").matches; }catch(_){ return false; }
+}
+// The height the host sizes the window to (CSS px). #app's own box — not body.scrollHeight, which
+// would also count the 6 px a rising block is still translated by.
+function contentHeight(){
+  const a=document.getElementById("app");
+  const h = a ? Math.ceil(a.getBoundingClientRect().height) : document.body.scrollHeight;
+  return Math.min(Math.max(1, h), 2000);
+}
+window.contentHeight = contentHeight;
+
+window.resetOpen = function(){
+  clearTimeout(OPEN_TIMER); clearTimeout(PRIME_TIMER); OPEN_TIMER = PRIME_TIMER = 0;
+  document.body.classList.remove("opening","preopen");
 };
+
+window.primeOpen = function(token, motion){
+  window.resetOpen();
+  if(motion!==false && !reducedMotion()){
+    document.body.classList.add("opening","preopen");     // first frame, held
+    PRIME_TIMER = setTimeout(()=>window.playOpen(), PRIME_SAFETY_MS);
+  }
+  // Two frames later that state has been painted: tell the host it can show the window.
+  requestAnimationFrame(()=>requestAnimationFrame(()=>{
+    try{ window.chrome.webview.postMessage({primed: token}); }catch(_){}
+  }));
+  return contentHeight();
+};
+
+window.playOpen = function(motion){
+  const b=document.body;
+  clearTimeout(PRIME_TIMER); clearTimeout(OPEN_TIMER); PRIME_TIMER = OPEN_TIMER = 0;
+  if(motion===false || reducedMotion()){ window.resetOpen(); return; }
+  if(b.classList.contains("preopen")) b.classList.remove("preopen");  // resume from the held first frame
+  else { window.resetOpen(); void b.offsetWidth; b.classList.add("opening"); } // not primed: start fresh
+  OPEN_TIMER = setTimeout(()=>{ b.classList.remove("opening"); OPEN_TIMER = 0; }, OPEN_TOTAL_MS);
+};
+
+// Fresh data landing WHILE the open plays (the host re-fetches on every open) rebuilds the blocks: their
+// new animations join the running ones at the SAME start time, so nothing fades in a second time. If
+// the open has already played out, the class goes instead (a rebuild must never replay it).
+function openAnims(){
+  try{ return document.getAnimations().filter(a=>OPEN_ANIMS.has(a.animationName)); }catch(_){ return []; }
+}
+function joinOpen(build){
+  const b=document.body;
+  let start=null;
+  if(b.classList.contains("opening") && !b.classList.contains("preopen")){
+    const run=openAnims();
+    if(!run.length) b.classList.remove("opening");
+    else { const r=run.find(a=>a.startTime!=null); start = r ? r.startTime : null; } // null: all pending, start together
+  }
+  build();
+  if(start!=null) for(const a of openAnims()) if(a.startTime==null) a.startTime=start;
+}
 
 /* ---------- helpers ---------- */
 const ICONS = "icons/";
@@ -474,7 +567,7 @@ function selectPeriod(i, animate){
   spendPeriod=PERIODS[i];
   SPEND.buttons.forEach((b,j)=>b.classList.toggle("on",j===i));
   positionThumb(i, animate);
-  if(changed){ updateSpendBody(true); postHeight(); }
+  if(changed){ joinOpen(()=>updateSpendBody(true)); postHeight(); }
 }
 
 function attachSegDrag(){
@@ -537,7 +630,7 @@ function updateSpendBody(animate){
 let RENDERED_HEIGHT=0;
 function postHeight(){
   try{
-    const h=Math.min(document.body.scrollHeight, 2000);
+    const h=contentHeight();
     if(h===RENDERED_HEIGHT) return;
     RENDERED_HEIGHT=h;
     window.chrome.webview.postMessage({height:h});
@@ -578,19 +671,23 @@ function renderApp(providers, errors){
   LAST_PROVIDERS = providers||[];
   LAST_ERRORS = errors||[];
   const app=document.getElementById("app");
-  app.innerHTML="";
-  SPEND=null;
-  const ids=new Set((providers||[]).map(p=>p.providerId));
-  const errs=actionableErrors(errors, ids);
-  if((!providers || providers.length===0) && errs.length===0){
-    const e=el("div","empty"); e.textContent="No usage yet — Burnglass is watching your local logs."; app.appendChild(e);
-  } else {
-    if(hasSpend()) app.appendChild(spendCard());
-    for(const p of providers) app.appendChild(providerSection(p));
-    for(const e of errs) app.appendChild(errorSection(e));
-    app.appendChild(footer());
-  }
-  RENDERED_HEIGHT=Math.min(document.body.scrollHeight, 2000); // the host reports this one itself
+  joinOpen(()=>{
+    app.innerHTML="";
+    SPEND=null;
+    const ids=new Set((providers||[]).map(p=>p.providerId));
+    const errs=actionableErrors(errors, ids);
+    if((!providers || providers.length===0) && errs.length===0){
+      const e=el("div","empty"); e.textContent="No usage yet — Burnglass is watching your local logs."; app.appendChild(e);
+    } else {
+      if(hasSpend()) app.appendChild(spendCard());
+      for(const p of providers) app.appendChild(providerSection(p));
+      for(const e of errs) app.appendChild(errorSection(e));
+      app.appendChild(footer());
+    }
+    // Stagger index per block (inherited by its meters / donut), capped: the last block starts <= 88 ms in.
+    Array.prototype.forEach.call(app.children, (c,k)=>c.style.setProperty("--i", String(Math.min(k,4))));
+  });
+  RENDERED_HEIGHT=contentHeight(); // the host reports this one itself
 }
 
 function footer(){

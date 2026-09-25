@@ -19,7 +19,12 @@
 #    plain like on the dashboard, though it prints 80), spend amounts not
 #    pre-rounded (12.344996 must not become $12.35), a stale (rolled-over)
 #    Claude window dropped like a Codex one. With Playwright + Chromium the
-#    popover page (strip/web/index.html) then renders that payload (else SKIP).
+#    popover page (strip/web/index.html) then renders that payload (else SKIP)
+#    and plays its open motion: primeOpen holds the first frame and posts
+#    {primed}, playOpen / a lost playOpen / resetOpen / reduced motion all end
+#    fully visible, fresh data mid-open never fades in twice, fills are
+#    backwards-only, and the host's window-slide curve (OpenMotion, compiled
+#    from Program.cs) equals the page's --ease-decel as Chromium evaluates it.
 # 2. release.yml: test/packaging/release-workflow.py (python3 + PyYAML).
 #
 # Overrides, for proving a regression against an older tree:
@@ -134,6 +139,9 @@ const head = 'using System.Globalization;\nusing System.Text.Json;\nusing System
 fs.writeFileSync(path.join(process.argv[3], 'Extracted.cs'), head + cut('AppPaths') + '\n\n' + cut('WebAssets') + '\n');
 const ms = cut('MeterScale', true), st = cut('SummaryTransform', true);
 if (ms && st) fs.writeFileSync(path.join(process.argv[3], 'ExtractedUi.cs'), head + ms + '\n\n' + st + '\n');
+// The popover's open-motion curve (the host's window slide); optional like the above.
+const om = cut('OpenMotion', true);
+if (om) fs.writeFileSync(path.join(process.argv[3], 'ExtractedMotion.cs'), head + om + '\n');
 JS
 then
   fail "could not extract AppPaths/WebAssets from $STRIP_DIR/Program.cs"
@@ -223,7 +231,17 @@ static class UiHarness
             }
             return 0;
         }
-        Console.WriteLine("usage: transform <file> | tones <json> <pct>... | used <used> <limit> | linetone <json> <line>...");
+        // `ease <t>...` prints OpenMotion.Ease(t) per t (the popover window's slide curve; by
+        // reflection, so a tree without it still compiles and reports NO-MOTION).
+        if (args.Length >= 2 && args[0] == "ease")
+        {
+            var ease = Type.GetType("BurnglassStrip.OpenMotion")?.GetMethod("Ease");
+            if (ease == null) { Console.WriteLine("NO-MOTION"); return 0; }
+            foreach (var a in args.Skip(1))
+                Console.WriteLine(a + "=" + ((double)ease.Invoke(null, new object[] { double.Parse(a, inv) })!).ToString("R", inv));
+            return 0;
+        }
+        Console.WriteLine("usage: transform <file> | tones <json> <pct>... | used <used> <limit> | linetone <json> <line>... | ease <t>...");
         return 2;
     }
 }
@@ -509,11 +527,13 @@ JS
     G=$(npm root -g 2>/dev/null); [ -n "$G" ] && [ -f "$G/playwright/index.js" ] && PWMOD="$G/playwright/index.js"
   fi
   CHROME=${PW_CHROMIUM:-}; [ -z "$CHROME" ] && [ -x /opt/pw-browsers/chromium ] && CHROME=/opt/pw-browsers/chromium
+  # The popover window's slide curve as the host computes it (OpenMotion.Ease), for the page check below.
+  ui ease 0.02 0.05 0.1 0.2 0.35 0.5 0.75 0.9 > "$T/ease.txt" 2>&1
   if [ -z "$PWMOD" ]; then
     echo "SKIP: popover render (Playwright not found; set PLAYWRIGHT_MODULE)"
   else
-    node --input-type=module - "$PWMOD" "$CHROME" "$STRIP_DIR/web/index.html" "$T/ui-d.json" <<'JS' || FAILS=$((FAILS + 1))
-const [pwmod, chrome, page0, uiFile] = process.argv.slice(2);
+    node --input-type=module - "$PWMOD" "$CHROME" "$STRIP_DIR/web/index.html" "$T/ui-d.json" "$T/ease.txt" <<'JS' || FAILS=$((FAILS + 1))
+const [pwmod, chrome, page0, uiFile, easeFile] = process.argv.slice(2);
 const { pathToFileURL } = await import('node:url');
 const fs = await import('node:fs');
 const pw = await import(pathToFileURL(pwmod).href);
@@ -537,6 +557,69 @@ says(JSON.stringify(r.meters) === JSON.stringify([['Session', '80% used', 'head'
   'popover: 79.5% prints 80 and stays plain, 94.5% prints 95 and stays amber — as #mini shows them (' + JSON.stringify(r.meters) + ')');
 says(r.legend.some((t) => /Claude CLI\s*\$12\.34$/.test(t)) && !r.legend.some((t) => /12\.35/.test(t)) && !/12\.35/.test(r.center || ''),
   'popover: the donut legend / centre say $12.34 like the Claude card and the dashboard (' + JSON.stringify({ legend: r.legend, center: r.center, today: r.today }) + ')');
+
+// The open motion. Host (PopoverForm): cloaked window -> renderData + primeOpen -> {primed} -> reveal,
+// slide on OpenMotion.Ease + playOpen; resetOpen on every close. The page must never end hidden.
+const easeLines = fs.readFileSync(easeFile, 'utf8').trim().split('\n');
+if (!/=/.test(easeLines[0] || '')) says(false, 'open motion: no OpenMotion in Program.cs, the window slide curve is unchecked (' + easeLines[0] + ')');
+else {
+  const host = easeLines.map((l) => l.split('=').map(Number));
+  const curve = await page.evaluate((ts) => {
+    const easing = getComputedStyle(document.documentElement).getPropertyValue('--ease-decel').trim();
+    const el = document.createElement('div'); document.body.appendChild(el);
+    const a = el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 1000, easing }); a.pause();
+    const out = ts.map((t) => { a.currentTime = t * 1000; return a.effect.getComputedTiming().progress; });
+    a.cancel(); el.remove();
+    return { easing, out };
+  }, host.map(([t]) => t));
+  const worst = Math.max(...host.map(([, v], i) => Math.abs(v - curve.out[i])));
+  says(curve.easing && worst < 0.002, `open motion: the window slide (OpenMotion.Ease) is the page's --ease-decel ${curve.easing} (max diff ${worst.toFixed(5)})`);
+}
+await page.evaluate(() => { window.__posted = []; window.chrome = window.chrome || {}; window.chrome.webview = { postMessage: (m) => window.__posted.push(m) }; });
+const state = () => page.evaluate(() => ({
+  cls: document.body.className,
+  anims: document.getAnimations().filter((a) => a.animationName).length,
+  minOp: Math.min(...[...document.getElementById('app').children].map((c) => +getComputedStyle(c).opacity)),
+  primed: window.__posted.filter((m) => m && 'primed' in m).map((m) => m.primed),
+}));
+const h0 = await page.evaluate(() => window.contentHeight && window.contentHeight());
+const hPrime = await page.evaluate(() => window.primeOpen && window.primeOpen(5, true));
+await page.waitForTimeout(150);
+const held = await state();
+says(h0 > 0 && hPrime === h0 && /preopen/.test(held.cls) && held.minOp === 0 && held.primed.includes(5),
+  'open motion: primeOpen returns the content height, holds the first frame (content hidden) and posts {primed} once painted (' + JSON.stringify({ h0, hPrime, ...held }) + ')');
+await page.evaluate(() => window.playOpen(true));
+await page.waitForFunction(() => +getComputedStyle(document.getElementById('app').children[0]).opacity > 0.05, null, { polling: 5, timeout: 2000 }).catch(() => {});
+const joined = await page.evaluate((p) => {
+  const op = () => [...document.getElementById('app').children].map((c) => +getComputedStyle(c).opacity);
+  const b = op(); window.renderData(p); return { before: b, after: op() };
+}, JSON.parse(fs.readFileSync(uiFile, 'utf8')));
+says(joined.before[0] > 0 && joined.before[0] < 1 && joined.before.every((v, i) => Math.abs(v - joined.after[i]) < 0.01),
+  'open motion: fresh data mid-open continues the fade where it was, no second fade-in (' + JSON.stringify(joined) + ')');
+await page.waitForTimeout(800);
+const played = await state();
+says(played.cls === '' && played.anims === 0 && played.minOp === 1, 'open motion: playOpen ends at rest — every block visible, no class, no animation (' + JSON.stringify(played) + ')');
+await page.evaluate(() => window.primeOpen(6, true)); // the host never calls playOpen (a lost message)
+await page.waitForTimeout(900 + 800);
+const healed = await state();
+says(healed.cls === '' && healed.anims === 0 && healed.minOp === 1, 'open motion: primed but never played -> the safety timer shows it anyway (' + JSON.stringify(healed) + ')');
+await page.evaluate(() => { window.primeOpen(7, true); window.playOpen(true); });
+await page.waitForTimeout(30);
+await page.evaluate(() => window.resetOpen()); // closed mid-open
+const reset = await state();
+says(reset.cls === '' && reset.anims === 0 && reset.minOp === 1, 'open motion: resetOpen (every close) puts the page back at rest (' + JSON.stringify(reset) + ')');
+const fills = await page.evaluate(() => {
+  const s = new Set();
+  const walk = (rules) => { for (const r of rules) { if (r.style && r.style.animationFillMode) s.add(r.style.animationFillMode); if (r.cssRules && !(r instanceof CSSKeyframesRule)) walk(r.cssRules); } };
+  for (const sh of document.styleSheets) walk(sh.cssRules);
+  return [...s];
+});
+says(fills.includes('backwards') && fills.every((m) => m === 'backwards' || m === 'none'),
+  'open motion: animations only ever fill BACKWARDS (never forwards/both — no hidden end state) (' + fills.join(', ') + ')');
+await page.emulateMedia({ reducedMotion: 'reduce' });
+await page.evaluate(() => { window.primeOpen(8, true); });
+const rm = await state();
+says(rm.cls === '' && rm.anims === 0 && rm.minOp === 1, 'open motion: reduced motion (Windows "Animation effects" off) -> no animation, content visible at once (' + JSON.stringify(rm) + ')');
 await browser.close();
 process.exit(bad ? 1 : 0);
 JS
