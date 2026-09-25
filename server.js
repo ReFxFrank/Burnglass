@@ -34,7 +34,7 @@ const url = require('url');
 const crypto = require('crypto');
 
 // Version — keep in sync with package.json (build/make-exe.mjs enforces this).
-const PULSE_VERSION = '1.30.0';
+const PULSE_VERSION = '1.31.0';
 const SERVER_START = Date.now();
 let IS_DAEMON_CHILD = false; // set when running as the hidden background child
 let IS_AFTER_UPDATE = false; // set on the relaunch right after a self-update
@@ -194,12 +194,13 @@ const PRICING = {
   // Current generation.
   // fastInput/fastOutput = the fast-mode premium (Claude Code's `/fast`, API
   // `speed: "fast"`), applied per-entry when the transcript records
-  // usage.speed === 'fast'. Only Opus 5 and Opus 4.8 have fast mode: 4.7
-  // rejects the flag and 4.6 runs standard and bills standard, so neither
-  // carries a fast row. Cache multipliers stack on top of the fast rate,
+  // usage.speed === 'fast'. Only Opus 5.5 ($8/$40), Opus 5 and Opus 4.8
+  // ($10/$50) have fast mode: 4.7 rejects the flag and 4.6 runs standard and
+  // bills standard, so neither carries a fast row. Cache multipliers stack on top of the fast rate,
   // which falls out of pricing cache tokens off price.input (per the docs).
   // cacheReadMult = per-row cache-READ multiplier when a model departs from the
-  // standard 0.10×: Fable 5.1 / Mythos 5.1 bill cache reads at $0.25/M (0.025×).
+  // standard 0.10×: Fable 5.1 / Mythos 5.1 bill cache reads at $0.25/M (0.025×),
+  // Opus 5.5 at $0.20/M (0.05×).
   // Mythos = the Glasswing-only twins of Fable (same list price). Mythos
   // Preview (deprecated → Mythos 5) is priced per Anthropic's Project Glasswing
   // page: $25/$125 — its cache multipliers were never published (standard
@@ -210,6 +211,10 @@ const PRICING = {
   'claude-fable-5':    { input: 10, output: 50 },
   'claude-mythos-5':   { input: 10, output: 50 },
   'claude-mythos-preview': { input: 25, output: 125 },
+  // Opus 5.5 (2026-09-22; Claude Code's default Opus since 2.1.280). Cheaper
+  // than Opus 5 at $4/$20, 0.05× cache reads, fast mode $8/$40. Verified
+  // 2026-09-24 against platform.claude.com pricing + fast-mode pages.
+  'claude-opus-5-5':   { input: 4,  output: 20, cacheReadMult: 0.05, fastInput: 8, fastOutput: 40 },
   'claude-opus-5':     { input: 5,  output: 25, fastInput: 10, fastOutput: 50 },
   'claude-opus-4-8':   { input: 5,  output: 25, fastInput: 10, fastOutput: 50 },
   'claude-opus-4-7':   { input: 5,  output: 25 },
@@ -290,10 +295,12 @@ const BLOCK_MS = 5 * HOUR_MS; // rolling 5-hour usage window
 const MINUTE_MS = 60 * 1000;
 
 const _unknownModels = new Set();
-function logUnknownModel(model) {
+function logUnknownModel(model, borrowedFrom) {
   if (model && !_unknownModels.has(model)) {
     _unknownModels.add(model);
-    console.warn(`[pulse] unknown model "${model}" — using __default__ pricing. Add it to PRICING.`);
+    console.warn(borrowedFrom
+      ? `[pulse] unknown model "${model}" — priced as "${borrowedFrom}" (closest known row). Add it to PRICING.`
+      : `[pulse] unknown model "${model}" — using __default__ pricing. Add it to PRICING.`);
   }
 }
 
@@ -333,6 +340,14 @@ function priceFor(model, ts, speed) {
       if (key !== '__default__' && m.startsWith(key) && key.length > best.length) best = key;
     }
     if (best) p = PRICING[best];
+    // A claude-* id whose remainder is not a date stamp (or "-latest") is a
+    // model Pulse has NO row for — typically a point release (claude-sonnet-5-5
+    // lands on claude-sonnet-5). Keep the parent's rate as the closest
+    // estimate, but say so: claude-opus-5-5 sat silently on Opus 5's $5/$25
+    // (vs its real $4/$20) until this was made visible.
+    if (best && best.startsWith('claude-') && !/^-(?:\d{8}|latest)$/.test(m.slice(best.length))) {
+      logUnknownModel(model, best);
+    }
   }
   if (!p) {
     logUnknownModel(model);
@@ -371,7 +386,7 @@ function claudeTokenCost(e, price) {
 // §5 per-entry cost. Cache-creation tokens without a TTL breakdown are treated
 // as 5-minute writes (×1.25) — documented assumption, handled at normalize().
 function costForEntry(e) {
-  if (e.provider === 'openai') return openaiTokenCost(e, priceForOpenAI(e.model, e.ts));
+  if (e.provider === 'openai') return openaiTokenCost(e, priceForOpenAI(e.model, e.ts), e.speed);
   if (e.provider === 'google') {
     const p = priceForGoogle(e.model);
     // Gemini context caching bills cached input at ~10% of the input rate.
@@ -407,14 +422,18 @@ function cacheEconomicsForEntry(e) {
     const cached = p.cachedInput != null ? p.cachedInput : p.input * mult;
     // The long-context tier scales the input AND cached rates alike, so the
     // read saving scales with it (openaiTokenCost applies the same test).
-    const im = e.provider === 'openai' && p.longContext && (e.inputTokens + e.cacheRead) > OPENAI_LONG_CONTEXT_TOKENS
-      ? OPENAI_LONG_CTX_INPUT_MULT : 1;
-    // Neither provider bills a cache-WRITE surcharge (caching is implicit), so
-    // there is no premium to net off — only the read discount is real.
+    const isOpenAI = e.provider === 'openai';
+    const im = isOpenAI && openaiLongContext(e, p) ? OPENAI_LONG_CTX_INPUT_MULT : 1;
+    // Fast scales every rate, so the read saving and write premium scale too.
+    const fm = isOpenAI && e.speed === 'fast' && p.fastMult ? p.fastMult : 1;
+    // Only OpenAI rows with a PUBLISHED cache-write price (cacheWriteMult)
+    // carry a write premium; Gemini caching is implicit, no surcharge.
+    const wp = isOpenAI && p.cacheWriteMult
+      ? (e.cacheWrite5m / 1e6) * p.input * (p.cacheWriteMult - 1) * im * fm : 0;
     // read is reported only when the input price is non-zero: a free row saves
     // nothing, and counting its reads would pad the "off N cached read tokens"
     // denominator with tokens that contributed $0 of the savings above it.
-    return { read: p.input > 0 ? read : 0, saved: (read / 1e6) * (p.input - cached) * im, writePremium: 0 };
+    return { read: p.input > 0 ? read : 0, saved: (read / 1e6) * (p.input - cached) * im * fm, writePremium: wp };
   }
   const price = priceFor(e.model, e.ts, e.speed);
   const geo = e.geoUs ? INFERENCE_GEO_US_MULT : 1; // the surcharge scales savings and premiums alike
@@ -429,10 +448,12 @@ function cacheEconomicsForEntry(e) {
 }
 
 // costForEntry with the fast-mode premium taken back out — the baseline the
-// "what fast mode cost you extra" figure is measured against. Claude path only:
-// fast mode is an Anthropic per-request speed tier, and no other provider's
-// entries ever carry speed === 'fast'.
+// "what fast mode cost you extra" figure is measured against. Two providers
+// carry speed === 'fast': Anthropic (usage.speed) and OpenAI Codex (the
+// rollout's effective service_tier "priority"); each prices through its own
+// table, forced to standard.
 function standardCostForEntry(e) {
+  if (e.provider === 'openai') return openaiTokenCost(e, priceForOpenAI(e.model, e.ts), 'standard');
   return claudeTokenCost(e, priceFor(e.model, e.ts, 'standard')) +
     (e.webSearches / 1000) * WEB_SEARCH_PER_1K;
 }
@@ -456,53 +477,73 @@ function standardCostForEntry(e) {
 //   history: [{ until, ...price }] — OLDER prices, each in force through its
 //   `until` (inclusive, entry-local date); an entry dated before a price cut
 //   keeps the rate it was actually billed at (priceStep). Ascending by until.
-// Verified 2026-09-06 against developers.openai.com model pages + pricing page.
+//   fastMult — the row's published Fast-mode (service_tier "priority")
+//   multiplier on EVERY rate. Not uniform: 2× for the GPT-6 / 5.6 families,
+//   5.4, 5.2, 5.1, 5; 2.5× for gpt-5.5; 1.8× gpt-5-mini. No fastMult = no
+//   published Fast price (a "fast" entry then prices at standard).
+//   cacheWriteMult — rows with a PUBLISHED cache-write price (1.25× input:
+//   GPT-6 Astra/Sol/Luna, the 5.6 family, 5.6-cyber). Without it, cache-write
+//   tokens bill as plain input (older models have no write surcharge).
+// Verified 2026-09-06, rows added/extended 2026-09-24 against the
+// developers.openai.com pricing page (Standard / Fast / Daybreak tables).
 const GPT56_SOL = {
   // Cut 2026-08-21 from $5/$30 — "promotional pricing available at least
   // through November 21, 2026": re-check then; if it reverts, add a step.
-  input: 4, output: 20, cachedInput: 0.4, longContext: true,
+  input: 4, output: 20, cachedInput: 0.4, longContext: true, fastMult: 2, cacheWriteMult: 1.25,
   history: [{ until: '2026-08-20', input: 5, output: 30, cachedInput: 0.5 }],
 };
 const PRICING_OPENAI = {
   // GPT-6 Astra (2026-09-03) — Codex's bundled default since 0.153.4
   // (2026-09-04). "-wm" is Codex's undocumented daybreak variant of the same
   // model (codex-rs daybreak.rs maps both ids to Astra) — priced identically.
-  'gpt-6-astra':        { input: 10,   output: 50,  cachedInput: 1, longContext: true },
-  'gpt-6-astra-wm':     { input: 10,   output: 50,  cachedInput: 1, longContext: true },
+  'gpt-6-astra':        { input: 10,   output: 50,  cachedInput: 1, longContext: true, fastMult: 2, cacheWriteMult: 1.25 },
+  'gpt-6-astra-wm':     { input: 10,   output: 50,  cachedInput: 1, longContext: true, fastMult: 2, cacheWriteMult: 1.25 },
+  // GPT-6 Sol + Luna (2026-09-22; in Codex's catalog since 0.156). Codex's
+  // TUI runs BOTH on Fast (service_tier "priority") by default — the rollout
+  // records the effective tier, see parseCodexFile.
+  'gpt-6-sol':          { input: 2,    output: 10,  cachedInput: 0.2, longContext: true, fastMult: 2, cacheWriteMult: 1.25 },
+  'gpt-6-luna':         { input: 0.1,  output: 0.5, cachedInput: 0.01, longContext: true, fastMult: 2, cacheWriteMult: 1.25 },
   // GPT-5.6 family (GA 2026-07-09). Terra and Luna were cut 2026-07-30 (−20% /
   // −80%); Sol on 2026-08-21. Bare "gpt-5.6" is an OFFICIAL alias for Sol
   // (model page, API changelog, models overview) — same row object.
   'gpt-5.6-sol':        GPT56_SOL,
   'gpt-5.6':            GPT56_SOL,
-  'gpt-5.6-terra':      { input: 2,    output: 12,  cachedInput: 0.2, longContext: true,
+  'gpt-5.6-terra':      { input: 2,    output: 12,  cachedInput: 0.2, longContext: true, fastMult: 2, cacheWriteMult: 1.25,
                           history: [{ until: '2026-07-29', input: 2.5, output: 15, cachedInput: 0.25 }] },
-  'gpt-5.6-luna':       { input: 0.2,  output: 1.2, cachedInput: 0.02, longContext: true,
+  'gpt-5.6-luna':       { input: 0.2,  output: 1.2, cachedInput: 0.02, longContext: true, fastMult: 2, cacheWriteMult: 1.25,
                           history: [{ until: '2026-07-29', input: 1, output: 6, cachedInput: 0.1 }] },
   // Cyber (Daybreak Red, separately provisioned; Responses API only; 400K
   // window with a 272K max input, so no long-context tier; no fast mode).
-  'gpt-5.6-cyber':      { input: 12.5, output: 75,  cachedInput: 1.25 },
+  'gpt-5.6-cyber':      { input: 12.5, output: 75,  cachedInput: 1.25, cacheWriteMult: 1.25 },
+  // Daybreak aliases (2026-08-07) — follow the underlying model's price; they
+  // point at 5.6-sol / 5.6-cyber today (Blue shares Sol's DATED row object).
+  'gpt-daybreak-blue-latest': GPT56_SOL,
+  'gpt-daybreak-red-latest':  { input: 12.5, output: 75, cachedInput: 1.25, cacheWriteMult: 1.25 },
   'gpt-5.5-cyber':      { input: 12.5, output: 75,  cachedInput: 1.25 },
   'gpt-5.5-pro':        { input: 30,   output: 180, cachedInput: 30 },
-  'gpt-5.5':            { input: 5,    output: 30,  cachedInput: 0.5, longContext: true },
+  'gpt-5.5':            { input: 5,    output: 30,  cachedInput: 0.5, longContext: true, fastMult: 2.5 },
   // gpt-5.4 / -mini retired from Codex (ChatGPT sign-in) 2026-08-31 → terra /
   // luna; still on the API, prices unchanged.
-  'gpt-5.4-mini':       { input: 0.75, output: 4.5, cachedInput: 0.075 },
+  'gpt-5.4-mini':       { input: 0.75, output: 4.5, cachedInput: 0.075, fastMult: 2 },
   'gpt-5.4-nano':       { input: 0.2,  output: 1.25, cachedInput: 0.02 },
   'gpt-5.4-pro':        { input: 30,   output: 180, cachedInput: 30 },
-  'gpt-5.4':            { input: 2.5,  output: 15,  cachedInput: 0.25, longContext: true },
+  'gpt-5.4':            { input: 2.5,  output: 15,  cachedInput: 0.25, longContext: true, fastMult: 2 },
   'gpt-5.3-codex':      { input: 1.75, output: 14,  cachedInput: 0.175 },
+  'gpt-5.2-pro':        { input: 21,   output: 168, cachedInput: 21 },
+  'gpt-5.2-codex':      { input: 1.75, output: 14,  cachedInput: 0.175 },
+  'gpt-5.2':            { input: 1.75, output: 14,  cachedInput: 0.175, fastMult: 2 },
   // Codex's sandbox auto-reviewer: runs GPT-5.4 (low reasoning), which has no
   // published row of its own — priced at gpt-5.4 rates.
-  'codex-auto-review':  { input: 2.5,  output: 15,  cachedInput: 0.25 },
+  'codex-auto-review':  { input: 2.5,  output: 15,  cachedInput: 0.25, fastMult: 2 },
   'gpt-5.1-codex-mini': { input: 0.25, output: 2,   cachedInput: 0.025 },
   'gpt-5.1-codex-max':  { input: 1.25, output: 10,  cachedInput: 0.125 },
   'gpt-5.1-codex':      { input: 1.25, output: 10,  cachedInput: 0.125 },
-  'gpt-5.1':            { input: 1.25, output: 10,  cachedInput: 0.125 },
+  'gpt-5.1':            { input: 1.25, output: 10,  cachedInput: 0.125, fastMult: 2 },
   'gpt-5-codex':        { input: 1.25, output: 10,  cachedInput: 0.125 },
-  'gpt-5-mini':         { input: 0.25, output: 2,   cachedInput: 0.025 },
+  'gpt-5-mini':         { input: 0.25, output: 2,   cachedInput: 0.025, fastMult: 1.8 },
   'gpt-5-nano':         { input: 0.05, output: 0.4, cachedInput: 0.005 },
   'gpt-5-pro':          { input: 15,   output: 120, cachedInput: 15 },
-  'gpt-5':              { input: 1.25, output: 10,  cachedInput: 0.125 },
+  'gpt-5':              { input: 1.25, output: 10,  cachedInput: 0.125, fastMult: 2 },
   'codex-mini-latest':  { input: 1.5,  output: 6,   cachedInput: 0.375 },
   // Older strings that can appear in history. NOTE: unlike Anthropic's dated
   // snapshots, OpenAI suffixes (-mini/-pro/-nano) are DIFFERENT models at
@@ -572,13 +613,24 @@ function priceForOpenAI(model, ts) {
 // published rate; the long-context tier scales the whole request. Rollouts
 // carry no cache-WRITE counts (and Codex-via-ChatGPT bills none), so the
 // 1.25× write surcharge Astra / 5.6 publish for the API is not modelled.
-function openaiTokenCost(e, p) {
+// Rollout cache-WRITE tokens (`cache_write_input_tokens`, a subset of input)
+// arrive in cacheWrite5m and bill at the row's cacheWriteMult (else as plain
+// input). `speed === 'fast'` (Codex service_tier "priority") multiplies EVERY
+// rate by the row's published fastMult; a row without one prices standard.
+// The prompt size for the long-context test is uncached + written + cached.
+function openaiLongContext(e, p) {
+  return !!p.longContext && (e.inputTokens + e.cacheWrite5m + e.cacheRead) > OPENAI_LONG_CONTEXT_TOKENS;
+}
+function openaiTokenCost(e, p, speed) {
   const cachedPrice = p.cachedInput != null ? p.cachedInput : p.input * OPENAI_CACHE_READ_MULT;
-  const long = !!p.longContext && (e.inputTokens + e.cacheRead) > OPENAI_LONG_CONTEXT_TOKENS;
+  const long = openaiLongContext(e, p);
   const im = long ? OPENAI_LONG_CTX_INPUT_MULT : 1;
   const om = long ? OPENAI_LONG_CTX_OUTPUT_MULT : 1;
-  return (
+  const fm = speed === 'fast' && p.fastMult ? p.fastMult : 1;
+  const cw = p.cacheWriteMult || 1;
+  return fm * (
     (e.inputTokens  / 1e6) * p.input * im +
+    (e.cacheWrite5m / 1e6) * p.input * cw * im +
     (e.outputTokens / 1e6) * p.output * om +
     (e.cacheRead    / 1e6) * cachedPrice * im
   );
@@ -1026,17 +1078,74 @@ function normalize(rec) {
     // never read again — retaining two unique strings per entry was pure RSS.
     key: dedupKey(rec),
   };
-  const recorded = recordedEffort(rec.effort);
+  // `effort` is the request-level level Claude Code actually sent (written only
+  // when set); `perTurnEffort` (≥ 2.1.281) is a per-turn override that is
+  // always WRITTEN but only SENT when a beta is active — so it is the fallback,
+  // never the preferred source.
+  const recorded = recordedEffort(rec.effort) || recordedEffort(rec.perTurnEffort);
   if (recorded) e.parseEffort = recorded; // authoritative for this message — see annotateModes
+  // Transient parse-time marks (stripped in parseFile before caching): whether
+  // this line carries usage.iterations (only the FINAL line of a multi-block
+  // message does), and its advisor sub-inferences.
+  if (Array.isArray(u.iterations) && u.iterations.length) {
+    e._iters = true;
+    const adv = u.iterations.filter((it) => it && it.type === 'advisor_message');
+    if (adv.length) { e._advisor = adv; e._advisorModel = typeof rec.advisorModel === 'string' ? rec.advisorModel : ''; }
+  }
   e.cost = costForEntry(e);
   return e;
 }
 // The per-message reasoning-effort level Claude Code ≥ 2.1.212 writes on each
 // assistant transcript entry (a short lowercase word: low/medium/high/xhigh/max).
+// Non-levels: "auto"/"default" mean "no explicit level" (the /effort echo
+// parser already clears the chip for "set to auto") — never a chip or an
+// effort-spend bucket of their own.
+const NON_EFFORT_LEVELS = new Set(['auto', 'default', 'none', 'off', 'unset', 'adaptive']);
 function recordedEffort(v) {
   if (typeof v !== 'string') return undefined;
   const s = v.trim().toLowerCase();
-  return /^[a-z]{1,12}$/.test(s) ? intern(s) : undefined;
+  return /^[a-z]{1,12}$/.test(s) && !NON_EFFORT_LEVELS.has(s) ? intern(s) : undefined;
+}
+
+// Advisor-tool sub-inferences (Claude Code's advisor, API server tool
+// advisor_20260301): each is a usage.iterations[] item of type
+// "advisor_message" with its OWN model and token counts, billed at the
+// advisor model's rates and EXCLUDED from the top-level usage — so without
+// this they were invisible spend. One extra entry per advisor iteration,
+// inheriting the executor entry's time/session/project/source; key suffix
+// keeps them unique and replay-stable.
+function advisorEntries(parent) {
+  const its = parent._advisor;
+  if (!its || !its.length) return [];
+  const out = [];
+  its.forEach((it, i) => {
+    const cc = it.cache_creation;
+    let w5, w1;
+    if (cc && (typeof cc.ephemeral_5m_input_tokens === 'number' || typeof cc.ephemeral_1h_input_tokens === 'number')) {
+      w5 = num(cc.ephemeral_5m_input_tokens); w1 = num(cc.ephemeral_1h_input_tokens);
+    } else { w5 = num(it.cache_creation_input_tokens); w1 = 0; }
+    const e = {
+      ts: parent.ts,
+      provider: 'anthropic',
+      model: intern(typeof it.model === 'string' && it.model ? it.model : (parent._advisorModel || parent.model)),
+      source: parent.source,
+      speed: 'standard',
+      serviceTier: parent.serviceTier,
+      geoUs: parent.geoUs,
+      inputTokens: num(it.input_tokens),
+      outputTokens: num(it.output_tokens),
+      cacheWrite5m: w5,
+      cacheWrite1h: w1,
+      cacheRead: num(it.cache_read_input_tokens),
+      webSearches: 0,
+      sessionId: parent.sessionId,
+      project: parent.project,
+      key: parent.key + ':adv' + i,
+    };
+    e.cost = costForEntry(e);
+    out.push(e);
+  });
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -1064,7 +1173,7 @@ function parseFile(filePath) {
   }
   const lines = raw.split('\n');
   const entries = [];
-  const seen = new Set();       // per-file dedup
+  const seen = new Map();       // per-file dedup: key -> index in entries
   const sessionMeta = {};       // sessionId -> { firstUserText, project }
   const ultracodeSessions = []; // sessions whose prompts invoked ultracode
   const effortEvents = [];      // time-stamped /effort changes parsed from the transcript
@@ -1127,8 +1236,24 @@ function parseFile(filePath) {
     if (rec.type !== 'assistant') continue;
     const e = normalize(rec);
     if (!e) continue;
-    if (seen.has(e.key)) continue; // per-file dedup
-    seen.add(e.key);
+    const at = seen.get(e.key);
+    if (at !== undefined) {
+      // Per-file dedup. Claude Code ≥ 2.1.281 writes one line per content
+      // block, all sharing message.id; in subagent transcripts the EARLY lines
+      // carry the streaming PARTIAL usage (e.g. 8 output tokens) and a later
+      // line the final count (297). First-wins kept the partial copy and lost
+      // ~99% of those messages' output. Keep the FULLER copy (more output;
+      // tie → the one carrying usage.iterations, which only the final line
+      // has) at the FIRST line's timestamp — when the request was made.
+      const prev = entries[at];
+      if (e.outputTokens > prev.outputTokens || (e.outputTokens === prev.outputTokens && e._iters && !prev._iters)) {
+        e.ts = prev.ts;
+        e.cost = costForEntry(e);
+        entries[at] = e;
+      }
+      continue;
+    }
+    seen.set(e.key, entries.length);
     entries.push(e);
 
     // Record project path for sessions even if no user record was seen.
@@ -1138,7 +1263,15 @@ function parseFile(filePath) {
       sessionMeta[e.sessionId].project = e.project;
     }
   }
-  return { entries, sessionMeta, ultracodeSessions, effortEvents };
+  // Expand advisor sub-inferences from the KEPT copy of each message, then
+  // drop the transient marks so they never reach the mtime cache.
+  const expanded = [];
+  for (const e of entries) {
+    expanded.push(e);
+    if (e._advisor) for (const a of advisorEntries(e)) expanded.push(a);
+    delete e._iters; delete e._advisor; delete e._advisorModel;
+  }
+  return { entries: expanded, sessionMeta, ultracodeSessions, effortEvents };
 }
 
 // ---------------------------------------------------------------------------
@@ -1157,7 +1290,7 @@ function parseFile(filePath) {
 // ---------------------------------------------------------------------------
 function diffUsage(tot, prev) {
   const d = {};
-  for (const k of ['input_tokens', 'cached_input_tokens', 'output_tokens', 'reasoning_output_tokens', 'total_tokens']) {
+  for (const k of ['input_tokens', 'cached_input_tokens', 'cache_write_input_tokens', 'output_tokens', 'reasoning_output_tokens', 'total_tokens']) {
     d[k] = Math.max(0, num(tot[k]) - num(prev[k]));
   }
   return d;
@@ -1176,6 +1309,7 @@ function parseCodexFile(filePath) {
   let project = '';
   let model = 'gpt-unknown';
   let effort = null;
+  let serviceTier = 'standard'; // effective tier from thread_settings_applied (state snapshot)
   let prevTotal = null;
   // Codex token_count events also carry a rate_limits snapshot of the ChatGPT
   // account's Codex allowance (primary=session window, secondary=weekly) —
@@ -1213,6 +1347,15 @@ function parseCodexFile(filePath) {
       if (eff) effort = String(eff);
       continue;
     }
+    // Effective service tier (state snapshot, latest wins). Codex persists a
+    // thread_settings_applied event whose thread_settings.service_tier is the
+    // tier the session actually runs — including a MODEL DEFAULT the TUI
+    // resolved (GPT-6 Sol/Luna default to "priority" = Fast = 2× list).
+    if (rec.type === 'event_msg' && p.type === 'thread_settings_applied') {
+      const st = p.thread_settings && p.thread_settings.service_tier;
+      serviceTier = typeof st === 'string' && st ? st.toLowerCase() : 'standard';
+      continue;
+    }
     if (rec.type === 'event_msg' && p.type === 'user_message') {
       if (sid && sessionMeta[sid] && !sessionMeta[sid].firstUserText && typeof p.message === 'string') {
         sessionMeta[sid].firstUserText = p.message.replace(/\s+/g, ' ').trim();
@@ -1236,18 +1379,22 @@ function parseCodexFile(filePath) {
       if (!u) continue;
       const input = num(u.input_tokens), cached = num(u.cached_input_tokens), output = num(u.output_tokens);
       if (input + output <= 0) continue;
+      // cache_write_input_tokens (rollouts ≥ 0.145) is ALSO a subset of input,
+      // disjoint from cached; absent in older rollouts → 0.
+      const written = Math.min(num(u.cache_write_input_tokens), Math.max(0, input - cached));
+      const fast = serviceTier === 'priority' || serviceTier === 'fast';
       const e = {
         ts,
         provider: 'openai',
         model,
         source: 'codex',
-        speed: 'standard',
-        serviceTier: 'standard',
-        // OpenAI semantics: input INCLUDES cached; split so tokensOf() and the
-        // cache-discounted cost both come out right.
-        inputTokens: Math.max(0, input - cached),
+        speed: fast ? 'fast' : 'standard',
+        serviceTier: intern(serviceTier),
+        // OpenAI semantics: input INCLUDES cached and cache-written; split so
+        // tokensOf() and the per-category cost both come out right.
+        inputTokens: Math.max(0, input - cached - written),
         outputTokens: output,
-        cacheWrite5m: 0,
+        cacheWrite5m: written,
         cacheWrite1h: 0,
         cacheRead: cached,
         webSearches: 0,
@@ -2261,13 +2408,13 @@ function buildPeriod(key, label, entries, dayList, allSources, hist, liveDays) {
     cacheSavings.writePremium += ce.writePremium;
     const sb = e.speed === 'fast' ? speedSpend.fast : speedSpend.standard;
     sb.cost += e.cost; sb.tokens += tokensOf(e); sb.messages++;
-    // Only fast entries carry a premium, and only the Claude path can be fast —
-    // an entry whose model has no fast row prices identically either way, so it
-    // contributes 0 rather than being special-cased. The provider test keeps
-    // that invariant LOCAL: standardCostForEntry always prices via the Claude
-    // table, so a future non-Anthropic parser emitting speed:'fast' would
-    // otherwise silently produce a premium computed at the wrong list prices.
-    if (e.provider === 'anthropic' && e.speed === 'fast') {
+    // Only fast entries carry a premium — an entry whose model has no fast
+    // price prices identically either way, so it contributes 0 rather than
+    // being special-cased. The provider test keeps that invariant LOCAL:
+    // standardCostForEntry prices ONLY Anthropic and OpenAI entries through
+    // their own tables, so another parser emitting speed:'fast' can never
+    // produce a premium computed at the wrong provider's list prices.
+    if ((e.provider === 'anthropic' || e.provider === 'openai') && e.speed === 'fast') {
       speedSpend.fastPremium += e.cost - standardCostForEntry(e);
     }
     // Hidden placeholders (e.g. "<synthetic>") still count toward the daily/day
@@ -3598,14 +3745,17 @@ const METER_LABELS = {
   seven_day_cowork: 'Claude · weekly · Cowork',
 };
 
-// Normalize one usage bucket from the API response. utilization has been seen
-// both as a 0–1 fraction and a 0–100 percent across versions; values ≤ 1 are
-// treated as fractions (a true 0.x% reads the same either way at the bar).
+// Normalize one usage bucket from the API response. utilization is a 0–100
+// percentage — Claude Code's own schema: "Percentage of the window used,
+// 0-100". (The 0–1 FRACTIONS some tools report come from the
+// anthropic-ratelimit-unified-*-utilization response HEADERS, not this
+// endpoint.) The old "≤ 1 means a fraction" rule rendered a real 0.9% as 90%
+// at the start of every window — and could fire a false 80% alert.
 function parseMeterBucket(key, v) {
   if (!v || typeof v !== 'object') return null;
   let u = v.utilization;
   if (typeof u !== 'number' || !isFinite(u)) return null;
-  const pct = u <= 1 ? u * 100 : u;
+  const pct = u;
   // Undisclosed top-level keys — rotating codenames (`nimbus_quill`,
   // `cinder_cove`, `omelette_promotional`…) Anthropic has never documented,
   // usually at 0 with no reset — stay hidden until they carry real usage, so
@@ -3713,7 +3863,7 @@ function refreshAccountMeters(done) {
         const name = lim.scope && lim.scope.model && typeof lim.scope.model.display_name === 'string'
           ? lim.scope.model.display_name.trim() : '';
         if (!name || typeof lim.percent !== 'number' || !isFinite(lim.percent)) continue;
-        const pct = lim.percent <= 1 ? lim.percent * 100 : lim.percent;
+        const pct = lim.percent; // "Share of the window used, 0-100" — same scale as utilization
         let resetsAt = null;
         if (lim.resets_at) {
           const t = typeof lim.resets_at === 'number'

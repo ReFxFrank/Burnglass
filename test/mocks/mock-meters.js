@@ -5,17 +5,19 @@ http.createServer((q, s) => {
     if (auth !== 'Bearer sk-test-oauth-token') { s.writeHead(401); s.end('{"error":"bad token"}'); return; }
     s.writeHead(200, { 'Content-Type': 'application/json' });
     s.end(JSON.stringify({
-      five_hour: { utilization: 0.34, resets_at: new Date(Date.now() + 2.4 * 3600e3).toISOString() },
+      // utilization is a 0–100 PERCENTAGE. 0.9 = a start-of-window reading of
+      // 0.9% — the old "≤ 1 means fraction" rule showed it as 90%.
+      five_hour: { utilization: 0.9, resets_at: new Date(Date.now() + 2.4 * 3600e3).toISOString() },
       seven_day: { utilization: 61, resets_at: new Date(Date.now() + 3 * 86400e3).toISOString() },
-      seven_day_opus: { utilization: 0.88, resets_at: new Date(Date.now() + 3 * 86400e3).toISOString() },
+      seven_day_opus: { utilization: 88, resets_at: new Date(Date.now() + 3 * 86400e3).toISOString() },
       extra_unknown_key: { something: true },
       // Undisclosed rotating codename buckets Anthropic never documented: at 0
       // with no reset they must stay HIDDEN; one carrying real usage must show.
       nimbus_quill: { utilization: 0.0, resets_at: null },
       cinder_cove: { utilization: 0, resets_at: null },
-      tangelo: { utilization: 0.42, resets_at: new Date(Date.now() + 3 * 86400e3).toISOString() },
+      tangelo: { utilization: 42, resets_at: new Date(Date.now() + 3 * 86400e3).toISOString() },
       // A documented newer key gets a proper label
-      seven_day_cowork: { utilization: 0.1, resets_at: new Date(Date.now() + 3 * 86400e3).toISOString() },
+      seven_day_cowork: { utilization: 10, resets_at: new Date(Date.now() + 3 * 86400e3).toISOString() },
       limits: [
         // the real thing: per-model weekly window
         { kind: 'weekly_scoped', group: 'g', percent: 76, resets_at: new Date(Date.now() + 3 * 86400e3).toISOString(),

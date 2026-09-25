@@ -55,9 +55,9 @@ http.createServer((q, s) => {
   if (q.headers["authorization"] !== "Bearer sk-test-oauth-token") { s.writeHead(401); s.end("{}"); return; }
   s.writeHead(200, { "Content-Type": "application/json" });
   s.end(JSON.stringify({
-    five_hour:      { utilization: 0.82, resets_at: new Date(Date.now()+2*3600e3).toISOString() },
-    seven_day:      { utilization: 0.96, resets_at: new Date(Date.now()+3*86400e3).toISOString() },
-    seven_day_opus: { utilization: 0.40, resets_at: new Date(Date.now()+3*86400e3).toISOString() },
+    five_hour:      { utilization: 82, resets_at: new Date(Date.now()+2*3600e3).toISOString() },
+    seven_day:      { utilization: 96, resets_at: new Date(Date.now()+3*86400e3).toISOString() },
+    seven_day_opus: { utilization: 40, resets_at: new Date(Date.now()+3*86400e3).toISOString() },
     // model-scoped Fable weekly MAXED OUT — a reached limit, must be dropped
     // from the alerts banner (you have hit it, not approaching it).
     limits: [ { kind: "weekly_scoped", group: "g", percent: 100,

@@ -18,8 +18,8 @@ http.createServer((q, s) => {
   if (q.headers["authorization"] !== "Bearer sk-test-oauth-token") { s.writeHead(401); s.end("{}"); return; }
   s.writeHead(200, { "Content-Type": "application/json" });
   s.end(JSON.stringify({
-    five_hour: { utilization: 0.5, resets_at: new Date(Date.now()+2*3600e3).toISOString() },
-    seven_day: { utilization: 0.6, resets_at: new Date(Date.now()+3*86400e3).toISOString() },
+    five_hour: { utilization: 50, resets_at: new Date(Date.now()+2*3600e3).toISOString() },
+    seven_day: { utilization: 60, resets_at: new Date(Date.now()+3*86400e3).toISOString() },
   }));
 }).listen(4878, "127.0.0.1", () => {});
 ' >/dev/null 2>&1 &

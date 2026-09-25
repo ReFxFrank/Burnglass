@@ -35,9 +35,9 @@ http.createServer((q, s) => {
   n++;
   s.writeHead(200, { "Content-Type": "application/json" });
   s.end(JSON.stringify({
-    five_hour: { utilization: 0.50 + n * 0.02, resets_at: new Date(Date.now() + 2 * 3600e3).toISOString() },
-    seven_day: { utilization: 0.30 + n * 0.01 },
-    seven_day_opus: { utilization: 0.40 + n * 0.002, resets_at: opusReset },
+    five_hour: { utilization: 50 + n * 2, resets_at: new Date(Date.now() + 2 * 3600e3).toISOString() },
+    seven_day: { utilization: 30 + n * 1 },
+    seven_day_opus: { utilization: 40 + n * 0.2, resets_at: opusReset },
   }));
 }).listen(4885, "127.0.0.1", () => console.log("mock up"));
 ' >/dev/null 2>&1 &

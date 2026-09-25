@@ -1,5 +1,56 @@
 # Changelog
 
+## v1.31.0
+
+- **Subagent spend was under-counted — often by ~99% of its output.** Claude
+  Code 2.1.281 writes a subagent's message as several transcript lines that
+  share one `message.id`, and the FIRST line carries a partial streaming
+  count (e.g. 8 output tokens where the final line says 297). Pulse kept the
+  first copy. It now keeps the fullest copy (at the first line's timestamp).
+  On this machine's own transcripts, first-wins counted 2,559 output tokens
+  where the truth was 274,036. Anyone using subagents or workflows on
+  2.1.281+ will see their spend rise to the real number.
+- **Advisor calls are now counted.** Claude Code's advisor runs a separate
+  server-side inference whose usage appears ONLY in the message's
+  `usage.iterations[]` (type `advisor_message`, with its own model) and is
+  excluded from the top-level usage. Each one is now its own entry at the
+  advisor model's price (falling back to the entry's `advisorModel`).
+- **Account meters: utilization is a 0–100 percentage.** Pulse treated any
+  value ≤ 1 as a 0–1 fraction and multiplied it by 100, so a real 0.9% at the
+  start of a window showed as **90%** — and could fire a false 80% limit
+  alert. Claude Code's own schema documents both `utilization` and
+  `limits[].percent` as 0–100 (the 0–1 fractions some tools show come from
+  the rate-limit response HEADERS, not the usage endpoint).
+- **Claude Opus 5.5** (2026-09-22, Claude Code's default Opus since 2.1.280):
+  $4/$20, cache reads 0.05× ($0.20/M), fast mode $8/$40. It had silently
+  prefix-matched Opus 5's $5/$25. Such fallbacks are now **visible**: an
+  unpriced `claude-*` point release (Sonnet 5.5 / Haiku 5.5 are announced but
+  unpriced) still borrows its parent's rate but is logged once, naming the
+  row it borrowed.
+- **OpenAI (verified 2026-09-24 against the developers.openai.com pricing
+  page):** new **GPT-6 Sol** ($2 / $0.20 / $10) and **GPT-6 Luna** ($0.10 /
+  $0.01 / $0.50), both with the long-context tier; **gpt-5.2**, **gpt-5.2-codex**
+  and **gpt-5.2-pro** rows (they were missing); the **Daybreak aliases**
+  `gpt-daybreak-blue-latest` / `-red-latest` (→ 5.6 Sol / 5.6 Cyber).
+- **Codex Fast mode is priced.** Codex persists a `thread_settings_applied`
+  event whose `service_tier` is the tier the session actually runs —
+  including a model default. GPT-6 Sol and Luna default to `priority` (Fast)
+  in the Codex TUI, and Pulse was billing those turns at half price. Each
+  row carries its published Fast multiplier (2× for most, **2.5×** for
+  gpt-5.5, 1.8× for gpt-5-mini; none published → standard), and the fast
+  premium now appears in the fast-spend note for Codex too.
+- **Codex cache writes are priced.** Rollouts carry
+  `cache_write_input_tokens` (a subset of input); rows with a published
+  cache-write price (GPT-6 family, 5.6 family, 5.6 Cyber — 1.25× input) now
+  bill those tokens at that rate, and the cache-savings strip nets it off.
+- **Effort chips:** `effort` stays the preferred source; Claude Code
+  2.1.281's new `perTurnEffort` is only a fallback (it is always written but
+  only sent when a beta is active). `auto`/`default` never become chips.
+- Tests: new `transcript-format.test.sh` (fails on v1.30.0: its fixture
+  totals $4.50 there vs the true $70.50); pricing, effort and meters suites
+  extended; four meter-fixture suites moved to 0–100 values (every asserted
+  percentage unchanged).
+
 ## v1.30.0
 
 - **Anthropic pricing refresh (verified 2026-09 against platform.claude.com):**

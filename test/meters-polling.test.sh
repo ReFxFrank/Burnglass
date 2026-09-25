@@ -28,8 +28,8 @@ http.createServer((q, s) => {
   if (q.url === "/usage-ok") {
     n++;
     s.writeHead(200, { "Content-Type": "application/json" });
-    s.end(JSON.stringify({ five_hour: { utilization: 0.2, resets_at: new Date(Date.now()+3600e3).toISOString() },
-                           seven_day: { utilization: 0.5, resets_at: new Date(Date.now()+3*86400e3).toISOString() } }));
+    s.end(JSON.stringify({ five_hour: { utilization: 20, resets_at: new Date(Date.now()+3600e3).toISOString() },
+                           seven_day: { utilization: 50, resets_at: new Date(Date.now()+3*86400e3).toISOString() } }));
     return;
   }
   s.writeHead(404); s.end();

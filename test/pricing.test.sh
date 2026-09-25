@@ -76,6 +76,22 @@ lines.push({ type: "assistant", timestamp: "2026-09-17T15:00:00.000Z",
 lines.push({ type: "assistant", timestamp: "2026-09-17T16:00:00.000Z",
   sessionId: "gov-s", requestId: "rgov", cwd: "/p",
   message: { id: "mgov", model: "us-gov.anthropic.claude-haiku-4-5-20251001-v1:0", usage: { input_tokens: 1000000, output_tokens: 1000000 } } });
+// Opus 5.5 (2026-09-22): $4/$20, cache reads 0.05x ($0.20/M), fast $8/$40.
+// Standard entry: 1M in + 1M out + 1M cache read = 4 + 20 + 0.20 = 24.20.
+// Fast entry: 1M + 1M at 8/40 = 48 (its fast premium over standard = 24).
+// Before the row existed it silently took the Opus 5 row (5/25 +0.50 read) = 30.50.
+lines.push({ type: "assistant", timestamp: "2026-09-23T10:00:00.000Z",
+  sessionId: "o55-s", requestId: "ro55", cwd: "/p",
+  message: { id: "mo55", model: "claude-opus-5-5", usage: { input_tokens: 1000000, output_tokens: 1000000, cache_read_input_tokens: 1000000 } } });
+lines.push({ type: "assistant", timestamp: "2026-09-23T11:00:00.000Z",
+  sessionId: "o55f-s", requestId: "ro55f", cwd: "/p",
+  message: { id: "mo55f", model: "claude-opus-5-5", usage: { input_tokens: 1000000, output_tokens: 1000000, speed: "fast" } } });
+// A point release Pulse has NO row for (Sonnet 5.5 is announced, unpriced):
+// it borrows the Sonnet 5 row (2/10) (1M+1M = 12) as the closest estimate, but must
+// be LOGGED — silently, this is how Opus 5.5 hid on the Opus 5 rate.
+lines.push({ type: "assistant", timestamp: "2026-09-23T12:00:00.000Z",
+  sessionId: "s55-s", requestId: "rs55", cwd: "/p",
+  message: { id: "ms55", model: "claude-sonnet-5-5", usage: { input_tokens: 1000000, output_tokens: 1000000 } } });
 // inference_geo "us": every token category at 1.1x — opus-4-6 1M+1M = 30 -> 33.
 lines.push({ type: "assistant", timestamp: "2026-09-16T14:00:00.000Z",
   sessionId: "geo-s", requestId: "rgeo", cwd: "/p",
@@ -153,6 +169,36 @@ const rollout = (sid, base, models) => {
   return lines.map((l) => JSON.stringify(l)).join("\n") + "\n";
 };
 fs.writeFileSync(dir + "/sessions/2026/07/15/rollout-price.jsonl", rollout("price-1", now - 3600e3, MODELS));
+// v1.31 rows, pinned to 2026-09-23 (after the GPT-6 Sol/Luna launch). Each
+// turn: [model, uncached in, out, cached, cache-written, service tier]. The
+// tier arrives as a thread_settings_applied snapshot (latest wins), exactly
+// as Codex persists the EFFECTIVE tier — incl. the Sol and Luna model default.
+const v131 = (sid, base, turns) => {
+  const out = [{ timestamp: iso(base - 60e3), type: "session_meta", payload: { session_id: sid, cwd: "/p" } }];
+  turns.forEach(([m, inp, o, cached, written, tier], i) => {
+    const t = base + (i + 1) * 60e3;
+    out.push({ timestamp: iso(t - 10e3), type: "event_msg", payload: { type: "thread_settings_applied",
+      thread_settings: Object.assign({ model: m, model_provider_id: "openai" }, tier ? { service_tier: tier } : {}) } });
+    out.push({ timestamp: iso(t), type: "turn_context", payload: { turn_id: sid + "-t" + i, model: m } });
+    const u = { input_tokens: inp + cached + written, cached_input_tokens: cached, cache_write_input_tokens: written,
+                output_tokens: o, total_tokens: inp + cached + written + o };
+    out.push({ timestamp: iso(t + 30e3), type: "event_msg", payload: { type: "token_count", info: { last_token_usage: u } } });
+  });
+  return out.map((l) => JSON.stringify(l)).join("\n") + "\n";
+};
+fs.writeFileSync(dir + "/sessions/2026/07/15/rollout-v131.jsonl", v131("price-v131", Date.parse("2026-09-23T08:00:00.000Z"), [
+  ["gpt-6-sol", 100000, 1000000, 0, 0, "priority"],   // FAST 2x: 2 x (0.2 + 10) = 20.4
+  ["gpt-6-luna", 100000, 1000000, 0, 0, null],        // tier cleared -> standard: 0.01 + 0.5 = 0.51
+  // 100K uncached + 100K cache-WRITTEN at 1.25x + 100K out, alias -> cyber:
+  // 1.25 + 1.5625 + 7.5 = 10.3125 (written tokens billed as plain input: 10.00)
+  ["gpt-daybreak-red-latest", 100000, 100000, 0, 100000, null],
+  ["gpt-daybreak-blue-latest", 100000, 1000000, 0, 0, null], // -> 5.6 Sol now: 0.4 + 20 = 20.4
+  ["gpt-5.2", 100000, 1000000, 0, 0, null],            // 0.175 + 14 = 14.175
+  ["gpt-5.2-codex", 100000, 1000000, 0, 0, null],      // 14.175
+  ["gpt-5.2-pro", 100000, 1000000, 0, 0, null],        // 2.1 + 168 = 170.1
+  // Bedrock-routed id (distinct display row) -> the gpt-5.5 row, FAST 2.5x (not 2x): 2.5 x (0.5 + 3) = 8.75
+  ["us.openai.gpt-5.5", 100000, 100000, 0, 0, "priority"],
+]));
 // Pre-cut history: the 5.6 family billed at its July rates for July entries.
 fs.writeFileSync(dir + "/sessions/2026/07/15/rollout-history.jsonl",
   rollout("price-jul", Date.parse("2026-07-15T12:00:00.000Z"),
@@ -239,6 +285,21 @@ for (const [m, want] of Object.entries({ "claude-mythos-preview": 150, "claude-o
   const r = sep26[m];
   ok(r && Math.abs(r.cost - want) < 0.005, m + " = $" + want + " (got " + (r ? r.cost.toFixed(2) : "missing") + ")");
 }
+// v1.31: Opus 5.5 (standard 24.20 + fast 48 = 72.20 in September)
+const sepM = mon("2026-09");
+const o55 = (sepM.byModel || {})["claude-opus-5-5"];
+ok(o55 && Math.abs(o55.cost - 72.2) < 0.005, "opus-5-5: 4/20 + 0.05x read (24.20) + fast 8/40 (48) = 72.20 (got " + (o55 ? o55.cost.toFixed(2) : "missing") + ")");
+const s55 = (sepM.byModel || {})["claude-sonnet-5-5"];
+ok(s55 && Math.abs(s55.cost - 12) < 0.005, "claude-sonnet-5-5 (no row) borrows Sonnet 5 2/10 = 12 (got " + (s55 ? s55.cost.toFixed(2) : "missing") + ")");
+for (const [m, want] of Object.entries({ "gpt-6-sol": 20.4, "gpt-6-luna": 0.51, "gpt-daybreak-red-latest": 10.3125,
+    "gpt-daybreak-blue-latest": 20.4, "gpt-5.2": 14.175, "gpt-5.2-codex": 14.175, "gpt-5.2-pro": 170.1, "us.openai.gpt-5.5": 8.75 })) {
+  const r = (sepM.byModel || {})[m];
+  ok(r && Math.abs(r.cost - want) < 0.005, "v1.31 " + m + " = $" + want + " (got " + (r ? r.cost.toFixed(4) : "missing") + ")");
+}
+// Fast premium now counts BOTH providers in September: Opus 5.5 (48 - 24) +
+// gpt-6-sol (20.4 - 10.2) + gpt-5.5 (8.75 - 3.5) = 24 + 10.2 + 5.25 = 39.45.
+const fp = sepM.speedSpend && sepM.speedSpend.fastPremium;
+ok(typeof fp === "number" && Math.abs(fp - 39.45) < 0.005, "fast premium = Claude 24 + Codex 10.2 + 5.25 = 39.45 (got " + fp + ")");
 // Opus 5: standard 5/25, and the fast-mode premium 10/50 applied off
 // usage.speed — the same 1M+1M entry must cost exactly double when fast.
 const o5std = (mon("2026-05").byModel || {})["claude-opus-5"];
@@ -248,9 +309,11 @@ ok(o5fast && Math.abs(o5fast.cost - 60) < 0.005, "opus-5 fast mode at 10/50 = 60
 // The ONLY unknown-model warnings allowed are the two deliberate guard cases
 // — the guard must be VISIBLE (warn), every listed model must price silently.
 const unk = log.split("\n").filter((l) => /unknown model/.test(l));
-const deliberate = /gemini-3\.5-flash-lite|gemini-2\.5-flash-preview-tts/;
-ok(unk.length === 2 && unk.every((l) => deliberate.test(l)),
-   "exactly the two deliberate unknown-model warnings, nothing else (got " + unk.length + ")");
+const deliberate = /gemini-3\.5-flash-lite|gemini-2\.5-flash-preview-tts|claude-sonnet-5-5/;
+ok(unk.length === 3 && unk.every((l) => deliberate.test(l)),
+   "exactly the three deliberate unknown-model warnings, nothing else (got " + unk.length + ": " + unk.join(" | ") + ")");
+ok(unk.some((l) => /claude-sonnet-5-5.*priced as "claude-sonnet-5"/.test(l)),
+   "the point-release warning names the row it borrowed (not a false \"__default__\")");
 process.exit(fail);
 ' "$TMP"
 RES=$?

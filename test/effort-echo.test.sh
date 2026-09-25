@@ -46,6 +46,14 @@ const lines = [
   U(9, "sess-T", "<local-command-stdout>Set effort level to high (this session only)</local-command-stdout>"),
   Object.assign(A(8, "sess-T", 7), { effort: "Medium" }), // case-normalized
   A(7, "sess-T", 8),
+  // Claude Code 2.1.281 also writes perTurnEffort. Session U: only
+  // perTurnEffort present -> it is the fallback level.
+  Object.assign(A(6, "sess-U", 9), { perTurnEffort: "high" }),
+  // Session W: both present and DIFFERENT -> effort (the level actually sent)
+  // wins; perTurnEffort is only sent when a beta is active.
+  Object.assign(A(5, "sess-W", 10), { effort: "medium", perTurnEffort: "max" }),
+  // Session V: "auto" means no explicit level -> never a chip.
+  Object.assign(A(4, "sess-V", 11), { effort: "auto", perTurnEffort: "default" }),
 ];
 fs.writeFileSync(process.argv[1] + "/projects/demo/s.jsonl",
   lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
@@ -72,6 +80,10 @@ ok(P && P.ultracode === true, "P: ultracode picker echo flags ULTRA");
 ok(Q && (Q.efforts || []).length === 0 && !Q.ultracode, "Q: quoted words in a real prompt forge NOTHING — got " + JSON.stringify(Q && Q.efforts));
 ok(R && (R.efforts || []).includes("max"), "R: Kept-effort echo yields max — got " + JSON.stringify(R && R.efforts));
 const S2 = sess["sess-S"], T2 = sess["sess-T"];
+const U2 = sess["sess-U"], W2 = sess["sess-W"], V2 = sess["sess-V"];
+ok(U2 && JSON.stringify(U2.efforts) === JSON.stringify(["high"]), "U: perTurnEffort alone is the fallback level - got " + JSON.stringify(U2 && U2.efforts));
+ok(W2 && JSON.stringify(W2.efforts) === JSON.stringify(["medium"]), "W: effort wins over a differing perTurnEffort - got " + JSON.stringify(W2 && W2.efforts));
+ok(V2 && (V2.efforts || []).length === 0, "V: auto/default never become chips - got " + JSON.stringify(V2 && V2.efforts));
 ok(S2 && (S2.efforts || []).includes("xhigh"), "S: recorded per-entry effort field chips with NO echo — got " + JSON.stringify(S2 && S2.efforts));
 ok(T2 && (T2.efforts || []).includes("medium") && (T2.efforts || []).includes("high"),
    "T: recorded level wins on its own entry, echo fills the unrecorded one — got " + JSON.stringify(T2 && T2.efforts));

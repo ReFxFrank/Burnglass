@@ -247,9 +247,11 @@ alongside Claude Code — nothing to configure:
 - `gpt-*` models appear in **By model**, `codex` in **By source**, sessions in
   the table with titles and reasoning-effort chips (read from each turn's
   context in the rollout files).
-- Costs use **OpenAI API list prices** with the cached-input discount — like
-  the Claude numbers, they're relative-usage estimates on a ChatGPT
-  Plus/Pro subscription, not a bill.
+- Costs use **OpenAI API list prices** with the cached-input discount, the
+  cache-write rate where OpenAI publishes one, the >272K long-context tier, and
+  **Fast mode** when the rollout shows the session ran on it (Codex runs GPT-6
+  Sol and Luna on Fast by default) — like the Claude numbers, they're
+  relative-usage estimates on a ChatGPT Plus/Pro subscription, not a bill.
 - The **Current 5h block** stays Claude-only: Codex has its own separate
   limit windows and must not distort Claude's reset countdown.
 
@@ -437,12 +439,19 @@ then log their level to `~/.pulse/modes.jsonl` automatically.
   unchanged files are never re-read, so even large histories rebuild in milliseconds.
 - **Deduplication.** The same message is written multiple times as it streams.
   Pulse dedupes globally on `message.id + requestId` — without this, costs would be
-  inflated ~3×.
+  inflated ~3×. When the copies differ (Claude Code ≥ 2.1.281 writes subagent
+  messages as several lines whose FIRST line carries a partial streaming count),
+  Pulse keeps the fullest copy.
+- **Advisor calls.** Claude Code's advisor runs as a separate server-side
+  inference whose usage appears only inside the message's `usage.iterations`;
+  Pulse counts each as its own entry at the advisor model's price.
 - **Cost model.** Per-message cost from Anthropic API list prices, with cache-write
-  (×1.25 / ×2.0) and cache-read (×0.1) multipliers and web-search pricing. All
+  (×1.25 / ×2.0) and cache-read (×0.1; ×0.05 for Opus 5.5, ×0.025 for Fable /
+  Mythos 5.1) multipliers, fast-mode rates, and web-search pricing. All
   prices live in one commented `PRICING` object at the top of `server.js`; dated
   model variants (`claude-*-20251001`) price as their base model. Unknown models
-  fall back to a default price and are logged once.
+  fall back to a default price and are logged once; an unpriced point release
+  (e.g. a new `claude-*-5-5`) borrows its parent's rate and is logged too.
 - **5-hour blocks.** Claude's usage limits reset on 5-hour windows opened by your
   first message. Pulse reconstructs them from this machine's logs: the first
   message after a ≥ 5h gap (or past the previous window's end) opens a block,

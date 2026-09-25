@@ -87,6 +87,13 @@ if (m && m.buckets) {
   const opusRows = m.buckets.filter((b) => /weekly · Opus/i.test(b.label));
   ok(opusRows.length === 1 && opusRows[0].key === "seven_day_opus",
      "limits[] Opus deduped against legacy seven_day_opus (" + opusRows.length + " row)");
+  // 0–100 scale: a small real reading must NOT be inflated ×100 (0.9% was
+  // shown as 90%), and must not trip the 80%/95% limit alerts.
+  const fh = m.buckets.find((b) => b.key === "five_hour");
+  ok(fh && Math.abs(fh.pct - 0.9) < 1e-9, "0–100 scale: five_hour 0.9 renders as 0.9%, not 90% (got " + (fh && fh.pct) + ")");
+  ok(!(s.alerts || []).some((a) => a.key === "claude:five_hour"), "a 0.9% window fires no limit alert");
+  const op = m.buckets.find((b) => b.key === "seven_day_opus");
+  ok(op && op.pct === 88, "0–100 scale: seven_day_opus 88 renders as 88% (got " + (op && op.pct) + ")");
   ok(!m.buckets.some((b) => b.key === "nimbus_quill" || b.key === "cinder_cove"),
      "undisclosed codename buckets at 0% stay hidden");
   const tang = m.buckets.find((b) => b.key === "tangelo");
