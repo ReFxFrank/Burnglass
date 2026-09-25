@@ -134,7 +134,9 @@ function rotateLogFile() {
 //   1. BURNGLASS_HOME, else PULSE_HOME (v1 alias) — the user pinned it: used
 //      VERBATIM, never migrated, and no legacy compat reads/writes apply.
 //   2. ~/.burnglass when it exists.
-//   3. ~/.pulse (Pulse <= 1.34) when only IT exists — the pre-migration state.
+//   3. ~/.pulse (Pulse <= 1.34) when only IT exists and holds Pulse files
+//      (isPulseHome — PulseAudio's legacy ~/.pulse is not ours) — the
+//      pre-migration state.
 //      Deliberately NOT memoized: the first v2 SERVER that owns its port
 //      copies ~/.pulse to ~/.burnglass (migrateHome, called from the listen
 //      callback) and flips this. Short-lived commands (--statusline,
@@ -151,6 +153,32 @@ const samePathAbs = (a, b) => {
   const ra = path.resolve(String(a)), rb = path.resolve(String(b));
   return process.platform === 'win32' ? ra.toLowerCase() === rb.toLowerCase() : ra === rb;
 };
+// Are a and b the SAME file or folder on disk? A string compare is not
+// enough: `~/.pulse -> ~/.burnglass` (a symlink / junction left for old
+// companions), the reverse, or a per-file config.json link all make two
+// different path strings name ONE object — and the legacy compat writers
+// (the Meshy-key scrub most of all) would then edit the live home while
+// believing it is an inert backup. dev+ino identifies the object (stat
+// follows links and junctions); a filesystem reporting no inode falls back
+// to comparing the resolved real paths. A missing path is never "the same".
+function sameEntry(a, b) {
+  if (samePathAbs(a, b)) return true;
+  let sa, sb;
+  try { sa = fs.statSync(a, { bigint: true }); sb = fs.statSync(b, { bigint: true }); } catch (_) { return false; }
+  if (sa.ino && sb.ino) return sa.dev === sb.dev && sa.ino === sb.ino;
+  try { return samePathAbs(fs.realpathSync.native(a), fs.realpathSync.native(b)); } catch (_) { return false; }
+}
+// Does this folder hold something PULSE wrote? `~/.pulse` is also the name
+// of PulseAudio's legacy per-user folder (and some homes just have an empty
+// one): without a Pulse file in it, it is neither the pre-migration home nor
+// something to migrate, mirror into or list as "your data".
+const PULSE_HOME_FILES = ['config.json', 'meshy.json', 'modes.jsonl', 'discord-presence.json',
+  'strip.json', 'strip-ui.json', 'strip_cells.json', 'server.json', 'pulse.log', 'tray.ps1'];
+function isPulseHome(dir) {
+  if (!isDir(dir)) return false;
+  for (const f of PULSE_HOME_FILES) if (isFileAt(path.join(dir, f))) return true;
+  return isDir(path.join(dir, 'history'));
+}
 function explicitHome() { return envv('HOME') || null; }
 function newHomePath() { return path.join(os.homedir(), '.burnglass'); }
 function legacyHomePath() { return path.join(os.homedir(), '.pulse'); }
@@ -162,22 +190,24 @@ function appHome() {
   const next = newHomePath();
   if (isDir(next)) return (homeResolved = next);
   const legacy = legacyHomePath();
-  if (isDir(legacy)) return legacy; // pre-migration: NOT memoized (see above)
+  if (isPulseHome(legacy)) return legacy; // pre-migration: NOT memoized (see above)
   return (homeResolved = next);
 }
 // True while ~/.pulse is still the home and the first v2 server has not yet
 // copied it (used to defer the daemon's log file until after the migration,
 // so nothing new is created in ~/.pulse just to be abandoned).
 function homeMigrationPending() {
-  return !homeResolved && !explicitHome() && !isDir(newHomePath()) && isDir(legacyHomePath());
+  return !homeResolved && !explicitHome() && !isDir(newHomePath()) && isPulseHome(legacyHomePath());
 }
 // The legacy home, when the v1 compat reads/writes apply: not pinned, it
-// exists, and it is not itself the active home (pre-migration and degraded
-// runs ARE ~/.pulse, so there is nothing to be compatible with).
+// holds Pulse files, and it is not itself the active home — by IDENTITY, not
+// by path string (pre-migration and degraded runs ARE ~/.pulse, and so is a
+// ~/.pulse linked to ~/.burnglass or the other way round: there is nothing
+// to be compatible with, and a "backup" write would hit the live home).
 function legacyCompatHome() {
   if (explicitHome()) return null;
   const legacy = legacyHomePath();
-  if (samePathAbs(appHome(), legacy) || !isDir(legacy)) return null;
+  if (!isPulseHome(legacy) || sameEntry(appHome(), legacy)) return null;
   return legacy;
 }
 // A display form for messages: "~/.burnglass" rather than an absolute path
@@ -244,7 +274,10 @@ function writeConfig(patch) {
   const next = { ...readConfig(), ...patch };
   try {
     fs.mkdirSync(appHome(), { recursive: true });
-    fs.writeFileSync(configFilePath(), JSON.stringify(next, null, 2) + '\n');
+    // An existing file keeps its mode (written in place, never replaced). A
+    // NEW one that carries the user's Meshy key is created user-only; the
+    // mode only applies on creation, so a user's own chmod is never undone.
+    fs.writeFileSync(configFilePath(), JSON.stringify(next, null, 2) + '\n', next.meshyApiKey ? { mode: 0o600 } : undefined);
   } catch (e) {
     console.warn('[burnglass] could not write config: ' + e.message);
   }
@@ -315,6 +348,11 @@ let logOpenDeferred = false; // see main(): set while the migration is pending
 //   - Any failure: keep running on ~/.pulse (degraded, retried next start),
 //     payload.homeMigration.status = 'failed'. Never a crash, never a
 //     half-switch.
+//   - Permissions never widen: the stage is created 0700 and gets the legacy
+//     folder's mode (and history/ its own) right before the publish; files
+//     keep theirs (copyFileSync). A ~/.pulse without a Pulse file in it
+//     (PulseAudio's, an empty one) is not migrated at all, and a copy that
+//     moved nothing is not reported as a migration.
 // ---------------------------------------------------------------------------
 const MIGRATE_FILES = ['config.json', 'meshy.json', 'modes.jsonl', 'discord-presence.json',
   'strip.json', 'strip-ui.json', 'strip_cells.json'];
@@ -368,12 +406,29 @@ function renameWithRetry(from, to) {
     }
   }
 }
+// A marker whose copy list is EMPTY (a ~/.pulse holding only a log / a
+// runtime file) moved no settings or history: report no migration, so the
+// dashboard never claims "your settings and history were copied".
 function readMigrationMarker(home) {
   try {
     const j = JSON.parse(fs.readFileSync(path.join(home, MIGRATION_MARKER), 'utf8'));
-    if (j && typeof j === 'object') return { status: 'migrated', from: j.from || null, at: +j.at || null, by: j.by || null };
+    if (!j || typeof j !== 'object') return null;
+    const copied = Array.isArray(j.copied) ? j.copied.length : null;
+    if (copied === 0) return null;
+    return { status: 'migrated', from: j.from || null, at: +j.at || null, by: j.by || null, copied };
   } catch (_) {}
   return null;
+}
+// POSIX permission bits (links followed), or null. The migration carries a
+// user's `chmod 700 ~/.pulse` over to ~/.burnglass — the folder mode may be
+// the ONLY thing keeping the plaintext Meshy key from other local users.
+function modeBits(p) { try { return fs.statSync(p).mode & 0o777; } catch (_) { return null; } }
+function copyModeBits(from, to) {
+  if (process.platform === 'win32') return; // chmod there only flips read-only
+  const m = modeBits(from);
+  // Owner rwx is always kept (a home the server cannot write is no home);
+  // group/other bits are copied verbatim — never wider than the source.
+  if (m != null) { try { fs.chmodSync(to, m | 0o700); } catch (_) {} }
 }
 // Every per-home cache must forget what it read from the previous home.
 function adoptHome(dir) {
@@ -391,12 +446,15 @@ function migrateHome() {
   const next = newHomePath(), legacy = legacyHomePath();
   sweepStaleMigrationStages();
   if (isDir(next)) { adoptHome(next); homeMigration = readMigrationMarker(next); scrubLegacyMeshyKeyIfCopied(); return; }
-  if (!isDir(legacy)) { adoptHome(next); homeMigration = null; return; }
+  if (!isPulseHome(legacy)) { adoptHome(next); homeMigration = null; return; } // absent, empty, or PulseAudio's
   const stage = path.join(os.homedir(), STAGE_PREFIX + process.pid + '-' + crypto.randomBytes(3).toString('hex'));
   const at = Date.now();
   const copied = [], skipped = [];
   try {
-    fs.mkdirSync(stage); // NOT recursive: must be a directory this call created
+    // NOT recursive: must be a directory this call created. Private while it
+    // fills (the umask can only remove bits); the legacy folder's own mode is
+    // applied just before the publish. copyFileSync keeps each file's mode.
+    fs.mkdirSync(stage, { mode: 0o700 });
     fs.writeFileSync(path.join(stage, STAGE_SENTINEL), JSON.stringify({ pid: process.pid, at }) + '\n');
     for (const f of MIGRATE_FILES) {
       const src = path.join(legacy, f);
@@ -407,12 +465,13 @@ function migrateHome() {
     for (const [d, re] of Object.entries(MIGRATE_DIRS)) {
       const srcDir = path.join(legacy, d);
       if (!isDir(srcDir)) continue;
-      fs.mkdirSync(path.join(stage, d));
+      fs.mkdirSync(path.join(stage, d), { mode: 0o700 });
       for (const n of fs.readdirSync(srcDir)) {
         if (!re.test(n) || !isFileAt(path.join(srcDir, n))) continue;
         fs.copyFileSync(path.join(srcDir, n), path.join(stage, d, n));
         copied.push(d + '/' + n);
       }
+      copyModeBits(srcDir, path.join(stage, d));
     }
     try {
       for (const n of fs.readdirSync(legacy)) {
@@ -421,12 +480,18 @@ function migrateHome() {
     } catch (_) {}
     fs.writeFileSync(path.join(stage, MIGRATION_MARKER), JSON.stringify(
       { from: legacy, at, by: PULSE_VERSION, copied, skipped }, null, 2) + '\n');
+    copyModeBits(legacy, stage);
     renameWithRetry(stage, next);
     try { fs.unlinkSync(path.join(next, STAGE_SENTINEL)); } catch (_) {}
     adoptHome(next);
-    homeMigration = { status: 'migrated', from: legacy, at, by: PULSE_VERSION, justNow: true };
-    console.log('[burnglass] moved your settings and history: copied ' + copied.length + ' item(s) from ' +
-      legacy + ' to ' + next + ' (the old folder is kept, untouched, as a backup)');
+    if (copied.length) {
+      homeMigration = { status: 'migrated', from: legacy, at, by: PULSE_VERSION, justNow: true, copied: copied.length };
+      console.log('[burnglass] moved your settings and history: copied ' + copied.length + ' item(s) from ' +
+        legacy + ' to ' + next + ' (the old folder is kept, untouched, as a backup)');
+    } else {
+      homeMigration = null; // nothing moved — never claim it did
+      console.log('[burnglass] now using ' + next + ' (' + legacy + ' held no settings or history to copy; it is left untouched)');
+    }
     scrubLegacyMeshyKeyIfCopied();
   } catch (e) {
     removeMigrationStage(stage);
@@ -445,6 +510,9 @@ function scrubLegacyMeshyKey(onlyIf) {
   const legacy = legacyCompatHome();
   if (!legacy) return false;
   const f = path.join(legacy, 'config.json');
+  // A config.json linked to the live one (either direction) is not a backup:
+  // "scrubbing" it would delete the user's ONLY copy of the key.
+  if (sameEntry(f, configFilePath())) return false;
   let j;
   try { j = JSON.parse(fs.readFileSync(f, 'utf8')); } catch (_) { return false; }
   if (!j || typeof j !== 'object' || Array.isArray(j) || !j.meshyApiKey) return false;
@@ -455,11 +523,17 @@ function scrubLegacyMeshyKey(onlyIf) {
   try {
     // tmp + rename keeps a crash from truncating the file — except for a
     // dotfile-synced SYMLINK, which a rename would replace with a plain file:
-    // write through the link instead.
+    // write through the link instead. The replacement keeps the original's
+    // mode (a fresh file would get the umask default: 0600 -> 0644).
     let link = false;
     try { link = fs.lstatSync(f).isSymbolicLink(); } catch (_) {}
     if (link) fs.writeFileSync(f, body);
-    else { fs.writeFileSync(tmp, body); fs.renameSync(tmp, f); }
+    else {
+      const m = modeBits(f);
+      fs.writeFileSync(tmp, body, m != null ? { mode: m } : undefined);
+      if (m != null && process.platform !== 'win32') fs.chmodSync(tmp, m);
+      fs.renameSync(tmp, f);
+    }
   } catch (e) {
     try { fs.unlinkSync(tmp); } catch (_) {}
     console.warn('[burnglass] could not remove the Meshy API key from ' + f + ': ' + e.message +
@@ -3160,7 +3234,10 @@ function readHistory() {
   const legacyFiles = ld ? listHistoryMonths(ld) : null;
   if (legacyFiles && legacyFiles.length) dirs.push({ dir: ld, files: legacyFiles });
   if (!dirs.length) return EMPTY_HISTORY;
-  let sig = '';
+  // The legacy merge below retires by the CONFIGURED custom names, so a
+  // rename must invalidate the cache even though no month file changed.
+  const customNames = dirs.length > 1 ? customSourceNames() : null;
+  let sig = customNames ? Array.from(customNames).sort().join(',') + '#' : '';
   for (const { dir, files } of dirs) {
     sig += dir + '|';
     for (const f of files) {
@@ -3179,7 +3256,21 @@ function readHistory() {
         // Legacy day also present in the new archive: per-cell union, new
         // archive first (pickCell keeps `a` on an equal message count).
         const cells = indexCells(byDay[ds].rows);
-        for (const r of month[ds].rows) { const k = cellKey(r.source, r.model); cells[k] = pickCell(cells[k], r); }
+        // The legacy archive is never healed by a re-seal, so the rename
+        // retirement mergeDayRecord applies to the new home's file is applied
+        // here: when the new archive's day carries custom cells under a
+        // CONFIGURED name, a legacy custom cell under a name no longer
+        // configured is that data's pre-rename identity — adding it would
+        // count the day twice once its log lines roll off (the live-coverage
+        // guard in buildPeriod/totals no longer fires then). A day with no
+        // configured custom cells in the new archive keeps its legacy cells:
+        // removing a source is not renaming it.
+        const renamed = byDay[ds].rows.some((r) => r.c && customNames.has(r.source));
+        for (const r of month[ds].rows) {
+          const k = cellKey(r.source, r.model);
+          if (renamed && r.c && !cells[k] && !customNames.has(r.source)) continue;
+          cells[k] = pickCell(cells[k], r);
+        }
         byDay[ds] = { rows: Object.values(cells), sessions: Math.max(byDay[ds].sessions, month[ds].sessions) };
       }
     }
@@ -7400,7 +7491,12 @@ function stopRunning(port) {
 
 // Shortcut plumbing shared by --install-shortcuts and --install: WScript.Shell
 // driven from powershell.exe. Both are Windows builtins, so no dependency.
-function psQuote(s) { return "'" + String(s).replace(/'/g, "''") + "'"; }
+// PowerShell ends a single-quoted string at ANY of ' \u2018 \u2019 \u201A
+// \u201B (about_Quoting_Rules; the tray script is read as UTF-8 via its BOM),
+// so every one is doubled — a quote followed by a quote is one literal of the
+// SECOND kind, and doubling each in place round-trips the exact string. A
+// profile folder like C:\Users\Seán O\u2019Neill must never end the literal.
+function psQuote(s) { return "'" + String(s).replace(/['\u2018\u2019\u201A\u201B]/g, '$&$&') + "'"; }
 function createShortcuts(specs) {
   const lines = ['$W = New-Object -ComObject WScript.Shell;'];
   specs.forEach((s, i) => {
@@ -7782,7 +7878,8 @@ function uninstallApp() {
   for (const k of kept) console.log('  • kept ' + k);
   console.log('');
   const homes = [appHome()];
-  if (!explicitHome() && isDir(legacyHomePath()) && !samePathAbs(appHome(), legacyHomePath())) homes.push(legacyHomePath());
+  const legacyKept = legacyCompatHome(); // a separate Pulse folder — not a link to this home, not PulseAudio's
+  if (legacyKept) homes.push(legacyKept);
   for (const h of homes) console.log('  KEPT: ' + h + ' — your config, budget and archived history are untouched.');
   console.log('  Delete a folder yourself if you want it gone.');
   if (selfLeft) console.log('  KEPT: ' + selfLeft + ' (this executable) — remove it manually.');
@@ -8201,8 +8298,10 @@ function runSummary() {
 // payload.integrations, the setup printers) when it no longer exists.
 // ---------------------------------------------------------------------------
 // First token of a command line ("quoted" or bare); for `node <script>` the
-// script. Returns '' when there is nothing path-like.
-function commandTarget(cmd) {
+// script. Returns '' when there is nothing path-like. commandToken keeps a
+// leading ~ as written; commandTarget expands it (the display form).
+function commandTarget(cmd) { return expandTilde(commandToken(cmd)); }
+function commandToken(cmd) {
   const toks = [];
   const re = /"((?:[^"\\]|\\.)*)"|'([^']*)'|(\S+)/g;
   let m;
@@ -8213,8 +8312,37 @@ function commandTarget(cmd) {
   if (!toks.length) return '';
   let t = toks[0];
   if (/^node(\.exe)?$/i.test(path.basename(t)) && toks[1] && !toks[1].startsWith('-')) t = toks[1];
-  if (t === '~' || t.startsWith('~/') || t.startsWith('~\\')) t = path.join(os.homedir(), t.slice(1));
   return t;
+}
+function isTildePath(t) { return t === '~' || t.startsWith('~/') || t.startsWith('~\\'); }
+function expandTilde(t) { return t && isTildePath(t) ? path.join(os.homedir(), t.slice(1)) : t; }
+// Does the command's target exist? true / false, or null when it cannot be
+// VERIFIED from here — never a false "missing" (that is a permanent warning
+// bar over a status line that works). On Windows, Claude Code runs these
+// commands through Git Bash: `/c/Users/…` (and `/cygdrive/c/…`) is the MSYS
+// spelling of `C:\Users\…` and is checked as such; any other drive-less
+// rooted path (`/usr/bin/…`, `\foo`) is a Git Bash mount or the current
+// drive — unverifiable; and `~` is Git Bash's $HOME, which need not be the
+// profile folder, so a tilde path that is not found there is unknown, not
+// gone. opts (tests): { platform, home, exists }.
+function integrationTargetExists(raw, opts) {
+  const o = opts || {};
+  const platform = o.platform || process.platform;
+  const win = platform === 'win32';
+  const P = win ? path.win32 : path.posix;
+  const exists = o.exists || fs.existsSync;
+  if (!raw) return null;
+  let t = String(raw);
+  const tilde = isTildePath(t);
+  if (tilde) t = P.join(o.home || os.homedir(), t.slice(1));
+  else if (win) {
+    const m = /^\/(?:cygdrive\/)?([a-zA-Z])(?:\/(.*))?$/.exec(t);
+    if (m) t = m[1].toUpperCase() + ':\\' + (m[2] || '').replace(/\//g, '\\');
+    else if (/^[\\/](?![\\/])/.test(t)) return null; // rooted, no drive: not checkable
+  }
+  if (!P.isAbsolute(t)) return null; // on PATH, relative, $VAR/…, %VAR%\…
+  if (exists(t)) return true;
+  return win && tilde ? null : false;
 }
 let integrationsMemo = { sig: '', list: [] };
 function claudeIntegrations() {
@@ -8230,11 +8358,11 @@ function claudeIntegrations() {
     if (typeof command !== 'string') return;
     const flag = kind === 'statusline' ? '--statusline' : '--mode-hook';
     if (!command.includes(flag)) return;
-    const target = commandTarget(command);
-    const abs = !!target && path.isAbsolute(target);
+    const raw = commandToken(command);
+    const target = expandTilde(raw);
     list.push({
       kind, event: event || null, command, target: target || null,
-      exists: abs ? fs.existsSync(target) : null, // null = not a path we can check (on PATH, env var…)
+      exists: integrationTargetExists(raw), // null = not a path we can check (on PATH, env var, Git Bash mount…)
       legacyName: !!target && /^pulse([.-]|$)/i.test(path.basename(target)),
     });
   };
@@ -8507,4 +8635,5 @@ if (require.main === module) main();
 module.exports = {
   PRICING, priceFor, costForEntry, normalize, dedupKey,
   computeBlocks, floorToHour, aggregate, parseAll, tokensOf, localDateStr,
+  psQuote, trayScript, integrationTargetExists, sameEntry,
 };

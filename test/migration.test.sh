@@ -22,6 +22,26 @@
 #  M7 two servers racing the same HOME -> exactly one marker, no staging dirs
 #  M8 port taken -> migration DEFERRED (nothing published); the next start does it
 #  M9 --statusline picks the FRESHEST LIVE server.json across both homes
+#  L1-L3 same-folder homes: ~/.pulse -> ~/.burnglass, ~/.burnglass -> ~/.pulse,
+#     and a per-file config.json link (both directions) are ONE home — the
+#     legacy Meshy-key scrub must never delete the only copy, at start or on a
+#     dashboard key save
+#  P1 permissions never widen: a 0700 ~/.pulse (+ 0700 history/) becomes a
+#     0700 ~/.burnglass, file modes are kept, the key-holding config stays
+#     0600 through a key save and the legacy scrub; P2 the default 755/644
+#     layout is unchanged and a NEW key-holding config is created 0600
+#  A1 a ~/.pulse with no Pulse file (PulseAudio's) is not migrated, mirrored
+#     or reported; A2 one holding only a log + server.json switches homes but
+#     never claims "settings and history were copied"
+#  Q1 a home path with typographic apostrophes (U+2018..U+201B) yields a tray
+#     script whose $logFile literal parses to the exact path (PowerShell's
+#     quoting rule, unit harness) + psQuote round-trips every quote kind
+#  I1 integrations exists-check: Git Bash /c/... and /cygdrive/c/... are
+#     checked as C:\...; drive-less rooted and unfound ~ paths are unknown
+#     (null) on Windows, never a false "missing"
+#  H1 legacy history + custom-source rename: a legacy c-cell under a retired
+#     name is not added beside its renamed new-home cell (no double count),
+#     a removed source's legacy cells survive, a rename re-reads the cache
 #  U1 updater: asset matching its own filename first, then new, then legacy;
 #     follows a repo-rename 301; versionNum ranks 2.0.0-rc.1 BELOW 2.0.0
 set -u
@@ -31,8 +51,8 @@ MOCKS=""
 # KEEP_TMP=1 keeps the fixture homes for debugging (mocks are always killed).
 cleanup() { for p in $MOCKS; do kill "$p" 2>/dev/null; done; if [ -n "${KEEP_TMP:-}" ]; then echo "TMP=$TMP"; else rm -rf "$TMP"; fi; }
 trap cleanup EXIT
-# This suite owns ports 5831-5845; a leftover listener would make results lie.
-for p in $(seq 5831 5845); do
+# This suite owns ports 5831-5856; a leftover listener would make results lie.
+for p in $(seq 5831 5856); do
   curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$p/"; rc=$?
   if [ $rc -ne 7 ]; then echo "FAIL  port $p is already in use (curl rc=$rc) — stop whatever holds it"; exit 1; fi
 done
@@ -226,6 +246,183 @@ echo "{\"port\":5841,\"host\":\"127.0.0.1\",\"pid\":$MN,\"startedAt\":$((NOW+500
 echo '{}' | env -u PULSE_HOME -u BURNGLASS_HOME HOME="$H9" NO_COLOR=1 node "$ROOT/server.js" --statusline > "$TMP/m9b.txt" 2>/dev/null
 kill $ML $MN 2>/dev/null
 
+# ---------------------------------------------------------------- L1-L3 same-folder homes
+KEY1="msy-LINKED-key-1"; KEY2="msy-LINKED-key-2"
+meshy_set() { # port key out
+  curl -s -X POST -H 'X-Pulse: 1' -H 'Content-Type: application/json' -d "{\"key\":\"$2\"}" \
+    "http://127.0.0.1:$1/api/meshy/enable" > "$3"
+}
+link_case() { # tag port home — start, summary, save KEY2 from the dashboard, stop
+  start_srv "$3" "$2" "$TMP/$1.log"; wait_up "$2"
+  summary "$2" "$TMP/$1-a.json"
+  meshy_set "$2" "$KEY2" "$TMP/$1-set.json"
+  summary "$2" "$TMP/$1-b.json"
+  stop_srv $SRV
+}
+cfg_key() { printf '{"meshy":true,"meshyApiKey":"%s","budget":%s}\n' "$1" "$2"; }
+# L1: data moved, a link left for old companions
+HL1=$TMP/hl1; mkdir -p "$HL1/.burnglass/history"
+cfg_key "$KEY1" 51 > "$HL1/.burnglass/config.json"
+ln -s .burnglass "$HL1/.pulse"
+link_case l1 5846 "$HL1"
+# L2: "just point Burnglass at my old folder"
+HL2=$TMP/hl2; mkdir -p "$HL2/.pulse/history"
+cfg_key "$KEY1" 52 > "$HL2/.pulse/config.json"
+ln -s .pulse "$HL2/.burnglass"
+link_case l2 5847 "$HL2"
+# L3: two real folders, only config.json shared (new -> old, then old -> new)
+HL3=$TMP/hl3; mkdir -p "$HL3/.pulse/history" "$HL3/.burnglass"
+cfg_key "$KEY1" 53 > "$HL3/.pulse/config.json"
+ln -s ../.pulse/config.json "$HL3/.burnglass/config.json"
+link_case l3 5848 "$HL3"
+HL4=$TMP/hl4; mkdir -p "$HL4/.pulse/history" "$HL4/.burnglass"
+cfg_key "$KEY1" 54 > "$HL4/.burnglass/config.json"
+ln -s ../.burnglass/config.json "$HL4/.pulse/config.json"
+link_case l4 5849 "$HL4"
+
+# ---------------------------------------------------------------- P1/P2 permissions
+HP1=$TMP/hp1; mkdir -p "$HP1/.pulse/history"
+cfg_key "$KEY1" 61 > "$HP1/.pulse/config.json"
+echo '{}' > "$HP1/.pulse/history/2025-01.json"
+echo '{"version":1,"tasks":{}}' > "$HP1/.pulse/meshy.json"
+chmod 700 "$HP1/.pulse" "$HP1/.pulse/history"; chmod 600 "$HP1/.pulse/config.json" "$HP1/.pulse/history/2025-01.json"; chmod 640 "$HP1/.pulse/meshy.json"
+( umask 022; start_srv "$HP1" 5850 "$TMP/p1.log"; wait_up 5850
+  stat -c '%n %a' "$HP1/.burnglass" "$HP1/.burnglass/history" "$HP1/.burnglass/config.json" \
+    "$HP1/.burnglass/history/2025-01.json" "$HP1/.burnglass/meshy.json" "$HP1/.pulse/config.json" > "$TMP/p1-modes-a.txt"
+  meshy_set 5850 "$KEY2" "$TMP/p1-set.json"
+  stat -c '%n %a' "$HP1/.burnglass/config.json" "$HP1/.pulse/config.json" > "$TMP/p1-modes-b.txt"
+  stop_srv $SRV )
+HP2=$TMP/hp2; mkdir -p "$HP2/.pulse/history" "$TMP/hp2b"
+echo '{"budget": 62}' > "$HP2/.pulse/config.json"; echo '{}' > "$HP2/.pulse/history/2025-01.json"
+chmod 755 "$HP2/.pulse" "$HP2/.pulse/history"; chmod 644 "$HP2/.pulse/config.json" "$HP2/.pulse/history/2025-01.json"
+( umask 022; start_srv "$HP2" 5851 "$TMP/p2.log"; wait_up 5851
+  stat -c '%n %a' "$HP2/.burnglass" "$HP2/.burnglass/history" "$HP2/.burnglass/config.json" "$HP2/.burnglass/history/2025-01.json" > "$TMP/p2-modes.txt"
+  stop_srv $SRV
+  start_srv "$TMP/hp2b" 5851 "$TMP/p2b.log"; wait_up 5851   # fresh home: the key creates config.json
+  meshy_set 5851 "$KEY2" "$TMP/p2b-set.json"
+  stat -c '%n %a' "$TMP/hp2b/.burnglass/config.json" > "$TMP/p2b-modes.txt"
+  stop_srv $SRV )
+
+# ---------------------------------------------------------------- A1/A2 not-a-Pulse-home
+HA1=$TMP/ha1; mkdir -p "$HA1/.pulse"
+for f in 0123456789abcdef0123456789abcdef-default-sink 0123456789abcdef0123456789abcdef-stream-volumes.tdb \
+  0123456789abcdef0123456789abcdef-card-database.tdb; do echo pa > "$HA1/.pulse/$f"; done
+hash_tree "$HA1/.pulse" "$TMP/ha1-before.txt"
+start_srv "$HA1" 5852 "$TMP/a1.log"; wait_up 5852
+summary 5852 "$TMP/a1.json"; stop_srv $SRV
+hash_tree "$HA1/.pulse" "$TMP/ha1-after.txt"
+HA2=$TMP/ha2; mkdir -p "$HA2/.pulse"
+echo "old log" > "$HA2/.pulse/pulse.log"
+echo '{"port":1,"host":"127.0.0.1","pid":999999999,"startedAt":1,"version":"1.34.0"}' > "$HA2/.pulse/server.json"
+start_srv "$HA2" 5853 "$TMP/a2.log"; wait_up 5853
+summary 5853 "$TMP/a2.json"; stop_srv $SRV
+start_srv "$HA2" 5853 "$TMP/a2b.log"; wait_up 5853
+summary 5853 "$TMP/a2b.json"; stop_srv $SRV
+
+# ---------------------------------------------------------------- Q1 typographic quotes
+HQ="$TMP/hq/Seán O’Neill ‘x‚‛ 'y'"; mkdir -p "$HQ/.pulse"
+echo '{"budget": 71}' > "$HQ/.pulse/config.json"
+printf '$myVer = %s1.34.0%s\r\n# v1 tray\r\n' "'" "'" > "$HQ/.pulse/tray.ps1"
+start_srv "$HQ" 5854 "$TMP/q1.log"; wait_up 5854
+summary 5854 "$TMP/q1.json"; stop_srv $SRV
+cp "$HQ/.pulse/tray.ps1" "$TMP/q1-tray.ps1" 2>/dev/null
+# unit harness: the SAME rule PowerShell's tokenizer applies (CharTraits
+# IsSingleQuote = ' U+2018 U+2019 U+201A U+201B; a quote followed by any
+# quote is one escaped literal of the second kind; else it ends the string)
+env -u PULSE_HOME -u BURNGLASS_HOME HOME="$HQ" node -e '
+const fs = require("fs"), path = require("path");
+const [ROOT, T, HQ] = process.argv.slice(1);
+const SQ = new Set(["\x27", "\u2018", "\u2019", "\u201A", "\u201B"]);
+function scanSq(s, i) { // s[i] is the opening quote -> { value, end } | null (unterminated)
+  let out = ""; i++;
+  for (;;) {
+    if (i >= s.length) return null;
+    const c = s[i];
+    if (SQ.has(c)) { if (SQ.has(s[i + 1])) { out += s[i + 1]; i += 2; continue; } return { value: out, end: i + 1 }; }
+    out += c; i++;
+  }
+}
+const logLine = (script) => {
+  const line = script.replace(/^\uFEFF/, "").split(/\r\n/)[0];
+  const pre = "$logFile = ";
+  if (!line.startsWith(pre) || !SQ.has(line[pre.length])) return { line, lit: null };
+  const lit = scanSq(line, pre.length);
+  return { line, lit, rest: lit ? line.slice(lit.end) : null };
+};
+const res = {};
+try {
+  const s = require(ROOT + "/server.js");
+  const samples = ["C:\\Users\\Se\u00e1n O\u2019Neill\\.burnglass", "\u2018\u2019\u201A\u201B\x27", "a\x27\u2019b", "", "\u201B\u201B"];
+  res.roundTrip = samples.map((x) => { const q = s.psQuote(x); const r = scanSq(q, 0); return !!r && r.value === x && r.end === q.length; });
+  const l = logLine(s.trayScript(4747));
+  res.unit = { value: l.lit && l.lit.value, rest: l.rest, expect: path.join(HQ, ".burnglass", "burnglass.log") };
+} catch (e) { res.err = String(e && e.message || e); }
+try { const l = logLine(fs.readFileSync(T + "/q1-tray.ps1", "utf8")); res.file = { value: l.lit && l.lit.value, rest: l.rest }; } catch (e) { res.fileErr = String(e.message); }
+fs.writeFileSync(T + "/q1-unit.json", JSON.stringify(res));
+' "$ROOT" "$TMP" "$HQ" >/dev/null 2>&1
+
+# ---------------------------------------------------------------- I1 integrations (Windows paths)
+node -e '
+const fs = require("fs"); const [ROOT, T] = process.argv.slice(1);
+const res = {};
+try {
+  const { integrationTargetExists: X } = require(ROOT + "/server.js");
+  const have = new Set(["C:\\Users\\frank\\AppData\\Local\\Programs\\Pulse\\pulse.exe", "C:\\Users\\frank\\bin\\pulse.exe",
+    "C:/Users/frank/tools/pulse.exe"]); // a C:/ path is passed through as written (Windows accepts it)
+  const W = { platform: "win32", home: "C:\\Users\\frank", exists: (p) => have.has(p) };
+  const L = { platform: "linux", home: "/home/frank", exists: (p) => p === "/home/frank/bin/pulse-linux" };
+  res.cases = [
+    ["msys existing",       X("/c/Users/frank/AppData/Local/Programs/Pulse/pulse.exe", W), true],
+    ["cygdrive existing",   X("/cygdrive/c/Users/frank/AppData/Local/Programs/Pulse/pulse.exe", W), true],
+    ["msys gone",           X("/c/Users/frank/Downloads/pulse.exe", W), false],
+    ["native gone",         X("C:\\Users\\frank\\Downloads\\pulse.exe", W), false],
+    ["forward-slash drive", X("C:/Users/frank/tools/pulse.exe", W), true],
+    ["git-bash mount",      X("/usr/bin/pulse", W), null],
+    ["drive-less rooted",   X("\\tools\\pulse.exe", W), null],
+    ["tilde found",         X("~/bin/pulse.exe", W), true],
+    ["tilde not found",     X("~/gone/pulse.exe", W), null],
+    ["on PATH",             X("pulse", W), null],
+    ["posix tilde found",   X("~/bin/pulse-linux", L), true],
+    ["posix tilde gone",    X("~/gone/pulse-linux", L), false],
+    ["posix absolute gone", X("/opt/gone/pulse-linux", L), false],
+  ].map(([n, got, want]) => ({ n, got, want }));
+} catch (e) { res.err = String(e && e.message || e); }
+fs.writeFileSync(T + "/i1.json", JSON.stringify(res));
+' "$ROOT" "$TMP" >/dev/null 2>&1
+
+# ---------------------------------------------------------------- H1 legacy history x custom rename
+HH=$TMP/hh; mkdir -p "$HH/.pulse/history" "$HH/.burnglass/history"
+node -e '
+const fs = require("fs"); const [HH, OUT] = process.argv.slice(1);
+const now = Date.now(), dayMs = 86400e3;
+const ds = (ms) => { const d = new Date(ms); const p = (n) => String(n).padStart(2, "0");
+  return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()); };
+const D = ds(now - 40 * dayMs), E = ds(now - 41 * dayMs), F = ds(now - 42 * dayMs);
+const nh = {}, lh = {};
+const put = (o, d, rows) => { const m = d.slice(0, 7); (o[m] = o[m] || {})[d] = { rows, sessions: 1 }; };
+const cli = { source: "cli", model: "claude-fable-5", cost: 1, tokens: 100, messages: 1 };
+// D: renamed myagent -> agent2 in v2; the re-seal healed ONLY the new home
+put(nh, D, [cli, { source: "agent2", model: "m1", cost: 10, tokens: 1000, messages: 2, c: 1 }]);
+put(lh, D, [cli, { source: "myagent", model: "m1", cost: 10, tokens: 1000, messages: 2, c: 1 },
+            { source: "codex", model: "gpt-5.5", cost: 3, tokens: 300, messages: 1 }]);
+// E: a source REMOVED from config (no configured custom cell that day) keeps its legacy cells
+put(nh, E, [cli]);
+put(lh, E, [{ source: "removedtool", model: "m1", cost: 5, tokens: 500, messages: 1, c: 1 }]);
+// F: same configured name on both sides -> the more complete cell wins
+put(nh, F, [{ source: "agent2", model: "m1", cost: 4, tokens: 400, messages: 2, c: 1 }]);
+put(lh, F, [{ source: "agent2", model: "m1", cost: 6, tokens: 600, messages: 3, c: 1 }]);
+for (const m of Object.keys(nh)) fs.writeFileSync(HH + "/.burnglass/history/" + m + ".json", JSON.stringify(nh[m]));
+for (const m of Object.keys(lh)) fs.writeFileSync(HH + "/.pulse/history/" + m + ".json", JSON.stringify(lh[m]));
+fs.writeFileSync(HH + "/.burnglass/config.json", JSON.stringify({ customSources: [{ name: "agent2", path: HH + "/agent.jsonl" }] }));
+fs.writeFileSync(OUT, JSON.stringify({ D, E, F }));
+' "$HH" "$TMP/h1-dates.json"
+start_srv "$HH" 5855 "$TMP/h1.log"; wait_up 5855
+summary 5855 "$TMP/h1a.json"
+node -e 'require("fs").writeFileSync(process.argv[1] + "/.burnglass/config.json", JSON.stringify({ customSources: [
+  { name: "agent2", path: process.argv[1] + "/agent.jsonl" }, { name: "myagent", path: process.argv[1] + "/agent.jsonl" }] }))' "$HH"
+summary 5855 "$TMP/h1b.json"
+stop_srv $SRV
+
 # ---------------------------------------------------------------- U1 updater
 REL=$TMP/release.json
 node -e '
@@ -404,6 +601,79 @@ ok(m8.homeMigration && m8.homeMigration.status === "migrated" && m8.budget && m8
 // ---- M9
 ok(/12\.34/.test(R("m9a.txt")), "M9: a stale-but-newer ~/.burnglass/server.json (dead pid) loses to the live legacy one (" + R("m9a.txt").trim() + ")");
 ok(/56\.78/.test(R("m9b.txt")), "M9: both alive -> the newer server.json wins (" + R("m9b.txt").trim() + ")");
+
+// ---- L1-L3 same-folder homes
+const K1 = "msy-LINKED-key-1", K2 = "msy-LINKED-key-2";
+for (const [tag, home, real, desc] of [
+  ["l1", "hl1", "hl1/.burnglass/config.json", "~/.pulse -> ~/.burnglass"],
+  ["l2", "hl2", "hl2/.pulse/config.json", "~/.burnglass -> ~/.pulse"],
+  ["l3", "hl3", "hl3/.pulse/config.json", "~/.burnglass/config.json -> ~/.pulse/config.json"],
+  ["l4", "hl4", "hl4/.burnglass/config.json", "~/.pulse/config.json -> ~/.burnglass/config.json"],
+]) {
+  const a = J(tag + "-a.json") || {}, set = J(tag + "-set.json") || {}, b = J(tag + "-b.json") || {};
+  ok(a.meshy && a.meshy.hasKey === true, "L: " + desc + ": the Meshy key survives the start (hasKey " + (a.meshy && a.meshy.hasKey) + ")");
+  ok(set.ok === true && set.meshy && set.meshy.hasKey === true && b.meshy && b.meshy.hasKey === true,
+     "L: " + desc + ": a key saved from the dashboard is kept (" + JSON.stringify(set.meshy && set.meshy.hasKey) + ")");
+  let cfg = {}; try { cfg = JSON.parse(fs.readFileSync(path.join(T, real), "utf8")); } catch (_) {}
+  ok(cfg.meshyApiKey === K2, "L: " + desc + ": the one real config.json holds the new key");
+  ok(!/removed the Meshy API key/.test(R(tag + ".log")), "L: " + desc + ": no legacy scrub of the live config");
+  ok(a.homeMigration === null && stages(home).length === 0, "L: " + desc + ": no migration, no staging dir");
+}
+
+// ---- P1/P2 permissions
+const modes = (f) => Object.fromEntries(R(f).trim().split("\n").filter(Boolean).map((l) => { const i = l.lastIndexOf(" "); return [path.relative(T, l.slice(0, i)), l.slice(i + 1)]; }));
+const pa = modes("p1-modes-a.txt"), pb = modes("p1-modes-b.txt");
+ok(pa["hp1/.burnglass"] === "700", "P1: a 0700 ~/.pulse becomes a 0700 ~/.burnglass (got " + pa["hp1/.burnglass"] + ")");
+ok(pa["hp1/.burnglass/history"] === "700", "P1: history/ keeps its 0700 (got " + pa["hp1/.burnglass/history"] + ")");
+ok(pa["hp1/.burnglass/config.json"] === "600" && pa["hp1/.burnglass/history/2025-01.json"] === "600" && pa["hp1/.burnglass/meshy.json"] === "640",
+   "P1: file modes are copied (" + JSON.stringify(pa) + ")");
+ok(pa["hp1/.pulse/config.json"] === "600", "P1: the legacy key scrub keeps the old config user-only (got " + pa["hp1/.pulse/config.json"] + ")");
+ok((J("p1-set.json") || {}).ok === true && pb["hp1/.burnglass/config.json"] === "600", "P1: a dashboard key save keeps config.json 0600 (got " + pb["hp1/.burnglass/config.json"] + ")");
+const p2 = modes("p2-modes.txt"), p2b = modes("p2b-modes.txt");
+ok(p2["hp2/.burnglass"] === "755" && p2["hp2/.burnglass/history"] === "755" && p2["hp2/.burnglass/config.json"] === "644" && p2["hp2/.burnglass/history/2025-01.json"] === "644",
+   "P2: the default 755/644 layout is unchanged (" + JSON.stringify(p2) + ")");
+ok(p2b["hp2b/.burnglass/config.json"] === "600", "P2: a NEW config.json holding a Meshy key is created 0600 (got " + p2b["hp2b/.burnglass/config.json"] + ")");
+
+// ---- A1/A2 not-a-Pulse-home
+const a1 = J("a1.json") || {};
+ok(a1.home === path.join(T, "ha1", ".burnglass") && a1.homeMigration === null, "A1: PulseAudio-style ~/.pulse -> fresh ~/.burnglass, no migration reported (" + JSON.stringify(a1.homeMigration) + ")");
+ok(!exists("ha1/.burnglass/migrated-from-pulse.json") && !/moved your settings/.test(R("a1.log")), "A1: no marker, no \"moved your settings\" log line");
+ok(R("ha1-before.txt") === R("ha1-after.txt") && !exists("ha1/.pulse/server.json"), "A1: PulseAudio files untouched, nothing mirrored into it");
+const a2 = J("a2.json") || {}, a2b = J("a2b.json") || {};
+ok(a2.home === path.join(T, "ha2", ".burnglass"), "A2: a ~/.pulse with only a log + server.json still hands over to ~/.burnglass");
+ok(a2.homeMigration === null && a2b.homeMigration === null, "A2: ...but never claims settings/history were copied (" + JSON.stringify(a2.homeMigration) + ", restart " + JSON.stringify(a2b.homeMigration) + ")");
+ok(!/moved your settings/.test(R("a2.log")), "A2: the log does not say \"moved your settings\"");
+let a2sj = {}; try { a2sj = JSON.parse(R("ha2/.pulse/server.json")); } catch (_) {}
+ok(a2sj.port === 5853, "A2: the old server.json is still mirrored for v1 companions");
+
+// ---- Q1 typographic quotes
+const q = J("q1-unit.json") || {};
+const HQREAL = path.join(T, "hq", "Se\u00e1n O\u2019Neill \u2018x\u201A\u201B \x27y\x27");
+ok(!q.err && Array.isArray(q.roundTrip) && q.roundTrip.length === 5 && q.roundTrip.every(Boolean), "Q1: psQuote round-trips every PowerShell single-quote kind (" + JSON.stringify(q.roundTrip || q.err) + ")");
+ok(q.unit && q.unit.value === q.unit.expect && q.unit.rest === "", "Q1: trayScript $logFile literal parses to the exact home path (" + JSON.stringify(q.unit) + ")");
+ok(q.file && q.file.value === path.join(HQREAL, ".burnglass", "burnglass.log") && q.file.rest === "",
+   "Q1: the refreshed legacy ~/.pulse/tray.ps1 parses too (" + JSON.stringify(q.file || q.fileErr) + ")");
+ok((J("q1.json") || {}).home === path.join(HQREAL, ".burnglass"), "Q1: the quoted home migrated");
+
+// ---- I1 integrations (Windows paths)
+const i1 = J("i1.json") || {};
+ok(!i1.err && Array.isArray(i1.cases), "I1: integrationTargetExists is available (" + (i1.err || "ok") + ")");
+for (const c of i1.cases || []) ok(c.got === c.want, "I1: " + c.n + " -> " + JSON.stringify(c.got) + " (want " + JSON.stringify(c.want) + ")");
+
+// ---- H1 legacy history x custom rename
+const HD = J("h1-dates.json") || {};
+const day = (f, d) => { const p = ((J(f) || {}).periods || []).find((x) => x.key === "last90"); return p && p.daily.find((x) => x.date === d); };
+const hd = day("h1a.json", HD.D), he = day("h1a.json", HD.E), hf = day("h1a.json", HD.F);
+ok(hd && Math.abs(hd.total - 14) < 1e-9 && !hd.bySource.myagent, "H1: a legacy cell under the renamed-away name is not counted beside its new name (D = $14, got " + (hd && hd.total) + " " + JSON.stringify(hd && hd.bySource) + ")");
+ok(he && Math.abs(he.total - 6) < 1e-9 && he.bySource.removedtool === 5, "H1: a REMOVED source keeps its legacy history (E = $6, got " + (he && he.total) + ")");
+ok(hf && Math.abs(hf.total - 6) < 1e-9, "H1: same name both sides -> the more complete cell wins (F = $6, got " + (hf && hf.total) + ")");
+const ha = J("h1a.json") || {};
+ok(Array.isArray(ha.allSources) && !ha.allSources.includes("myagent") && ha.allSources.includes("removedtool"), "H1: the retired name does not reappear (" + JSON.stringify(ha.allSources) + ")");
+// the live transcripts are shared with M1 (no archive there): the archive adds exactly D+E+F
+const archAdds = ha.totals && m1.totals ? ha.totals.cost - m1.totals.cost : NaN;
+ok(Math.abs(archAdds - 26) < 1e-6, "H1: all-time counts each archived day once (+$26, got " + archAdds + ")");
+const hd2 = day("h1b.json", HD.D);
+ok(hd2 && Math.abs(hd2.total - 24) < 1e-9, "H1: configuring the old name again is picked up without a file change (D = $24, got " + (hd2 && hd2.total) + ")");
 
 // ---- U1
 const U = (f) => J(f) || {};
