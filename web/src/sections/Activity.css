@@ -1,9 +1,143 @@
 /* =============================================================================
    sections/Activity.css — styles for sections/Activity.jsx ONLY.
-   OWNER: the Activity section engineer. Scope EVERY selector under .sec-activity (the
-   class <Section id="activity"> puts on the root) — CSS is global and four people
-   edit sections in parallel. Floating content (Tip/Menu/Sheet) is portalled
-   to <body>: style it through its own prefixed class (activity-…), not .sec-activity.
-   Use the tokens + primitives in ../styles.css; never hard-code colours.
-   Mockup reference (design-command/src/styles.css): .hm* (l.483-497), .tbl-sess .sess-t .proj .srcl .models .ago .sess-meta (l.500-509); ≤760 l.669-681, l.708
+   OWNER: the Activity section engineer. Every selector is scoped under
+   .sec-activity; the portalled tooltip bodies use the act-… prefix.
+   Tokens + shared primitives (.tbl/.tr/.sw/.est/.efflab/.fastchip/.seg) live
+   in ../styles.css — nothing here hard-codes a colour.
+   Mockup reference (design-command/src/styles.css): .hm* (l.483-497),
+   .tbl-sess .sess-t .proj .srcl .models .ago .sess-meta (l.500-509);
+   ≤760 l.669-681, l.708.
    ============================================================================= */
+
+/* ---- heatmap: [weekday | 24 cells | total] with hour totals on top ---- */
+.sec-activity .hm {
+  display: grid; grid-template-columns: 34px minmax(0, 1fr) 52px; column-gap: 8px; row-gap: 3px; align-items: center;
+  border-radius: var(--r-sm); min-width: 0;
+}
+.sec-activity .hm:focus-visible { outline-offset: 6px; }
+.sec-activity .hm-top { display: flex; align-items: flex-end; gap: 3px; height: 36px; margin-bottom: 4px; min-width: 0; }
+.sec-activity .hm-top i { flex: 1 1 0; min-width: 0; min-height: 1px; background: var(--q4); border-radius: 2px 2px 0 0; }
+.sec-activity .hm-top i.on { background: var(--q6); }
+.sec-activity .hm-row { display: grid; grid-template-columns: repeat(24, minmax(0, 1fr)); gap: 3px; min-width: 0; }
+.sec-activity .hm-row i { display: block; height: 26px; border-radius: 3px; background: var(--panel-2); cursor: default; }
+.sec-activity .hm-row i.hl { position: relative; box-shadow: 0 0 0 2px var(--panel), 0 0 0 3.5px var(--text); }
+.sec-activity .hm-row i.on { position: relative; box-shadow: 0 0 0 2px var(--panel), 0 0 0 3.5px var(--accent); }
+.sec-activity .hm-d { font-size: var(--fs-2xs); line-height: var(--lh-2xs); color: var(--text-3); white-space: nowrap; }
+.sec-activity .hm-d.on { color: var(--text); font-weight: var(--fw-semi); }
+.sec-activity .hm-t {
+  font-size: var(--fs-2xs); line-height: var(--lh-2xs); color: var(--text-2); text-align: right;
+  font-variant-numeric: tabular-nums; white-space: nowrap; min-width: 0;
+}
+.sec-activity .hm-tot { color: var(--text-3); align-self: end; }
+.sec-activity .hm-x {
+  display: grid; grid-template-columns: repeat(24, minmax(0, 1fr)); gap: 3px; margin-top: 3px; min-width: 0;
+  font-size: var(--fs-2xs); line-height: var(--lh-2xs); color: var(--text-3);
+}
+.sec-activity .hm-x span { white-space: nowrap; }
+.sec-activity .hm-x span.on { color: var(--text); }
+.sec-activity .hm-foot {
+  display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin-top: var(--sp-4);
+}
+.sec-activity .hm-legend {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: var(--fs-2xs); line-height: var(--lh-2xs); color: var(--text-3);
+}
+.sec-activity .hm-legend i { display: block; width: 14px; height: 10px; border-radius: 2px; }
+.sec-activity .hm-foot .hint b { color: var(--text-2); }
+
+/* ---- sessions: single-line grid rows (container-sized) ---- */
+.sec-activity .act-cq { container-type: inline-size; min-width: 0; }
+.sec-activity .tbl-sess .tr {
+  grid-template-columns: minmax(0, 1fr) 128px 164px 136px 70px 64px 44px 64px;
+  min-height: 40px;
+}
+.sec-activity .sess-t { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.sec-activity .proj {
+  flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 1px 6px; border-radius: var(--r-xs); background: var(--panel-3); color: var(--text-2);
+  font-family: var(--font-mono); font-size: 11px; line-height: 16px;
+}
+.sec-activity .sess-t .t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.sec-activity .sess-t .id { flex: none; font-family: var(--font-mono); font-size: 11px; color: var(--text-3); }
+.sec-activity .srcl {
+  display: inline-flex; align-items: center; gap: 6px; min-width: 0; white-space: nowrap;
+  font-size: var(--fs-xs); color: var(--text-2);
+}
+.sec-activity .sw.act-mixed { background: transparent; box-shadow: inset 0 0 0 1px var(--text-3); }
+.sec-activity .c-mod, .sec-activity .c-eff { min-width: 0; }
+.sec-activity .models {
+  display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; white-space: nowrap;
+  font-size: var(--fs-xs); color: var(--text-2); border-radius: var(--r-xs);
+}
+.sec-activity .models .mname { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.sec-activity .more-m {
+  flex: none; padding: 0 4px; border: 1px solid var(--line-2); border-radius: var(--r-xs);
+  font-size: var(--fs-2xs); line-height: 16px; color: var(--text-3); font-variant-numeric: tabular-nums;
+}
+.sec-activity .act-eff { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; border-radius: var(--r-xs); }
+/* single line in the table: whatever does not fit wraps onto a hidden 2nd line
+   (whole chips drop out, never half-clipped); the tooltip lists everything */
+.sec-activity .c-eff .act-eff { flex-wrap: wrap; align-content: flex-start; height: 20px; overflow: hidden; }
+.sec-activity .ago { color: var(--text-3); font-size: var(--fs-xs); }
+.sec-activity .c-c { font-weight: var(--fw-med); }
+.sec-activity .sess-meta { display: none; }
+
+@container (max-width: 999px) {
+  .sec-activity .tbl-sess .tr { grid-template-columns: minmax(0, 1fr) 116px 140px 128px 70px 60px; }
+  .sec-activity .tbl-sess .c-tok,
+  .sec-activity .tbl-sess .c-msg,
+  .sec-activity .sess-t .id { display: none; }
+}
+
+/* ---- narrow (phones, and tablets under ~800 px): 2-line session cards ---- */
+@container (max-width: 719px) {
+  .sec-activity .tbl-sess .th { display: none; }
+  .sec-activity .tbl-sess .tr {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "t c" "m m";
+    row-gap: 6px; padding: 10px 0;
+  }
+  .sec-activity .tbl-sess .c-t { grid-area: t; }
+  .sec-activity .tbl-sess .c-c { grid-area: c; align-self: start; font-weight: var(--fw-semi); }
+  .sec-activity .tbl-sess .c-src,
+  .sec-activity .tbl-sess .c-mod,
+  .sec-activity .tbl-sess .c-eff,
+  .sec-activity .tbl-sess .c-tok,
+  .sec-activity .tbl-sess .c-msg,
+  .sec-activity .tbl-sess .c-ago { display: none; }
+  .sec-activity .tbl-sess .sess-meta {
+    grid-area: m; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-width: 0;
+    font-size: var(--fs-xs); color: var(--text-3);
+  }
+  .sec-activity .sess-meta .srcl { font-size: var(--fs-xs); }
+  .sec-activity .sess-meta .models { display: inline; color: var(--text-2); }
+  .sec-activity .sess-meta .ago { margin-left: auto; }
+  .sec-activity .sess-t { flex-wrap: wrap; row-gap: 2px; }
+  .sec-activity .sess-t .proj { max-width: 100%; }
+  .sec-activity .sess-t .t {
+    flex-basis: 100%; order: 3; white-space: normal; overflow-wrap: anywhere;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  }
+  .sec-activity .sess-t .id { display: none; }
+}
+
+/* ---- phone ---- */
+@media (max-width: 760px) {
+  .sec-activity .act-hm .ph .sp { display: none; }
+  .sec-activity .act-hm .ph .pa { flex-basis: 100%; }
+  .sec-activity .hm { grid-template-columns: 28px minmax(0, 1fr); column-gap: 6px; row-gap: 2px; }
+  .sec-activity .hm-t, .sec-activity .hm-tot { display: none; }
+  .sec-activity .hm-row, .sec-activity .hm-x, .sec-activity .hm-top { gap: 2px; }
+  .sec-activity .hm-row i { height: 14px; border-radius: 2px; }
+  .sec-activity .hm-x .alt { visibility: hidden; }
+}
+
+/* ---- portalled tooltip bodies (outside .sec-activity) ---- */
+.act-hmtip { min-width: 150px; }
+.act-hmtip-h { font-weight: var(--fw-semi); margin-bottom: 4px; }
+.act-hmtip dl { margin: 0; display: grid; gap: 2px; }
+.act-hmtip dl > div { display: flex; justify-content: space-between; gap: 16px; }
+.act-hmtip dt { color: var(--text-3); }
+.act-hmtip dd { margin: 0; font-variant-numeric: tabular-nums; }
+.act-tip-list { display: grid; gap: 4px; }
+.act-tip-list > div { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.act-tip-list code { color: var(--text-3); font-size: var(--fs-2xs); margin-left: auto; padding-left: 8px; }

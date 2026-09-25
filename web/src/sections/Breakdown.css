@@ -1,9 +1,97 @@
 /* =============================================================================
    sections/Breakdown.css — styles for sections/Breakdown.jsx ONLY.
-   OWNER: the Breakdown section engineer. Scope EVERY selector under .sec-breakdown (the
-   class <Section id="breakdown"> puts on the root) — CSS is global and four people
-   edit sections in parallel. Floating content (Tip/Menu/Sheet) is portalled
-   to <body>: style it through its own prefixed class (breakdown-…), not .sec-breakdown.
-   Use the tokens + primitives in ../styles.css; never hard-code colours.
-   Mockup reference (design-command/src/styles.css): .tbl-model .tbl-proj .tbl-eff (l.450-452), .mix (l.462-463), .eff-key (l.476-478); ≤760 l.656-668 + l.713-714 — .tbl/.mag/.sig/.efflab/.fastchip are shared
+   OWNER: the Breakdown section engineer. Every selector is scoped under
+   .sec-breakdown; the portalled tooltip bodies use the bd-tip… prefix.
+   Tokens + shared primitives (.tbl/.tr/.mag/.sig/.efflab/.fastchip/.share/
+   .hatch) live in ../styles.css — nothing here hard-codes a colour.
+   Mockup reference (design-command/src/styles.css): .tbl-model .tbl-proj
+   .tbl-eff (l.450-452), .mix (l.462-463), .eff-key (l.476-478); ≤760
+   l.656-668 + l.713-714.
    ============================================================================= */
+
+/* ---- effort-mix bar (stacked 100%, one segment per level) ---- */
+.sec-breakdown .mix {
+  display: flex; width: 100%; height: 8px; gap: 1px; border-radius: 2px; overflow: hidden; min-width: 0;
+}
+.sec-breakdown .mix i { display: block; min-width: 2px; }
+.sec-breakdown .mix[tabindex] { cursor: default; }
+.sec-breakdown .mix:focus-visible { outline-offset: 3px; }
+
+/* ---- by model ---- */
+.sec-breakdown .tbl-model .tr {
+  grid-template-columns: minmax(0, 150px) minmax(110px, 1fr) 48px 58px 52px 92px 58px;
+}
+.sec-breakdown .tbl-model .c-mode { display: flex; justify-content: flex-end; }
+.sec-breakdown .tbl-model .c-v,
+.sec-breakdown .tbl-model .c-meta { display: none; }
+.sec-breakdown .tbl-model .c-n .fam-wrap { align-self: center; }
+
+/* effort legend under the model table */
+.sec-breakdown .eff-key {
+  display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 10px;
+  font-size: var(--fs-2xs); line-height: var(--lh-2xs); color: var(--text-3);
+}
+.sec-breakdown .eff-key span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.sec-breakdown .eff-key i { display: block; width: 10px; height: 8px; border-radius: 2px; }
+
+/* ---- by effort ---- */
+.sec-breakdown .bd-effshare { height: 8px; gap: 2px; border-radius: 2px; margin-bottom: var(--sp-2); }
+.sec-breakdown .tbl-eff .tr { grid-template-columns: 104px minmax(80px, 1fr) 52px; }
+.sec-breakdown .bd-hi { margin-top: 10px; }
+.sec-breakdown .bd-hi b { color: var(--text-2); }
+.sec-breakdown .bd-cov { margin-top: 10px; }
+.sec-breakdown .bd-none { padding: var(--sp-2) 0; }
+
+/* ---- by project (container-sized: c-12 wide, lg-7 / md-6 narrow) ---- */
+.sec-breakdown .bd-cq { container-type: inline-size; min-width: 0; }
+.sec-breakdown .tbl-proj .tr {
+  grid-template-columns: minmax(0, 220px) minmax(120px, 1fr) 52px 64px 60px 44px;
+  min-height: 33px;
+}
+.sec-breakdown .tbl-proj .cell-name .t { border-radius: var(--r-xs); cursor: default; }
+@container (max-width: 619px) {
+  .sec-breakdown .tbl-proj .tr { grid-template-columns: minmax(0, 120px) minmax(80px, 1fr) 48px 40px; }
+  .sec-breakdown .tbl-proj .c-tok,
+  .sec-breakdown .tbl-proj .c-msg { display: none; }
+}
+@container (max-width: 379px) {
+  .sec-breakdown .tbl-proj .tr { grid-template-columns: minmax(0, 96px) minmax(40px, 1fr) 46px; }
+  .sec-breakdown .tbl-proj .c-ses { display: none; }
+}
+
+/* ---- phone: model rows become 3-line cards ---- */
+@media (max-width: 760px) {
+  .sec-breakdown .tbl-model .th { display: none; }
+  .sec-breakdown .tbl-model .tr {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "n v" "b b" "m m";
+    row-gap: 6px; padding: 10px 0;
+  }
+  .sec-breakdown .tbl-model .c-n { grid-area: n; }
+  .sec-breakdown .tbl-model .c-b { grid-area: b; }
+  .sec-breakdown .tbl-model .c-b .v { display: none; }
+  .sec-breakdown .tbl-model .c-v { grid-area: v; display: block; font-weight: var(--fw-semi); }
+  .sec-breakdown .tbl-model .c-share,
+  .sec-breakdown .tbl-model .c-tok,
+  .sec-breakdown .tbl-model .c-msg,
+  .sec-breakdown .tbl-model .c-mix,
+  .sec-breakdown .tbl-model .c-mode { display: none; }
+  .sec-breakdown .tbl-model .c-meta {
+    grid-area: m; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-width: 0;
+    font-size: var(--fs-xs); color: var(--text-3);
+  }
+  .sec-breakdown .tbl-model .c-meta-mix { display: block; width: 70px; flex: none; }
+  .sec-breakdown .tbl-eff .tr { grid-template-columns: 104px minmax(40px, 1fr) 46px; }
+}
+
+/* ---- portalled tooltip bodies (outside .sec-breakdown) ---- */
+.bd-tip-h { font-weight: var(--fw-semi); margin-bottom: 4px; }
+.bd-tip-r {
+  display: grid; grid-template-columns: 10px minmax(0, 1fr) auto 44px; align-items: center; gap: 2px 8px;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.bd-tip-k { display: block; width: 10px; height: 8px; border-radius: 2px; }
+.bd-tip-l { color: var(--text); overflow: hidden; text-overflow: ellipsis; }
+.bd-tip-n { color: var(--text-3); text-align: right; }
+.bd-tip-p { color: var(--text-2); text-align: right; }
+.bd-tip-path { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text); overflow-wrap: anywhere; margin-bottom: 2px; }
