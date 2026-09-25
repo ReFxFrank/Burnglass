@@ -2,7 +2,7 @@
 // sections/Kpis.jsx — the KPI strip ("Overview"): hero period spend + 4 tiles.
 // OWNER: the Kpis section engineer. Styles: ./Kpis.css, scoped .sec-kpis.
 //
-// PROPS (SectionProps — see CONTRACT.md):
+// PROPS (SectionProps — built in App.jsx):
 //   id          'kpis' — render on the root <Section id={id}> (no title/label;
 //               the rail's "Overview" item points here)
 //   data        payload; reads today{cost,tokens,messages}, week{…},

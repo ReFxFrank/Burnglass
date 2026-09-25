@@ -2,7 +2,7 @@
 // sections/Breakdown.jsx — "Breakdown": by model, by effort, by project.
 // OWNER: the Breakdown section engineer. Styles: ./Breakdown.css, scoped .sec-breakdown.
 //
-// PROPS (SectionProps — see CONTRACT.md):
+// PROPS (SectionProps — built in App.jsx):
 //   id          'breakdown' — root <Section id={id} title="Breakdown" meta={period.label}>
 //   data        payload; reads modesLogged (tooltip wording)
 //   period      byModel{model:{cost,tokens,messages,speeds{fast?,standard?},tiers,

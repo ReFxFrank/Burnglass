@@ -54,10 +54,10 @@
 .sec-activity .proj {
   flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   padding: 1px 6px; border-radius: var(--r-xs); background: var(--panel-3); color: var(--text-2);
-  font-family: var(--font-mono); font-size: 11px; line-height: 16px;
+  font-family: var(--font-mono); font-size: var(--fs-2xs); line-height: 16px;
 }
 .sec-activity .sess-t .t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
-.sec-activity .sess-t .id { flex: none; font-family: var(--font-mono); font-size: 11px; color: var(--text-3); }
+.sec-activity .sess-t .id { flex: none; font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-3); }
 .sec-activity .srcl {
   display: inline-flex; align-items: center; gap: 6px; min-width: 0; white-space: nowrap;
   font-size: var(--fs-xs); color: var(--text-2);

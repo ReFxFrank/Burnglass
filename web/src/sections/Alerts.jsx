@@ -2,7 +2,7 @@
 // sections/Alerts.jsx — limit + spend-anomaly alert strip (top of the page).
 // OWNER: the Alerts section engineer. Styles: ./Alerts.css, scoped .sec-alerts.
 //
-// PROPS (SectionProps, identical for every section — see CONTRACT.md):
+// PROPS (SectionProps, identical for every section — built in App.jsx):
 //   id          'alerts' — root <Section id={id}> (no group label: the strip
 //               sits above the KPIs)
 //   data        payload; reads data.alerts[] = { key, label, pct, threshold,

@@ -1,7 +1,6 @@
 // =============================================================================
 // ui.jsx — shared React primitives for the Command Center dashboard.
-// SHARED FILE (see CONTRACT.md): section engineers import from here and never
-// edit it. Every colour comes from CSS tokens (styles.css); nothing here
+// Every colour comes from CSS tokens (styles.css); nothing here
 // animates on its own; floating layers (tooltips, menus, sheets) are portalled
 // to <body> and positioned with plain fixed coordinates — no blur, no library.
 // =============================================================================
@@ -67,6 +66,12 @@ export function Section({ id, title, meta, className, children }) {
   );
 }
 
+// Accessible name for a panel/KPI ⓘ: "About Budget · this month" (a generic
+// "More info" repeated a dozen times is useless in a screen-reader list).
+function aboutLabel(title) {
+  return typeof title === 'string' && title ? 'About ' + title : 'More info';
+}
+
 // Panel = the one card surface. span → grid column span inside a Section
 // (3|4|5|6|7|8|12). `flush` renders children edge-to-edge (no .pb padding).
 export function Panel({
@@ -78,7 +83,7 @@ export function Panel({
     <div id={id} className={cx('panel', span && 'c-' + span, className)} {...rest}>
       {hasHead && (
         <div className={cx('ph', headClassName)}>
-          {title && <T className="pt">{title}{info ? <InfoTip text={info} /> : null}</T>}
+          {title && <T className="pt">{title}{info ? <InfoTip text={info} label={aboutLabel(title)} /> : null}</T>}
           {ctx ? <span className="ctx">{ctx}</span> : null}
           {actions ? <><span className="sp" /><div className="pa">{actions}</div></> : null}
         </div>
@@ -276,7 +281,7 @@ export function Kpi({ label, info, badge, value, unit, sub, facts, hero, classNa
     <div className={cx('kpi', hero && 'kpi-hero', className)} {...rest}>
       <div className="kpi-l">
         <span className="kpi-lt">{label}</span>
-        {info ? <InfoTip text={info} /> : null}
+        {info ? <InfoTip text={info} label={aboutLabel(label)} /> : null}
         {badge || null}
       </div>
       {value != null ? <div className="kpi-v">{value}{unit ? <small>{unit}</small> : null}</div> : null}
@@ -391,7 +396,16 @@ export function Tip({ content, children, side = 'top', align = 'center', delay =
       hide();
     };
     const onKey = (e) => { if (e.key === 'Escape') hide(); };
-    const onScroll = () => hide();
+    // Follow the anchor on scroll/resize (Tab focusing an off-screen trigger
+    // scrolls the page AFTER the focus event, so hiding here would close a
+    // keyboard-opened tip instantly); close only once the anchor has left view.
+    const onScroll = () => {
+      const a = anchor.current;
+      if (!a || !tip.current) return;
+      const r = a.getBoundingClientRect();
+      if (r.bottom < 0 || r.top > window.innerHeight || (!r.width && !r.height)) { hide(); return; }
+      placeFloating(r, tip.current, { side, align, offset: 8 });
+    };
     document.addEventListener('pointerdown', onDown, true);
     document.addEventListener('keydown', onKey);
     window.addEventListener('scroll', onScroll, true);

@@ -2,7 +2,7 @@
 // sections/Activity.jsx — "Activity": when-you-work heatmap + recent sessions.
 // OWNER: the Activity section engineer. Styles: ./Activity.css, scoped .sec-activity.
 //
-// PROPS (SectionProps — see CONTRACT.md):
+// PROPS (SectionProps — built in App.jsx):
 //   id          'activity' — root <Section id={id} title="Activity">
 //   data        payload; reads heatmap{grid[7][24]{cost,tokens,messages},maxCost,maxMessages}
 //               (LIVE logs only; Sun-first rows; hide the panel when maxCost ≤ 0),

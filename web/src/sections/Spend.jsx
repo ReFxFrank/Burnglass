@@ -3,7 +3,7 @@
 // strip, and the By-source table.
 // OWNER: the Spend section engineer. Styles: ./Spend.css, scoped .sec-spend.
 //
-// PROPS (SectionProps — see CONTRACT.md):
+// PROPS (SectionProps — built in App.jsx):
 //   id          'spend' — root <Section id={id} title="Spend" meta="<period> · <sources>">
 //   data        payload; reads sourceMeta, estimatedSources, totals{cost,messages,bySource}
 //               (the "All time" share bar)
@@ -29,7 +29,7 @@ import {
 } from '../lib.js';
 import './Spend.css';
 
-// Same wording as the legacy CacheSavings / FastSpendNote tooltips (these carry
+// Same wording as the pre-redesign cache / fast-mode tooltips (these carry
 // the corrected OpenAI cache-write rule — keep them in step with server.js).
 const CACHE_INFO = 'Cache reads bill at a fraction of the input rate; cache writes bill above it (25% extra for the 5-minute TTL, 100% for the 1-hour TTL). Net is the read saving minus that write premium, priced per entry at each model’s own rate — so it can be negative when a window writes more cache than it reuses. Anthropic bills cache writes above input; OpenAI does too on models with a published cache-write price (GPT-6, 5.6 family, at 1.25×); Google bills none — each entry uses its own provider’s rule. Covers the sessions still in your logs — the long-window archive keeps day/model totals, not per-entry token types.';
 const FAST_INFO = 'Fast mode bills at a higher per-token rate on the models that offer it. The premium is what those same messages would have cost at that model’s standard rate, subtracted from what they actually cost. Covers the sessions still in your logs — the long-window archive keeps day/model totals, not per-entry speed.';

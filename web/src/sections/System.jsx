@@ -3,7 +3,7 @@
 // integrations (real switches), Discord images, log tail.
 // Styles: ./System.css, scoped .sec-system.
 //
-// PROPS (SectionProps — see CONTRACT.md):
+// PROPS (SectionProps — built in App.jsx):
 //   id          'system' — root <Section id={id} title="System"> (update pills link to #system)
 //   data        reads version, serverStartTs, generatedAt, pid, memory{rss,heapUsed},
 //               daemon, packaged, update{status,latest,checkedAt,installSupported,releasesUrl,error},
@@ -16,8 +16,8 @@
 //   thresholds  the alert thresholds (Desktop alerts copy)
 //   onStopped   → <StopButton> (two-click confirm, POST /api/shutdown)
 //
-// ENDPOINTS (all through lib.postJson → X-Pulse: 1), unchanged from the legacy
-// ServerPanel: /api/update/check, /api/update/install (then poll GET
+// ENDPOINTS (all through lib.postJson → X-Pulse: 1), unchanged from the
+// pre-redesign server panel: /api/update/check, /api/update/install (then poll GET
 // /api/health until the version changes → reload), /api/meters/enable|disable,
 // /api/discord/enable|disable, /api/discord/images (JSON body, ONLY the edited
 // slots), /api/meshy/enable|disable (+ key in the BODY via MeshyKeyForm),
@@ -27,7 +27,7 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { Section, Panel, Btn, Badge, Switch, Seg, Field, Input, InfoTip, StopButton, cx } from '../ui.jsx';
 import { Icon } from '../icons.jsx';
-import { BRAND, EXE_NAME, BP, ago, clockTime, dur, hm, postJson, useLogs, useMedia } from '../lib.js';
+import { BRAND, EXE_NAME, STRIP_EXE_NAME, BP, ago, clockTime, dur, hm, postJson, useLogs, useMedia } from '../lib.js';
 import { MeshyKeyForm } from './Meshy.jsx';
 import './System.css';
 
@@ -436,7 +436,7 @@ function Integrations({ data, notify, thresholds, ovr }) {
               if (!n) return 'Strip off. It exits within a minute.';
               return r.strip && r.strip.path
                 ? `${BRAND} Strip starting on your taskbar. Drag it anywhere; click it for the popover.`
-                : { text: `On, but pulse-strip.exe was not found. Put it next to ${EXE_NAME} (or set "stripPath" in ~/.pulse/config.json).`, tone: 'warn' };
+                : { text: `On, but ${STRIP_EXE_NAME} was not found. Put it next to ${EXE_NAME} (or set "stripPath" in ~/.pulse/config.json).`, tone: 'warn' };
             }, 'Strip toggle failed: ')}
           >
             Taskbar strip companion with a popover dashboard.
@@ -676,8 +676,6 @@ export function SystemPanel({ data, gfx, theme, notify, thresholds, onStopped })
     </Panel>
   );
 }
-// Legacy name (server-panel.jsx re-exports it).
-export const ServerPanel = SystemPanel;
 
 export default function System({ id, data, gfx, theme, notify, thresholds, onStopped }) {
   return (

@@ -3,7 +3,7 @@
 // tokens, budget gauge, plan value.
 // OWNER: the Limits section engineer. Styles: ./Limits.css, scoped .sec-limits.
 //
-// PROPS (SectionProps — see CONTRACT.md):
+// PROPS (SectionProps — built in App.jsx):
 //   id          'limits' — root <Section id={id} title="Limits & budget" meta=…>
 //   data        payload; reads
 //                 meters{enabled,status,buckets[]{key,label,pct,resetsAt,stale,projLeftAtReset},

@@ -1,7 +1,6 @@
 // Provider marks for the model families recognized in ./model-families.js.
 // Marks are simple original glyphs (evocative, not exact trademarked logos)
 // painted with the --fam-* tokens, so light mode can darken them.
-// SHARED FILE (see CONTRACT.md).
 //
 //   <ModelLogo model="claude-opus-5-5" size={14} />   mark for a model id
 //   <FamilyMark family="openai" size={14} />          mark for a provider family

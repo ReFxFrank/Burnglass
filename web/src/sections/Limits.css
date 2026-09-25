@@ -106,10 +106,10 @@
 .sec-limits .g-pace { fill: var(--text-2); stroke: var(--panel); stroke-width: 2; }
 .sec-limits .g-pace.warn { fill: var(--warn); }
 .sec-limits .g-pace.crit { fill: var(--crit); }
-.sec-limits .g-pct { text-anchor: middle; font-family: var(--font-sans); font-size: 28px; font-weight: var(--fw-semi); letter-spacing: -.5px; fill: var(--text); font-variant-numeric: tabular-nums; }
+.sec-limits .g-pct { text-anchor: middle; font-family: var(--font-sans); font-size: var(--fs-2xl); font-weight: var(--fw-semi); letter-spacing: -.5px; fill: var(--text); font-variant-numeric: tabular-nums; }
 .sec-limits .gauge-svg.warn .g-pct { fill: var(--warn); }
 .sec-limits .gauge-svg.crit .g-pct { fill: var(--crit); }
-.sec-limits .g-sub { text-anchor: middle; font-family: var(--font-sans); font-size: 11px; fill: var(--text-3); }
+.sec-limits .g-sub { text-anchor: middle; font-family: var(--font-sans); font-size: var(--fs-2xs); fill: var(--text-3); }
 
 .sec-limits .facts { display: grid; gap: 8px; margin: 0; min-width: 0; }
 .sec-limits .facts > div { display: flex; justify-content: space-between; align-items: baseline; gap: var(--sp-2); padding-bottom: 6px; border-bottom: 1px dashed var(--line); min-width: 0; }

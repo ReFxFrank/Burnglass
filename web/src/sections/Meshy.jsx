@@ -3,7 +3,7 @@
 // Styles: ./Meshy.css, scoped .sec-meshy (the key form is also used inside
 // the System section, so its classes are prefixed meshy-kf-… and global).
 //
-// PROPS (SectionProps — see CONTRACT.md): id, data (reads data.meshy:
+// PROPS (SectionProps — built in App.jsx): id, data (reads data.meshy:
 //   {enabled,hasKey,status(ok|stale|error|no-key|idle|disabled),balance,
 //   credits{today,week,month,allTime},byType{type:{credits,tasks}},
 //   daily[]{date,credits,tasks},families[],fetchedAt,error}).
@@ -17,7 +17,7 @@
 // from state the moment it is sent, and is never displayed (payload: hasKey).
 // =============================================================================
 import { useId, useState } from 'react';
-import { Section, Panel, Btn, Badge, Input, MBar, Tip, InfoTip, cx } from '../ui.jsx';
+import { Section, Panel, Btn, Badge, Input, MBar, Tip, cx } from '../ui.jsx';
 import { Icon } from '../icons.jsx';
 import { BRAND, ago, num, postJson, shortDate } from '../lib.js';
 import './Meshy.css';

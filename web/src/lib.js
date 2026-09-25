@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 
 // =============================================================================
-// lib.js — shared, framework-light helpers for the dashboard.
-// SHARED FILE (see CONTRACT.md): section code imports from here but never
-// edits it. Everything below is pure or a small React hook.
+// lib.js — shared, framework-light helpers for the dashboard (formatters,
+// names, preferences, fetch/POST). Everything below is pure or a small React
+// hook; sections import from here rather than re-implementing any of it.
 // =============================================================================
 
 // ---- brand -------------------------------------------------------------------
@@ -13,14 +13,14 @@ export const BRAND = 'Pulse';
 // The executable users double-click to start the server again (stopped page,
 // System panel copy). Kept next to BRAND so a rename touches one file.
 export const EXE_NAME = 'pulse.exe';
+// The Windows taskbar-strip companion's executable (System panel help copy).
+export const STRIP_EXE_NAME = 'pulse-strip.exe';
 
 // ---- colour ------------------------------------------------------------------
 // Categorical palette for SOURCES ONLY (validated in both themes). Values are
 // CSS custom properties so light/dark switch without any JS; they work in
 // style={{ background }}, SVG fill/stroke attributes and innerHTML alike.
 export const SERIES = ['var(--s1)', 'var(--s2)', 'var(--s3)', 'var(--s4)', 'var(--s5)', 'var(--s6)'];
-// Interactive accent (links, selected state, single-series marks).
-export const ACCENT = 'var(--accent)';
 
 // Effort levels, low → max, as an ordinal one-hue ramp (--ef1…--ef5). Never
 // the only cue: pair it with <Signal>/<EffortLabel> (ui.jsx) or text.
@@ -68,8 +68,6 @@ export function money(v) {
   const s = '$' + Math.abs(n).toLocaleString(LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   return n < 0 ? '−' + s : s;
 }
-// Legacy name — identical to money() now (it used to show 3 decimals < $10).
-export const money2 = money;
 // Compact money for chart axes and tight labels: $0 · $2.5 · $25 · $1.2k · $12k.
 export function moneyAxis(v) {
   if (v == null || !isFinite(v)) return '—';
@@ -129,15 +127,6 @@ export function dur(ms) {
   if (m >= 1) return m + 'm ' + pad(s % 60) + 's';
   return s + 's';
 }
-// H:MM:SS — only for sub-hour live countdowns where seconds matter.
-export function durClock(ms) {
-  if (ms == null || ms < 0) return '—';
-  const s = Math.floor(ms / 1000);
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = s % 60;
-  return h + ':' + pad(m) + ':' + pad(sec);
-}
 // "3m ago" relative to now.
 export function ago(ms) {
   const d = Date.now() - ms;
@@ -154,11 +143,6 @@ export function formatReset(ts) {
   if (ts == null || !isFinite(ts)) return '—';
   const d = new Date(ts);
   return WEEKDAYS[d.getDay()] + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
-}
-// 'YYYY-MM-DD' → "09/17" (legacy compact axis label)
-export function dayLabel(ds) {
-  const p = String(ds).split('-');
-  return p[1] + '/' + p[2];
 }
 // 'YYYY-MM-DD' → "Sep 17"
 export function shortDate(ds) {
@@ -211,11 +195,6 @@ export const SOURCE_LABELS = {
   cline: 'Cline',
   roo: 'Roo Code',
 };
-// Legacy: custom label or the raw key (no builtin map). Kept for old callers.
-export function sourceLabel(key, meta) {
-  const m = meta && meta[key];
-  return (m && m.label) || key;
-}
 // UI label for a source: custom label (payload.sourceMeta) → builtin → raw key.
 // Keys stay RAW everywhere that matters (filters, React keys, CSV, ?sources=).
 export function srcLabel(key, meta) {

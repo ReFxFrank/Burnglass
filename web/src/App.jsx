@@ -1,5 +1,5 @@
 // =============================================================================
-// App.jsx — the Command Center frame. SHARED FILE (see CONTRACT.md).
+// App.jsx — the Command Center frame.
 //   Rail (≥1024 px): brand, section nav with active tracking, PERIOD radios,
 //                    SOURCE checkboxes, all-time totals, Mini view, Stop.
 //   TopBar (≥1024):  title + context crumb, live chip, Updated time, reach,
@@ -11,17 +11,15 @@
 // graphics mode, notification permission) and hands it down as SectionProps.
 // =============================================================================
 import { useEffect, useLayoutEffect, useMemo, useState } from 'react';
-import { MotionConfig } from 'framer-motion';
 import {
   BRAND, EXE_NAME, useSummary, makeColorMap, srcLabel, money, num, clockTime, hm, ago, prettyModel, effortLabel,
-  alertThresholds, perf, readGraphicsMode, effectiveLite, applyGraphicsMode, useTheme, motionReduced,
+  alertThresholds, readGraphicsMode, effectiveLite, applyGraphicsMode, useTheme, motionReduced,
   readSourceFilter, writeSourceFilter, readPeriod, writePeriod,
   fireAlertNotifications, requestAlertPermission, notifyPermission,
 } from './lib.js';
 import { Icon } from './icons.jsx';
 import { Btn, IconBtn, Pill, Sheet, StopButton, WarnBar, Empty, Swatch, Est, Seg, Panel, Section, cx } from './ui.jsx';
 import { MiniOverview } from './mini.jsx';
-import './legacy.css'; // TEMPORARY — styles the legacy components the section stubs still render
 
 import Alerts from './sections/Alerts.jsx';
 import Kpis from './sections/Kpis.jsx';
@@ -211,7 +209,7 @@ export default function App() {
   const srcSummary = sourceSummary(srcFilter, allSrc, data.sourceMeta);
 
   return (
-    <MotionConfig reducedMotion={perf.lite ? 'always' : 'user'}>
+    <>
       <div className="app">
         <Rail
           data={data}
@@ -334,7 +332,7 @@ export default function App() {
           </div>
         </div>
       </Sheet>
-    </MotionConfig>
+    </>
   );
 }
 

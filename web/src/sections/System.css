@@ -58,7 +58,7 @@
 .sec-system .tg.off .tg-t .tg-n { color: var(--text-2); }
 .sec-system .tg .switch { margin-top: 1px; }
 .sec-system .tg-d { grid-column: 1 / -1; font-size: var(--fs-xs); line-height: 17px; color: var(--text-3); overflow-wrap: anywhere; min-width: 0; }
-.sec-system .tg-d code { font-size: 11px; }
+.sec-system .tg-d code { font-size: var(--fs-2xs); }
 .sec-system .tg-x { grid-column: 1 / -1; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 4px; min-width: 0; }
 .sec-system .tg-x .hint b { color: var(--text-2); }
 .sec-system .tg-x .sys-kf { flex: 1 1 100%; }

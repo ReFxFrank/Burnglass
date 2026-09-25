@@ -1,8 +1,6 @@
 // =============================================================================
 // charts.jsx — measured-SVG charts for the dashboard.
-// OWNER: the Spend section engineer (Spend.jsx is the only caller of
-// SpendChart; ProgressRing stays for the legacy 5h-block tile in panels.jsx
-// until integration deletes it).
+// Spend.jsx is the only caller (SpendChart + the single-source Sparkline).
 //
 // SpendChart — daily stacked bars by source (Command Center spec):
 //   · y-axis with nice ticks (lib.niceScale, exact-precision labels) and hairline gridlines
@@ -46,27 +44,6 @@ function topRoundedRect(x, y, w, h, r) {
   const rr = Math.max(0, Math.min(r, w / 2, h));
   if (rr <= 0) return `M${x},${y}h${w}v${h}h${-w}Z`;
   return `M${x},${y + h}V${y + rr}Q${x},${y} ${x + rr},${y}H${x + w - rr}Q${x + w},${y} ${x + w},${y + rr}V${y + h}Z`;
-}
-
-// ---------- circular progress ring (LEGACY: panels.jsx CurrentBlock) ----------
-export function ProgressRing({ fraction, size = 96, stroke = 8, children }) {
-  const r = (size - stroke) / 2;
-  const c = 2 * Math.PI * r;
-  const f = Math.max(0, Math.min(1, fraction || 0));
-  return (
-    <div style={{ position: 'relative', width: size, height: size, flex: 'none' }}>
-      <svg width={size} height={size} style={{ transform: 'rotate(-90deg)' }} aria-hidden="true">
-        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="var(--m-track)" strokeWidth={stroke} />
-        <circle
-          cx={size / 2} cy={size / 2} r={r} fill="none" stroke="var(--m-fill)" strokeWidth={stroke}
-          strokeLinecap="round" strokeDasharray={c} strokeDashoffset={c * (1 - f)}
-        />
-      </svg>
-      <div style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', textAlign: 'center' }}>
-        {children}
-      </div>
-    </div>
-  );
 }
 
 // ---------- cumulative-spend sparkline (single-source state) ----------

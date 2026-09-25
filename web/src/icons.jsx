@@ -1,7 +1,7 @@
 // =============================================================================
 // icons.jsx — the ONE icon set. 16×16 grid, 1.5 px line, round caps/joins,
 // drawn in currentColor so an icon always takes its text colour. Inline SVG,
-// no dependency, no sprite fetch. SHARED FILE (see CONTRACT.md).
+// no dependency, no sprite fetch.
 //
 //   <Icon name="download" />            16 px (class "ic")
 //   <Icon name="info" size={14} />      14 px (class "ic-sm")
@@ -60,8 +60,6 @@ const PATHS = {
   caretup: <path d="M8 4.5l4.2 6.5H3.8z" {...F} />,
   caretdown: <path d="M8 11.5l4.2-6.5H3.8z" {...F} />,
 };
-
-export const ICON_NAMES = Object.keys(PATHS);
 
 const SIZE_CLASS = { 16: 'ic', 14: 'ic-sm', 12: 'ic-xs' };
 
