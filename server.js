@@ -345,7 +345,7 @@ function priceFor(model, ts, speed) {
     // lands on claude-sonnet-5). Keep the parent's rate as the closest
     // estimate, but say so: claude-opus-5-5 sat silently on Opus 5's $5/$25
     // (vs its real $4/$20) until this was made visible.
-    if (best && best.startsWith('claude-') && !/^-(?:\d{8}|latest)$/.test(m.slice(best.length))) {
+    if (best && best.startsWith('claude-') && !/^(?:-v\d+)?-(?:\d{8}|latest)$/.test(m.slice(best.length))) {
       logUnknownModel(model, best);
     }
   }
@@ -610,9 +610,7 @@ function priceForOpenAI(model, ts) {
   return priceStep(p, ts);
 }
 // OpenAI token cost at a resolved row. Cached input bills at the row's own
-// published rate; the long-context tier scales the whole request. Rollouts
-// carry no cache-WRITE counts (and Codex-via-ChatGPT bills none), so the
-// 1.25× write surcharge Astra / 5.6 publish for the API is not modelled.
+// published rate; the long-context tier scales the whole request.
 // Rollout cache-WRITE tokens (`cache_write_input_tokens`, a subset of input)
 // arrive in cacheWrite5m and bill at the row's cacheWriteMult (else as plain
 // input). `speed === 'fast'` (Codex service_tier "priority") multiplies EVERY
@@ -1078,20 +1076,13 @@ function normalize(rec) {
     // never read again — retaining two unique strings per entry was pure RSS.
     key: dedupKey(rec),
   };
-  // `effort` is the request-level level Claude Code actually sent (written only
-  // when set); `perTurnEffort` (≥ 2.1.281) is a per-turn override that is
-  // always WRITTEN but only SENT when a beta is active — so it is the fallback,
-  // never the preferred source.
-  const recorded = recordedEffort(rec.effort) || recordedEffort(rec.perTurnEffort);
+  // `effort` = the level Claude Code actually SENT (written only when set).
+  // `perTurnEffort` (≥ 2.1.281) is deliberately IGNORED: it is always written
+  // but only sent when a beta is active, so a level taken from it may never
+  // have run — and a parseEffort is authoritative, so it would also BLOCK a
+  // real /effort echo from filling this entry in annotateModes.
+  const recorded = recordedEffort(rec.effort);
   if (recorded) e.parseEffort = recorded; // authoritative for this message — see annotateModes
-  // Transient parse-time marks (stripped in parseFile before caching): whether
-  // this line carries usage.iterations (only the FINAL line of a multi-block
-  // message does), and its advisor sub-inferences.
-  if (Array.isArray(u.iterations) && u.iterations.length) {
-    e._iters = true;
-    const adv = u.iterations.filter((it) => it && it.type === 'advisor_message');
-    if (adv.length) { e._advisor = adv; e._advisorModel = typeof rec.advisorModel === 'string' ? rec.advisorModel : ''; }
-  }
   e.cost = costForEntry(e);
   return e;
 }
@@ -1114,8 +1105,8 @@ function recordedEffort(v) {
 // this they were invisible spend. One extra entry per advisor iteration,
 // inheriting the executor entry's time/session/project/source; key suffix
 // keeps them unique and replay-stable.
-function advisorEntries(parent) {
-  const its = parent._advisor;
+function advisorEntries(parent, mark) {
+  const its = mark && mark.adv;
   if (!its || !its.length) return [];
   const out = [];
   its.forEach((it, i) => {
@@ -1127,7 +1118,7 @@ function advisorEntries(parent) {
     const e = {
       ts: parent.ts,
       provider: 'anthropic',
-      model: intern(typeof it.model === 'string' && it.model ? it.model : (parent._advisorModel || parent.model)),
+      model: intern(typeof it.model === 'string' && it.model ? it.model : (mark.advModel || parent.model)),
       source: parent.source,
       speed: 'standard',
       serviceTier: parent.serviceTier,
@@ -1174,6 +1165,7 @@ function parseFile(filePath) {
   const lines = raw.split('\n');
   const entries = [];
   const seen = new Map();       // per-file dedup: key -> index in entries
+  const marks = [];             // parallel to entries: parse-time marks (see below)
   const sessionMeta = {};       // sessionId -> { firstUserText, project }
   const ultracodeSessions = []; // sessions whose prompts invoked ultracode
   const effortEvents = [];      // time-stamped /effort changes parsed from the transcript
@@ -1236,6 +1228,17 @@ function parseFile(filePath) {
     if (rec.type !== 'assistant') continue;
     const e = normalize(rec);
     if (!e) continue;
+    // Parse-time marks kept in a SIDE array, never on the entry: adding then
+    // deleting properties flips a V8 object into slow dictionary mode — on
+    // every entry (current transcripts carry iterations on nearly every line)
+    // that was 3.4× the heap. iters = this line carries usage.iterations (only
+    // the FINAL line of a multi-block message does); adv = its advisor calls.
+    const its = rec.message.usage.iterations;
+    const mark = Array.isArray(its) && its.length ? {
+      iters: true,
+      adv: its.filter((it) => it && it.type === 'advisor_message'),
+      advModel: typeof rec.advisorModel === 'string' ? rec.advisorModel : '',
+    } : null;
     const at = seen.get(e.key);
     if (at !== undefined) {
       // Per-file dedup. Claude Code ≥ 2.1.281 writes one line per content
@@ -1246,15 +1249,17 @@ function parseFile(filePath) {
       // tie → the one carrying usage.iterations, which only the final line
       // has) at the FIRST line's timestamp — when the request was made.
       const prev = entries[at];
-      if (e.outputTokens > prev.outputTokens || (e.outputTokens === prev.outputTokens && e._iters && !prev._iters)) {
+      if (e.outputTokens > prev.outputTokens || (e.outputTokens === prev.outputTokens && mark && !marks[at])) {
         e.ts = prev.ts;
         e.cost = costForEntry(e);
         entries[at] = e;
+        marks[at] = mark;
       }
       continue;
     }
     seen.set(e.key, entries.length);
     entries.push(e);
+    marks.push(mark);
 
     // Record project path for sessions even if no user record was seen.
     if (e.sessionId && !sessionMeta[e.sessionId]) {
@@ -1263,13 +1268,15 @@ function parseFile(filePath) {
       sessionMeta[e.sessionId].project = e.project;
     }
   }
-  // Expand advisor sub-inferences from the KEPT copy of each message, then
-  // drop the transient marks so they never reach the mtime cache.
-  const expanded = [];
-  for (const e of entries) {
-    expanded.push(e);
-    if (e._advisor) for (const a of advisorEntries(e)) expanded.push(a);
-    delete e._iters; delete e._advisor; delete e._advisorModel;
+  // Expand advisor sub-inferences from the KEPT copy of each message. The
+  // marks array is local, so nothing transient ever reaches the mtime cache.
+  let expanded = entries;
+  if (marks.some((m) => m && m.adv.length)) {
+    expanded = [];
+    entries.forEach((e, i) => {
+      expanded.push(e);
+      for (const a of advisorEntries(e, marks[i])) expanded.push(a);
+    });
   }
   return { entries: expanded, sessionMeta, ultracodeSessions, effortEvents };
 }

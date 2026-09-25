@@ -92,6 +92,11 @@ lines.push({ type: "assistant", timestamp: "2026-09-23T11:00:00.000Z",
 lines.push({ type: "assistant", timestamp: "2026-09-23T12:00:00.000Z",
   sessionId: "s55-s", requestId: "rs55", cwd: "/p",
   message: { id: "ms55", model: "claude-sonnet-5-5", usage: { input_tokens: 1000000, output_tokens: 1000000 } } });
+// Version-stamped Vertex id: claude-3-5-sonnet-v2@20241022 -> the 3.5 Sonnet
+// row (3/15 -> 1M+1M = 18) SILENTLY (a -v2 stamp is not a point release).
+lines.push({ type: "assistant", timestamp: "2026-09-23T13:00:00.000Z",
+  sessionId: "v2-s", requestId: "rv2", cwd: "/p",
+  message: { id: "mv2", model: "claude-3-5-sonnet-v2@20241022", usage: { input_tokens: 1000000, output_tokens: 1000000 } } });
 // inference_geo "us": every token category at 1.1x — opus-4-6 1M+1M = 30 -> 33.
 lines.push({ type: "assistant", timestamp: "2026-09-16T14:00:00.000Z",
   sessionId: "geo-s", requestId: "rgeo", cwd: "/p",
@@ -292,7 +297,7 @@ ok(o55 && Math.abs(o55.cost - 72.2) < 0.005, "opus-5-5: 4/20 + 0.05x read (24.20
 const s55 = (sepM.byModel || {})["claude-sonnet-5-5"];
 ok(s55 && Math.abs(s55.cost - 12) < 0.005, "claude-sonnet-5-5 (no row) borrows Sonnet 5 2/10 = 12 (got " + (s55 ? s55.cost.toFixed(2) : "missing") + ")");
 for (const [m, want] of Object.entries({ "gpt-6-sol": 20.4, "gpt-6-luna": 0.51, "gpt-daybreak-red-latest": 10.3125,
-    "gpt-daybreak-blue-latest": 20.4, "gpt-5.2": 14.175, "gpt-5.2-codex": 14.175, "gpt-5.2-pro": 170.1, "us.openai.gpt-5.5": 8.75 })) {
+    "gpt-daybreak-blue-latest": 20.4, "gpt-5.2": 14.175, "gpt-5.2-codex": 14.175, "gpt-5.2-pro": 170.1, "us.openai.gpt-5.5": 8.75, "claude-3-5-sonnet-v2@20241022": 18 })) {
   const r = (sepM.byModel || {})[m];
   ok(r && Math.abs(r.cost - want) < 0.005, "v1.31 " + m + " = $" + want + " (got " + (r ? r.cost.toFixed(4) : "missing") + ")");
 }

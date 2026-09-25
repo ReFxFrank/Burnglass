@@ -32,20 +32,35 @@
   $0.01 / $0.50), both with the long-context tier; **gpt-5.2**, **gpt-5.2-codex**
   and **gpt-5.2-pro** rows (they were missing); the **Daybreak aliases**
   `gpt-daybreak-blue-latest` / `-red-latest` (→ 5.6 Sol / 5.6 Cyber).
-- **Codex Fast mode is priced.** Codex persists a `thread_settings_applied`
-  event whose `service_tier` is the tier the session actually runs —
-  including a model default. GPT-6 Sol and Luna default to `priority` (Fast)
-  in the Codex TUI, and Pulse was billing those turns at half price. Each
-  row carries its published Fast multiplier (2× for most, **2.5×** for
-  gpt-5.5, 1.8× for gpt-5-mini; none published → standard), and the fast
-  premium now appears in the fast-spend note for Codex too.
+- **Codex Fast mode is priced — where the rollout records it.** Codex
+  persists a `thread_settings_applied` event whose `service_tier` is the
+  tier the session actually runs, including a model default (GPT-6 Sol and
+  Luna run on `priority` = Fast in the Codex TUI by default, which Pulse
+  billed at half price). Each row carries its published Fast multiplier (2×
+  for most, **2.5×** for gpt-5.5, 1.8× for gpt-5-mini; none published →
+  standard), and the fast premium now appears in the fast-spend note for
+  Codex too. **Limitation:** Codex does not persist that snapshot for a
+  brand-new session until it is resumed, compacted, or its settings change,
+  so the early turns of a fresh session still price at standard — Pulse
+  never guesses the tier from the model default (`codex exec` doesn't apply
+  it, so guessing would double-bill those runs). It can under-count, never
+  over-count.
 - **Codex cache writes are priced.** Rollouts carry
   `cache_write_input_tokens` (a subset of input); rows with a published
   cache-write price (GPT-6 family, 5.6 family, 5.6 Cyber — 1.25× input) now
   bill those tokens at that rate, and the cache-savings strip nets it off.
-- **Effort chips:** `effort` stays the preferred source; Claude Code
-  2.1.281's new `perTurnEffort` is only a fallback (it is always written but
-  only sent when a beta is active). `auto`/`default` never become chips.
+- **Effort chips:** `effort` (the level actually sent) stays the source;
+  Claude Code 2.1.281's new `perTurnEffort` is ignored — it is always written
+  but only sent when a beta is active, and taking it would also block a real
+  `/effort` echo from filling that message. `auto`/`default` never become
+  chips.
+- Pre-release review caught a memory regression in this release's own parser
+  change (never shipped): temporary per-entry marks were added then deleted,
+  which flips V8 objects into slow dictionary mode — +50% process heap on a
+  50k-entry fixture. The marks now live in a side array; heap is back at the
+  v1.30.0 baseline. A version-stamped Vertex id
+  (`claude-3-5-sonnet-v2@20241022`) no longer logs a false unknown-model
+  warning.
 - Tests: new `transcript-format.test.sh` (fails on v1.30.0: its fixture
   totals $4.50 there vs the true $70.50); pricing, effort and meters suites
   extended; four meter-fixture suites moved to 0–100 values (every asserted
