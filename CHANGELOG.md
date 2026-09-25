@@ -8,10 +8,13 @@
   animated WebP (the only way Discord animates an image) or an uploaded
   art-asset key without editing `config.json`. An empty field goes back to
   the built-in art. Saving re-publishes the presence immediately instead of
-  on the next 15 s tick. Links must be https, have no spaces, and be at most
-  256 characters (Discord's limit); asset keys are lowercased the way
-  Discord stores them; one bad value rejects the whole save and nothing is
-  written. The panel deliberately shows no preview: rendering the link
+  on the next 15 s tick. Links must start with a real `https://`, have no
+  spaces, backslashes or embedded username/password (the presence is
+  public), and be at most 256 characters (Discord's limit); asset keys are
+  lowercased the way Discord stores them; one bad value rejects the whole
+  save and nothing is written. The form sends only the fields you changed,
+  so a value someone set by hand in `config.json` is never overwritten or
+  re-validated behind your back, and it locks while a save is in flight. The panel deliberately shows no preview: rendering the link
   would make the dashboard fetch it, and Pulse makes no network calls
   beyond its documented list — Discord's own image proxy is what fetches
   it. New `POST /api/discord/images` (JSON body `{claude?, codex?, idle?}`)

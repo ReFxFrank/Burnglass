@@ -47,30 +47,37 @@ const DISCORD_IMAGE_ROWS = [
 function DiscordImagesForm({ images }) {
   const server = images || {};
   const fromServer = { claude: server.claude || '', codex: server.codex || '', idle: server.idle || '' };
-  // null = follow the server's values (the payload refreshes every few
-  // seconds); an object = what the user is editing or has just saved.
-  const [local, setLocal] = useState(null);
+  const sig = DISCORD_IMAGE_ROWS.map(([k]) => fromServer[k]).join('\n');
+  // The dashboard polls every ~10 s, so right after a save the props are
+  // stale. The save's own reply is the baseline until a NEWER poll arrives
+  // (whatever it says — incl. a hand edit of config.json — then wins).
+  const [saved, setSaved] = useState(null); // { images, sig } | null
+  const base = saved && saved.sig === sig ? saved.images : fromServer;
+  // Only the fields the user touched; untouched fields always show `base`.
+  const [edits, setEdits] = useState({});
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
-  const shown = local || fromServer;
-  useEffect(() => {
-    // Once the server reports what was saved, go back to following it.
-    if (local && !busy && DISCORD_IMAGE_ROWS.every(([k]) => local[k] === fromServer[k])) setLocal(null);
-  }, [local, busy, fromServer.claude, fromServer.codex, fromServer.idle]);
-  const edit = (k, v) => { setLocal({ ...shown, [k]: v }); setMsg(null); };
+  useEffect(() => { if (saved && saved.sig !== sig) setSaved(null); }, [sig, saved]);
+  const shown = {};
+  for (const [k] of DISCORD_IMAGE_ROWS) shown[k] = k in edits ? edits[k] : base[k];
+  const dirty = DISCORD_IMAGE_ROWS.filter(([k]) => k in edits && edits[k].trim() !== base[k]).map(([k]) => k);
+  const edit = (k, v) => { setEdits((cur) => ({ ...cur, [k]: v })); setMsg(null); };
   async function save() {
+    // Send ONLY the changed slots: a stale or hand-edited value in another
+    // field can never be overwritten, or block the save by failing validation.
+    const body = {};
+    for (const k of dirty) body[k] = edits[k].trim();
+    if (!Object.keys(body).length) return;
     setBusy(true); setMsg(null);
     try {
-      const body = {};
-      for (const [k] of DISCORD_IMAGE_ROWS) body[k] = shown[k].trim();
       const r = await postJson('/api/discord/images', body);
-      const saved = (r.discord && r.discord.images) || {};
-      setLocal({ claude: saved.claude || '', codex: saved.codex || '', idle: saved.idle || '' });
+      const got = (r.discord && r.discord.images) || {};
+      setSaved({ images: { claude: got.claude || '', codex: got.codex || '', idle: got.idle || '' }, sig });
+      setEdits({});
       setMsg({ bad: false, text: 'Saved — Discord shows it on the next update (a new link can take a few seconds the first time).' });
     } catch (e) { setMsg({ bad: true, text: 'Couldn’t save: ' + e.message }); }
     setBusy(false);
   }
-  const changed = DISCORD_IMAGE_ROWS.some(([k]) => shown[k].trim() !== fromServer[k]);
   return (
     <div className="dimg-form">
       {DISCORD_IMAGE_ROWS.map(([k, label, def]) => (
@@ -82,14 +89,15 @@ function DiscordImagesForm({ images }) {
             autoComplete="off"
             placeholder={def + ' (uploaded art)'}
             value={shown[k]}
+            disabled={busy}
             onChange={(e) => edit(k, e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter' && changed && !busy) save(); }}
+            onKeyDown={(e) => { if (e.key === 'Enter' && dirty.length && !busy) save(); }}
           />
         </label>
       ))}
       <div className="dimg-actions">
-        <button className="btn albtn" disabled={busy || !changed} onClick={save}>{busy ? 'Saving…' : 'Save images'}</button>
-        {local && changed && !busy && <button className="btn ghost albtn" onClick={() => { setLocal(null); setMsg(null); }}>Cancel</button>}
+        <button className="btn albtn" disabled={busy || !dirty.length} onClick={save}>{busy ? 'Saving…' : 'Save images'}</button>
+        {dirty.length > 0 && !busy && <button className="btn ghost albtn" onClick={() => { setEdits({}); setMsg(null); }}>Cancel</button>}
         {msg && <span className={'dimg-note' + (msg.bad ? ' bad' : '')}>{msg.text}</span>}
       </div>
     </div>

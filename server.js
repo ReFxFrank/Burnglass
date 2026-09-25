@@ -5032,12 +5032,17 @@ function validDiscordImage(raw) {
   if (v.length > DISCORD_IMAGE_MAX) return { error: 'is longer than ' + DISCORD_IMAGE_MAX + ' characters (Discord\'s limit)' };
   if (!/^[\x21-\x7e]+$/.test(v)) return { error: 'contains spaces or unsupported characters' };
   if (/^[a-z][a-z0-9+.-]*:/i.test(v)) {
+    // The raw string must itself be a well-formed https://host link: the URL
+    // parser forgives "https:host/x", "https:/host" and backslashes, but
+    // Discord gets the raw string, not the normalized one.
     let u = null;
     try { u = new URL(v); } catch (_) {}
-    if (!u || u.protocol !== 'https:' || !u.hostname) {
+    if (!u || u.protocol !== 'https:' || !u.hostname || !/^https:\/\/[^/\\?#@]/i.test(v) || v.includes('\\')) {
       return { error: 'must be an https:// link (Discord ignores http and other schemes)' };
     }
-    return { value: v };
+    // The presence is public: never publish credentials embedded in a link.
+    if (u.username || u.password) return { error: 'must not contain a username or password' };
+    return { value: 'https://' + v.slice(8) }; // lowercase scheme
   }
   // Art Asset key: Discord lowercases keys on upload.
   if (!/^[a-z0-9_.-]{1,64}$/i.test(v)) return { error: 'is neither an https:// link nor an art-asset key' };

@@ -165,11 +165,13 @@ cfgsnap() { cp "$PH/config.json" "$TMP/h-cfg-$1.json"; }
   echo "space $(post space '{"claude":"https://i.imgur.com/a b.gif"}')"
   echo "long $(post long "{\"claude\":\"https://x.test/$(printf 'a%.0s' $(seq 1 260)).gif\"}")"
   echo "number $(post number '{"claude":123}')"
+  echo "noslash $(post noslash '{"claude":"https:i.imgur.com/6XNR72Z.gif"}')"
+  echo "userinfo $(post userinfo '{"claude":"https://me:secret@x.test/a.gif"}')"
   echo "empty $(post empty '{}')"
   # one bad slot rejects the whole request: claude is valid, idle is not
   echo "mixed $(post mixed '{"claude":"https://i.imgur.com/6XNR72Z.gif","idle":"ftp://x.test/a.gif"}')"
   cfgsnap bad
-  echo "ok $(post ok '{"claude":"  https://i.imgur.com/6XNR72Z.gif  ","idle":"Pulse_Anim"}')"
+  echo "ok $(post ok '{"claude":"  HTTPS://i.imgur.com/6XNR72Z.gif  ","idle":"Pulse_Anim"}')"
   cfgsnap ok
   echo "partial $(post partial '{"codex":""}')"
   cfgsnap partial
@@ -261,7 +263,7 @@ ok(lastState(conns.length - 2) === "Opus 5.5 · Extra High · 1 session", "G: st
 
 const codes = Object.fromEntries(fs.readFileSync(SP + "/h-codes.txt", "utf8").trim().split("\n").map((l) => l.split(" ")));
 ok(codes.noheader === "403" && codes.get === "403", "H: mutation guard (no X-Pulse " + codes.noheader + ", GET " + codes.get + ")");
-for (const k of ["http", "js", "space", "long", "number", "empty", "mixed"]) {
+for (const k of ["http", "js", "space", "long", "number", "noslash", "userinfo", "empty", "mixed"]) {
   const body = JSON.parse(fs.readFileSync(SP + "/h-" + k + ".json", "utf8"));
   ok(codes[k] === "400" && typeof body.error === "string", "H: rejects " + k + " (" + codes[k] + ": " + body.error + ")");
 }
@@ -270,7 +272,7 @@ ok(cBad.discordClaudeImage === undefined && cBad.discordCodexImage === "codex_ol
    "H: rejected requests wrote nothing (all-or-nothing)");
 const cOk = JSON.parse(fs.readFileSync(SP + "/h-cfg-ok.json", "utf8"));
 ok(codes.ok === "200" && cOk.discordClaudeImage === "https://i.imgur.com/6XNR72Z.gif" && cOk.discordLargeImage === "pulse_anim" && cOk.discordCodexImage === "codex_old",
-   "H: valid save trims links, lowercases asset keys, leaves absent slots alone");
+   "H: valid save trims links, lowercases the scheme and asset keys, leaves absent slots alone");
 ok(cOk.discordPresence === true && cOk.discordClientId === "123456789012345678", "H: other config keys preserved");
 const cPart = JSON.parse(fs.readFileSync(SP + "/h-cfg-partial.json", "utf8"));
 ok(codes.partial === "200" && cPart.discordCodexImage === null && cPart.discordClaudeImage === "https://i.imgur.com/6XNR72Z.gif",
