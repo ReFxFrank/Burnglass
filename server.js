@@ -4584,10 +4584,10 @@ function refreshAccountMeters(done) {
         waitMs = Math.max(5000, Math.min(waitMs, METERS_429_MAX_MS));
         schedule(waitMs);
         metersState.status = 'rate-limited';
-        metersState.error = 'Anthropic rate-limited the usage check (HTTP 429) — retrying in ~' +
-          Math.max(1, Math.round(waitMs / 60000)) + 'm. If this persists, something else on this machine ' +
-          '(e.g. a statusline script) may be polling the usage endpoint heavily.';
+        metersState.error = metersRateLimitMessage(waitMs);
         console.warn('[burnglass] account meters: ' + metersState.error);
+        // The backoff survives a restart: a relaunch must not ask again at once.
+        persistMetersCache();
         return done && done(metersState);
       }
       schedule(METERS_ERR_MS);
@@ -4648,9 +4648,196 @@ function refreshAccountMeters(done) {
     metersState.lastGoodAt = Date.now();
     metersState.error = buckets.length ? null : 'no usage buckets in response';
     console.log(`[burnglass] account meters refreshed (${buckets.length} bucket(s))`);
+    persistMetersCache();
     done && done(metersState);
   });
   }); // readOauthTokenAsync
+}
+
+function metersRateLimitMessage(waitMs) {
+  return 'Anthropic rate-limited the usage check (HTTP 429) — retrying in ~' +
+    Math.max(1, Math.round(waitMs / 60000)) + 'm. If this persists, something else on this machine ' +
+    '(e.g. a statusline script) may be polling the usage endpoint heavily.';
+}
+
+// ---- Last good reading across restarts ---------------------------------------
+// <home>/meters-cache.json carries the last GOOD snapshot (and an active 429
+// backoff) over a restart or an update relaunch. Without it the new process
+// started blank and asked the endpoint at once — moments after the old
+// process had, while Claude Code polls the same endpoint — and the 429 that
+// earned left the card empty for up to an hour.
+//   - Contents: {v:1, fetchedAt, buckets:[{key,label,pct,resetsAt}]} plus
+//     {nextAttemptAt, streak} while a 429 backoff is active. Percentages,
+//     labels and times only — never the token or anything derived from it.
+//   - Written (tmp + rename, 0600 on POSIX) only while accountMeters is on,
+//     and only by the process that owns the port (restoreMetersCache, from
+//     the listen callback — a short-lived --summary never writes it);
+//     deleted when the user turns the meters off.
+//   - Restored buckets are the same last-good data an in-memory error keeps:
+//     lastGoodAt/fetchedAt carry their real age, windows whose resetsAt has
+//     passed are dropped, and they are NOT fed to recordMeterSamples (a
+//     replayed reading would bend the projection slope).
+// A different Claude login between runs shows the old account's numbers only
+// until the next good fetch replaces them.
+const METERS_CACHE_FILE = 'meters-cache.json';
+const METERS_CACHE_MAX_AGE_MS = 12 * 3600e3; // older than this is not "last good", it's history
+const METERS_CACHE_MAX_BYTES = 256 * 1024;
+const METERS_CACHE_MAX_BUCKETS = 64;
+const HAS_CONTROL = /[\x00-\x1f\x7f-\x9f]/; // no /g: .test() must not carry lastIndex
+let metersCacheOwner = false;
+let metersCacheWarned = false;
+
+function metersCachePath() {
+  const home = appHome();
+  // Hard rule 3(b): nothing under ~/.pulse is ever deleted, and this file is
+  // deleted when the meters go off — so a run whose home IS the legacy folder
+  // (a degraded migration, a pin or link onto it) keeps the reading in memory
+  // only, as before.
+  if (sameEntry(home, legacyHomePath())) return null;
+  return path.join(home, METERS_CACHE_FILE);
+}
+
+function removeMetersCache() {
+  if (!metersCacheOwner) return;
+  const f = metersCachePath();
+  if (!f) return;
+  try { fs.unlinkSync(f); console.log('[burnglass] account meters off — removed ' + homeLabel(METERS_CACHE_FILE)); } catch (_) { /* none */ }
+}
+
+function persistMetersCache() {
+  if (!metersCacheOwner || !metersEnabled()) return;
+  const f = metersCachePath();
+  if (!f) return;
+  const now = Date.now();
+  const throttled = metersState.status === 'rate-limited' && metersState.nextAttemptAt > now;
+  const good = metersState.lastGoodAt != null;
+  if (!good && !throttled) { // e.g. a cleared backoff with no reading yet: nothing to carry over
+    try { fs.unlinkSync(f); } catch (_) {}
+    return;
+  }
+  const snap = {
+    v: 1,
+    fetchedAt: good ? metersState.lastGoodAt : null,
+    buckets: good ? (metersState.buckets || []).map((b) => ({ key: b.key, label: b.label, pct: b.pct, resetsAt: b.resetsAt })) : [],
+  };
+  if (throttled) { snap.nextAttemptAt = metersState.nextAttemptAt; snap.streak = meters429Streak; }
+  // Per-process temp name: an old process finishing a fetch while its
+  // successor starts must not interleave into one temp file.
+  const tmp = f + '.' + process.pid + '.tmp';
+  try {
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(tmp, JSON.stringify(snap), { mode: 0o600 });
+    if (process.platform !== 'win32') fs.chmodSync(tmp, 0o600);
+    fs.renameSync(tmp, f);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch (_) {}
+    if (!metersCacheWarned) {
+      metersCacheWarned = true;
+      console.warn('[burnglass] account meters: could not save ' + homeLabel(METERS_CACHE_FILE) + ' (' + e.message +
+        ') — the last reading will not survive a restart');
+    }
+  }
+}
+
+// One bucket from the file, re-validated (it is only data on disk).
+function cachedMeterBucket(b) {
+  if (!b || typeof b !== 'object' || Array.isArray(b)) return null;
+  const key = b.key;
+  if (typeof key !== 'string' || !key || key.length > 160 || HAS_CONTROL.test(key)) return null;
+  if (typeof b.pct !== 'number' || !isFinite(b.pct)) return null;
+  let resetsAt = null;
+  if (b.resetsAt != null) {
+    if (typeof b.resetsAt !== 'number' || !isFinite(b.resetsAt) || b.resetsAt <= 0) return null;
+    resetsAt = b.resetsAt;
+  }
+  // Known keys take today's label; others keep the one they were fetched with.
+  let label = METER_LABELS[key];
+  if (!label) {
+    label = typeof b.label === 'string' && b.label.length <= 200 && !HAS_CONTROL.test(b.label) && /^Claude · /.test(b.label)
+      ? b.label : 'Claude · ' + key.replace(/_/g, ' ');
+  }
+  return { key, label, pct: Math.max(0, Math.min(100, b.pct)), resetsAt };
+}
+
+// Startup (listen callback, after the home migration): load the last good
+// snapshot + any live backoff, or remove the file when the meters are off.
+function restoreMetersCache() {
+  metersCacheOwner = true;
+  if (!metersEnabled()) { removeMetersCache(); return; }
+  const f = metersCachePath();
+  if (!f) return;
+  let raw;
+  try {
+    const st = fs.statSync(f);
+    if (!st.isFile()) return;
+    if (st.size > METERS_CACHE_MAX_BYTES) throw new Error('too large');
+    raw = fs.readFileSync(f, 'utf8');
+  } catch (e) {
+    if (e && e.code !== 'ENOENT') console.warn('[burnglass] account meters: ignoring ' + homeLabel(METERS_CACHE_FILE) + ' (' + e.message + ')');
+    return;
+  }
+  let j = null;
+  try { j = JSON.parse(raw); } catch (_) {}
+  if (!j || typeof j !== 'object' || Array.isArray(j) || j.v !== 1) {
+    console.warn('[burnglass] account meters: ignoring an unrecognised ' + homeLabel(METERS_CACHE_FILE));
+    return;
+  }
+  const now = Date.now();
+
+  // The snapshot: recent enough to still be "last good", windows still open.
+  let buckets = null, fetchedAt = null, rolled = 0;
+  const fa = j.fetchedAt;
+  if (typeof fa === 'number' && isFinite(fa) && fa > 0 && fa <= now + 60e3 &&
+      now - fa <= METERS_CACHE_MAX_AGE_MS && Array.isArray(j.buckets)) {
+    const seen = new Set();
+    buckets = [];
+    for (const rb of j.buckets.slice(0, METERS_CACHE_MAX_BUCKETS)) {
+      const b = cachedMeterBucket(rb);
+      if (!b || seen.has(b.key)) continue;
+      seen.add(b.key);
+      // The window rolled since: its old value says nothing about the new one.
+      if (b.resetsAt != null && b.resetsAt <= now) { rolled++; continue; }
+      buckets.push(b);
+    }
+    fetchedAt = Math.min(fa, now);
+    if (!buckets.length && rolled) buckets = null; // every window rolled — nothing left to show
+  }
+
+  // The backoff: honored while still in the future (capped like a live one).
+  // A streak whose backoff ended within the last cap window carries on, so
+  // the next 429 keeps doubling instead of starting over.
+  const na = j.nextAttemptAt;
+  const hasBackoff = typeof na === 'number' && isFinite(na);
+  if (hasBackoff && na > now - METERS_429_MAX_MS) {
+    meters429Streak = Number.isInteger(j.streak) && j.streak > 0 ? Math.min(j.streak, 16) : 1;
+  }
+  const throttled = hasBackoff && na > now;
+  if (!buckets && !throttled) return;
+
+  if (buckets) {
+    metersState.buckets = buckets;
+    metersState.fetchedAt = fetchedAt;
+    metersState.lastGoodAt = fetchedAt;
+    metersState.status = 'ok';
+    metersState.error = buckets.length ? null : 'no usage buckets in response';
+    // Next check at the normal cadence from when the reading was taken — or
+    // right away when a window rolled (its new value is unknown).
+    metersState.nextAttemptAt = rolled ? 0 : fetchedAt + METERS_OK_MS;
+  }
+  if (throttled) {
+    const at = Math.min(na, now + METERS_429_MAX_MS);
+    metersState.nextAttemptAt = at;
+    metersState.status = 'rate-limited';
+    metersState.error = metersRateLimitMessage(at - now);
+  }
+  const parts = [];
+  if (buckets) {
+    parts.push(`restored ${buckets.length} bucket(s) from ${Math.max(0, Math.round((now - fetchedAt) / 60000))}m ago` +
+      (rolled ? ` (${rolled} rolled-over window(s) dropped)` : ''));
+  }
+  if (throttled) parts.push('still rate-limited — next check in ~' + Math.max(1, Math.round((metersState.nextAttemptAt - now) / 60000)) + 'm');
+  else if (metersState.nextAttemptAt > now) parts.push('next check in ~' + Math.max(1, Math.round((metersState.nextAttemptAt - now) / 1000)) + 's');
+  console.log('[burnglass] account meters: ' + parts.join('; '));
 }
 
 // The freshest official five-hour bucket, if usable: its resets_at is an
@@ -6946,6 +7133,8 @@ function startServer(port, host, opts) {
           metersState.buckets = [];
           metersState.error = null;
           metersState.fetchedAt = null;
+          metersState.lastGoodAt = null;
+          removeMetersCache(); // consent withdrawn: the saved reading goes too
           codexUsageState.status = 'off';
           codexUsageState.stats = null;
           codexUsageState.error = null;
@@ -6958,6 +7147,7 @@ function startServer(port, host, opts) {
         credCache = { at: 0, cred: null };
         meters429Streak = 0;
         metersState.nextAttemptAt = 0;
+        persistMetersCache(); // drop a saved backoff — this attempt is deliberate
         codexUsage429Streak = 0;
         codexUsageState.nextAttemptAt = 0;
         refreshCodexUsage(); // async; the summary poll picks it up
@@ -6981,6 +7171,9 @@ function startServer(port, host, opts) {
         credCache = { at: 0, cred: null };
         meters429Streak = 0;
         metersState.nextAttemptAt = 0;
+        // Forced: the saved backoff (restored across a restart or live) is
+        // cleared too, so a restart after this doesn't resurrect it.
+        persistMetersCache();
         codexUsage429Streak = 0;
         codexUsageState.nextAttemptAt = 0;
         refreshCodexUsage();
@@ -7289,6 +7482,10 @@ function startServer(port, host, opts) {
     // is the gate, which also lets the Linux suites assert it).
     refreshLegacyTrayScript(port);
     warnBrokenIntegrations();
+    // The last good account-meter reading (and any 429 backoff) from before
+    // this restart — or the file's removal when the meters are off. Only the
+    // port owner does this, after the migration settled the home.
+    restoreMetersCache();
     // Packaged exe on Windows: open the dashboard for the user.
     if (seaApi && process.platform === 'win32' && (!opts || opts.open !== false) && LOOPBACK_HOSTS.has(host)) {
       openBrowser(port);
