@@ -95,9 +95,15 @@ jobs:
           cmp "dist-exe/${{ matrix.artifact }}" "dist-exe/${{ matrix.legacy }}"
           ls -la dist-exe
 
-      # Upload the OS binary (and its alias) BEFORE the optional Windows
-      # extras below. The release job is `needs: build`, so anything that fails
-      # after this point would otherwise take the whole release down with it.
+      # Upload the OS binary and its alias FIRST. Up to and including this
+      # step a failure must fail the leg - and with it the release (the
+      # release job is `needs: build`): a release without an OS binary or its
+      # pulse-* alias strands those installs.
+      # EVERY step after this one is an optional Windows extra (strip,
+      # installer) and is `continue-on-error`: a failed leg would skip the
+      # release job entirely, so without it a broken strip or installer build
+      # would take every OS binary and alias down with it. A failed extra only
+      # costs its own asset; the release job warns about what is missing.
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
@@ -109,12 +115,16 @@ jobs:
       # Burnglass Strip: the Windows taskbar companion (strip/, C# - ported from
       # openusage-windows under MIT), published as its own single-file exe.
       - uses: actions/setup-dotnet@v4
+        id: dotnet
         if: matrix.os == 'windows-latest'
+        continue-on-error: true
         with:
           dotnet-version: '9.0.x'
 
       - name: Build Burnglass Strip (Windows companion)
-        if: matrix.os == 'windows-latest'
+        id: strip
+        if: matrix.os == 'windows-latest' && steps.dotnet.outcome == 'success'
+        continue-on-error: true
         shell: bash
         run: |
           # File/product version = the release (2.0.0-rc.1 -> FileVersion 2.0.0.0,
@@ -136,8 +146,11 @@ jobs:
           cp dist-strip/burnglass-strip.exe dist-strip/pulse-strip.exe
           cmp dist-strip/burnglass-strip.exe dist-strip/pulse-strip.exe
 
+      # The strip ships as a pair or not at all: only a build whose cp + cmp
+      # above passed uploads, so a half-built strip never reaches the release.
       - uses: actions/upload-artifact@v4
-        if: matrix.os == 'windows-latest'
+        if: matrix.os == 'windows-latest' && steps.strip.outcome == 'success'
+        continue-on-error: true
         with:
           name: burnglass-strip.exe
           path: |
@@ -149,17 +162,21 @@ jobs:
       # binaries above (build/installer.iss). Per-user install, no admin; an
       # upgrade stays in the folder the Pulse install already used.
       # Must run after BOTH the SEA build and the strip publish, since it packs
-      # dist-exe\burnglass.exe and dist-strip\burnglass-strip.exe.
-      # The three OS binaries are already uploaded above, so these extras are
-      # best-effort: a broken installer build should cost us BurnglassSetup.exe,
-      # not the entire release (the release job is `needs: build`).
+      # dist-exe\burnglass.exe and dist-strip\burnglass-strip.exe - and it is
+      # SKIPPED when the strip did not build: the installer's "strip" task
+      # deletes {app}\pulse-strip.exe to make room for burnglass-strip.exe, so
+      # an installer without the strip would take an upgrading user's strip
+      # away and put nothing in its place.
+      # Best-effort like every step after the OS-binary upload: a broken
+      # installer build costs BurnglassSetup.exe, never the release.
       - name: Install Inno Setup
-        if: matrix.os == 'windows-latest'
+        if: matrix.os == 'windows-latest' && steps.strip.outcome == 'success'
         continue-on-error: true
         run: choco install innosetup -y --no-progress
 
       - name: Build installer (BurnglassSetup.exe)
-        if: matrix.os == 'windows-latest'
+        id: installer
+        if: matrix.os == 'windows-latest' && steps.strip.outcome == 'success'
         continue-on-error: true
         shell: pwsh
         run: |
@@ -185,7 +202,7 @@ jobs:
           Get-Item dist-installer\BurnglassSetup.exe
 
       - uses: actions/upload-artifact@v4
-        if: matrix.os == 'windows-latest'
+        if: matrix.os == 'windows-latest' && steps.installer.outcome == 'success'
         continue-on-error: true
         with:
           name: BurnglassSetup.exe
@@ -203,6 +220,8 @@ jobs:
 
       # Belt and braces for the legacy aliases: present, and the same bytes as
       # their new-name twins. A release without them strands every v1 install.
+      # Every OS binary and its alias are REQUIRED; the Windows extras are
+      # checked only when they were built (their build steps are best-effort).
       - name: Verify legacy aliases
         shell: bash
         run: |
@@ -217,10 +236,17 @@ jobs:
             fi
             cmp "$1" "$2" || { echo "::error::$2 is not byte-identical to $1"; fail=1; }
           done
-          if [ -f burnglass-strip.exe ] || [ -f pulse-strip.exe ]; then
+          # The strip is published as a pair or not at all: a lone half is
+          # dropped here so it never goes out without its twin.
+          if [ -f burnglass-strip.exe ] && [ -f pulse-strip.exe ]; then
             cmp burnglass-strip.exe pulse-strip.exe || { echo "::error::pulse-strip.exe is not byte-identical to burnglass-strip.exe"; fail=1; }
+          elif [ -f burnglass-strip.exe ] || [ -f pulse-strip.exe ]; then
+            echo "::warning::only one of burnglass-strip.exe / pulse-strip.exe was built - publishing neither"
+            rm -f burnglass-strip.exe pulse-strip.exe
+          else
+            echo "::warning::burnglass-strip.exe and pulse-strip.exe are missing (the strip build is best-effort - see the windows-latest build log)"
           fi
-          [ -f BurnglassSetup.exe ] || echo "::warning::BurnglassSetup.exe is missing (the installer build is best-effort)"
+          [ -f BurnglassSetup.exe ] || echo "::warning::BurnglassSetup.exe is missing (the installer build is best-effort, and is skipped when the strip did not build)"
           if [ "$PRERELEASE" != "true" ] && [[ "$TAG" == *-* ]]; then
             echo "::error::tag $TAG has a '-' but is not being published as a prerelease"; fail=1
           fi
@@ -234,6 +260,10 @@ jobs:
           # '' = the API default (a normal release becomes latest, as before);
           # a prerelease is NEVER latest.
           make_latest: ${{ env.PRERELEASE == 'true' && 'false' || '' }}
+          # A best-effort Windows extra that was not built is simply left out;
+          # the step above already failed the job if a REQUIRED asset (an OS
+          # binary or its pulse-* alias) is missing.
+          fail_on_unmatched_files: false
           files: |
             dist/BurnglassSetup.exe
             dist/burnglass.exe
@@ -328,6 +358,9 @@ jobs:
 
       # The release page's digests are what the v1 updater verifies against:
       # each legacy asset must carry the same sha256 as its new-name twin.
+      # What was actually published: every OS binary + alias must be there
+      # (a missing one is an error, not a "no digest yet"); the strip pair may
+      # be absent as a whole, never half of it.
       - name: Verify published digests
         shell: bash
         env:
@@ -337,16 +370,27 @@ jobs:
           assets="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq '.assets[] | [.name, (.digest // "")] | @tsv')"
           echo "$assets"
           echo "asset count: $(grep -c . <<<"$assets")"
+          has() { awk -F'\t' -v n="$1" '$1==n{f=1} END{exit !f}' <<<"$assets"; }
+          digest() { awk -F'\t' -v n="$1" '$1==n{print $2}' <<<"$assets"; }
           fail=0
           for pair in "burnglass.exe pulse.exe" "burnglass-linux pulse-linux" "burnglass-macos pulse-macos" "burnglass-strip.exe pulse-strip.exe"; do
             # shellcheck disable=SC2086 # intentional split of "new legacy"
             set -- $pair
-            a="$(awk -F'\t' -v n="$1" '$1==n{print $2}' <<<"$assets")"
-            b="$(awk -F'\t' -v n="$2" '$1==n{print $2}' <<<"$assets")"
-            if [ "$1" = burnglass-strip.exe ] && [ -z "$a$b" ]; then continue; fi
+            if ! has "$1" && ! has "$2"; then
+              if [ "$1" = burnglass-strip.exe ]; then
+                echo "::warning::the strip was not published (its build is best-effort)"; continue
+              fi
+              echo "::error::$1 and its legacy alias $2 are missing from the release"; fail=1; continue
+            fi
+            if ! has "$1" || ! has "$2"; then
+              echo "::error::only one of $1 / $2 was published"; fail=1; continue
+            fi
+            a="$(digest "$1")"
+            b="$(digest "$2")"
             if [ -z "$a" ] || [ -z "$b" ]; then
               echo "::warning::no digest recorded for $1 or $2 yet"; continue
             fi
             [ "$a" = "$b" ] || { echo "::error::$2 digest $b != $1 digest $a"; fail=1; }
           done
+          has BurnglassSetup.exe || echo "::warning::BurnglassSetup.exe was not published (best-effort)"
           exit $fail
