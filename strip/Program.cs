@@ -903,15 +903,21 @@ sealed class PopoverForm : Form
     private const int MaxHeight = 2000;
     private const int MarginCss = 12;
     private const int MinHeightCss = 120;
-    private const int RadiusCss = 20;
+    private const int RadiusCss = 20; // Windows 10 GDI region only; Windows 11 rounds the window itself
 
     private float Dpi => DeviceDpi / 96f;
     private int W => (int)MathF.Round(WidthCss * Dpi);
     private int Margin_ => (int)MathF.Round(MarginCss * Dpi);
 
     // Popover backdrop = the page's own background (--tray in web/index.html, the Command Center
-    // dark --bg #0a0b0f), so the spring-open never flashes a mismatched box. Dark-only.
+    // dark --bg #0a0b0f), so nothing ever flashes a mismatched box. Dark-only.
     private static readonly Color Backdrop = Color.FromArgb(0x0a, 0x0b, 0x0f);
+    // The page's --card-line (#22252f) as a COLORREF (0x00BBGGRR): the 1 px border Windows 11 draws.
+    private const int BorderColorRef = 0x002F2522;
+
+    // Windows 11 (build 22000+): DWM rounds the corners (anti-aliased) and draws the flyout's border
+    // and shadow itself (OnHandleCreated). Windows 10 keeps the GDI region + class drop shadow.
+    private static readonly bool Win11 = OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000);
 
     private readonly bool _sampleShots;
 
@@ -928,23 +934,24 @@ sealed class PopoverForm : Form
         Size = new Size(W, (int)MathF.Round(_lastHeightCss * Dpi));
         // NOTE: never set Opacity != 1 — it turns the form into a WS_EX_LAYERED window, and WebView2
         // (DirectComposition) renders BLANK in layered windows. That was the "blank popover" bug.
+        // The open motion therefore never fades the WINDOW: it only moves it (and the page fades its
+        // own content); the invisible first moment is DWM cloaking, which is not layering.
 
-        // NOT docked: the WebView keeps a FIXED size and stays pinned to the window's bottom-right while
-        // the window itself grows during the open animation. That way the whole panel (background +
-        // rounded corners + content) scales out of the corner instead of the background popping in at
-        // full size, and the page never reflows mid-animation.
-        _web.Dock = DockStyle.None;
+        // Docked: the window keeps ONE size for the whole open (it only moves), so the page never
+        // reflows mid-animation; a new content height resizes it in a single step (SetContentHeight).
+        _web.Dock = DockStyle.Fill;
         Controls.Add(_web);
-        // Click-away close. Only ignore deactivation for a brief moment right after showing (the
-        // show/resize can fire a spurious one); ignoring it for the whole grow animation meant a
-        // deactivation landing mid-animation was swallowed and the popover then never closed at all.
+        // Click-away close. Ignored until the window is actually on screen, and for a brief moment
+        // after (the show can fire a spurious deactivation) — never for the whole animation: that once
+        // swallowed a real click-away and the popover then never closed at all.
         Deactivate += (_, _) =>
         {
-            if ((DateTime.UtcNow - _shownAt).TotalMilliseconds > 250) Hide();
+            if (_revealed && (DateTime.UtcNow - _shownAt).TotalMilliseconds > 250) Hide();
         };
 
-        _grow = new System.Windows.Forms.Timer { Interval = 16 };
-        _grow.Tick += (_, _) => GrowTick();
+        _revealFallback = new System.Windows.Forms.Timer { Interval = RevealFallbackMs };
+        _revealFallback.Tick += (_, _) => RevealFallback();
+        _slideTick = SlideTick;
 
         // Safety net: if the popover somehow never receives a Deactivate (a borderless tool window
         // doesn't always), close it once focus has demonstrably moved to another application.
@@ -955,6 +962,20 @@ sealed class PopoverForm : Form
     }
 
     protected override bool ShowWithoutActivation => false;
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        _cloaked = false; // a (re)created window starts uncloaked
+        // The open motion below is the only one: no DWM show/hide transition on top of it (Windows may
+        // otherwise fade the popup in and out), which also keeps the close instant.
+        DwmSetInt(DWMWA_TRANSITIONS_FORCEDISABLED, 1);
+        if (Win11)
+        {
+            DwmSetInt(DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND);
+            DwmSetInt(DWMWA_BORDER_COLOR, BorderColorRef);
+        }
+    }
 
     private async Task InitWebAsync()
     {
@@ -992,7 +1013,13 @@ sealed class PopoverForm : Form
             try { await core.ExecuteScriptAsync("window.setTheme && window.setTheme('dark')"); } catch { }
             if (_sampleShots) { await CaptureSampleShots(); return; }
             if (_selfTest) { ShowPopover(); return; }
-            if (_pendingShow) { _pendingShow = false; Inject(_data); }
+            // Opened before the page existed: the window is already up (sliding over the plain
+            // backdrop); its content arrives now and plays its own part of the open.
+            if (_pendingShow)
+            {
+                _pendingShow = false;
+                if (Visible) { PrimeAsync(_openGen); PlayOpen(_motion); }
+            }
         };
 
         // Cache-bust on the page's own mtime: WebView2 otherwise keeps serving a cached copy of
@@ -1004,26 +1031,23 @@ sealed class PopoverForm : Form
 
     private static string ResolveWebDir() => WebAssets.Dir;
 
-    // The page posts its measured content height (CSS px) so the window hugs the content. Multiply by
-    // the DPI scale BEFORE clamping — the clamp bounds are physical px. Theme messages are ignored
-    // (dark-only).
+    // The page posts its measured content height (CSS px) so the window hugs the content, and
+    // {primed: n} once the first frame of open n is painted. Theme messages are ignored (dark-only).
     private void OnWebMessage(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
     {
         try
         {
-            var json = e.WebMessageAsJson;
-            using var doc = JsonDocument.Parse(json);
-            if (doc.RootElement.TryGetProperty("height", out var h))
-            {
-                _lastHeightCss = Math.Max(1, (int)Math.Ceiling(h.GetDouble()));
-                // Re-target the final bounds. While the open animation is still running it will land on
-                // the new size by itself; otherwise snap straight to it.
-                _finalBounds = ComputeFinalBounds();
-                _web.Size = new Size(_finalBounds.Width, _finalBounds.Height);
-                if (!_growing) ApplyGrow(1f);
-            }
+            using var doc = JsonDocument.Parse(e.WebMessageAsJson);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return;
+            if (root.TryGetProperty("height", out var h) && h.ValueKind == JsonValueKind.Number)
+                SetContentHeight(h.GetDouble());
+            if (root.TryGetProperty("primed", out var p) && p.ValueKind == JsonValueKind.Number
+                && p.TryGetInt32(out int token))
+                OnPrimed(token);
             // The popover footer's "Open dashboard →" link.
-            if (doc.RootElement.TryGetProperty("open", out var o) && o.GetString() == "dashboard")
+            if (root.TryGetProperty("open", out var o) && o.ValueKind == JsonValueKind.String
+                && o.GetString() == "dashboard")
             {
                 OnOpenDashboard?.Invoke();
                 Hide();
@@ -1040,69 +1064,285 @@ sealed class PopoverForm : Form
         ShowPopover();
     }
 
+    // ---- open motion: a Windows 11 flyout --------------------------------------------------------
+    // 1. The window is placed at its FINAL size, SlideCss below its final spot, and shown CLOAKED
+    //    (DWMWA_CLOAK: the window is "visible" to Windows — so WebView2 keeps rendering — but DWM does
+    //    not put it on screen). The same script renders the cached data, returns the content height
+    //    (the window is re-sized while still invisible) and holds the page on its first animation
+    //    frame; two frames later the page posts {primed}. Without the cloak, the first frame on screen
+    //    would be whatever the WebView painted before the LAST close.
+    // 2. Reveal: un-cloak, then rise into place over SlideMs on the page's decelerate curve while the
+    //    page fades its blocks in (playOpen). Position only — never a resize.
+    // 3. Never invisible for long: no {primed} within RevealFallbackMs reveals anyway; twice in a row
+    //    and this session stops cloaking (shows at once, the pre-rc.3 way).
+    // Reduced motion (Windows "Animation effects" off): same priming, no slide, no page animation.
+    // Close (Hide, from any path) is instant and resets all of it — see OnVisibleChanged.
+    private const int SlideCss = 12;
+    private const double SlideMs = 190;
+    private const int RevealFallbackMs = 140;
+
+    private readonly System.Windows.Forms.Timer _revealFallback;
+    private readonly Action _slideTick;
+    private readonly System.Diagnostics.Stopwatch _slideClock = new();
+    private int _openGen;            // bumped by every open AND every close: stale callbacks compare it
+    private volatile int _slideGen = -1; // the open whose slide is running (-1 = none)
+    private int _tickQueued;         // 1 while a slide tick is queued on the UI thread
+    private bool _revealed;          // this open is on screen
+    private bool _opening;           // shown, and the slide has not finished yet (WatchFocus waits)
+    private bool _cloaked;
+    private bool _motion = true;
+    private int _cloakMisses;
+    private bool _cloakUnreliable;
+    private int _slideOffset;        // physical px below the final Y the slide starts from
+    private Rectangle _finalBounds;
+    private Rectangle _workArea;     // the monitor this open is on (a re-target never follows the cursor)
+
     private void ShowPopover()
     {
-        _finalBounds = ComputeFinalBounds();
-        _web.Size = new Size(_finalBounds.Width, _finalBounds.Height);
-        _shownAt = DateTime.UtcNow;
+        int gen = ++_openGen;
+        _slideGen = -1;
+        _revealFallback.Stop();
+        _revealed = false;
+        _opening = true;
         _hadFocus = false;
-        StartGrow();                 // window starts small at the corner and grows to _finalBounds
+        _motion = !_selfTest && AnimationsEnabled();
+        _workArea = Screen.FromPoint(Cursor.Position).WorkingArea;
+        _finalBounds = ComputeFinalBounds();
+        _slideOffset = _motion ? (int)MathF.Round(SlideCss * Dpi) : 0;
+        PlaceWindow(_finalBounds.Y + _slideOffset);  // final size from here on; only the Y moves
+
+        bool prime = _ready && !_selfTest && _web.CoreWebView2 != null;
+        _cloaked = prime && !_cloakUnreliable && SetCloak(true);
+        _shownAt = DateTime.UtcNow;
         Show();
-        _focusWatch.Start();
         TopMost = true;
         Activate();
         NativeActivate();
-        PlayOpen();
+        _focusWatch.Start();
+
+        if (_selfTest) { Reveal(gen); RefreshFromServer(); return; } // selftest fetches its own data
+        if (!prime) { _pendingShow = true; Reveal(gen); return; }   // page not loaded yet: see NavigationCompleted
         // Render the last-known data INSTANTLY — stale-while-revalidate. The host triggers a
         // background refresh separately, which calls SetData again when fresh data arrives.
-        if (_selfTest) { RefreshFromServer(); return; } // selftest fetches its own data
-        if (_ready) Inject(_data);
-        else _pendingShow = true;
+        PrimeAsync(gen);
+        if (_cloaked) _revealFallback.Start();
+        else Reveal(gen); // no cloak: on screen right away (the page may show its previous frame once)
     }
 
-    // ---- open animation: the WHOLE window (background, rounded corners and all) scales out of the
-    // bottom-right corner, so nothing pops in at full size. Runs in lockstep with the page's CSS spring.
-    private readonly System.Windows.Forms.Timer _grow;
-    private bool _growing;
-    private float _growT;
-    private Rectangle _finalBounds;
-    private const float GrowStart = 0.55f;
-    private const float GrowMs = 440f;
+    private async void PrimeAsync(int gen)
+    {
+        // SafeJson: see Inject. The page returns its content height; an older page without
+        // primeOpen still renders and measures (and the fallback timer reveals it).
+        string script =
+            "(function(){try{window.renderData(" + AppHost.SafeJson(_data) + ");}catch(e){}" +
+            "var h=0;try{if(window.primeOpen)h=window.primeOpen(" + gen + "," + (_motion ? "true" : "false") + ");}catch(e){}" +
+            "return h||Math.min(document.body.scrollHeight," + MaxHeight + ");})()";
+        string? result = null;
+        try
+        {
+            var core = _web.CoreWebView2;
+            if (core == null) return;
+            result = await core.ExecuteScriptAsync(script);
+        }
+        catch { }
+        if (gen != _openGen || !Visible) return; // closed (or re-opened) meanwhile
+        if (double.TryParse(result, NumberStyles.Float, CultureInfo.InvariantCulture, out double h) && h > 0)
+            SetContentHeight(h);
+    }
+
+    private void OnPrimed(int token)
+    {
+        if (token != _openGen || _revealed) return;
+        _cloakMisses = 0;
+        Reveal(token);
+    }
+
+    private void RevealFallback()
+    {
+        _revealFallback.Stop();
+        if (_revealed || !Visible) return;
+        // A cloaked page that never reports its first frame (it may not render while cloaked on some
+        // WebView2 builds): stop paying this wait on every open.
+        if (_cloaked && ++_cloakMisses >= 2) _cloakUnreliable = true;
+        Reveal(_openGen);
+    }
+
+    private void Reveal(int gen)
+    {
+        if (gen != _openGen || _revealed || !Visible) return;
+        _revealed = true;
+        _revealFallback.Stop();
+        if (_cloaked) { SetCloak(false); _cloaked = false; }
+        _shownAt = DateTime.UtcNow;
+        // Activation normally took at Show(); if Windows refused it for the cloaked window, take it
+        // now (still inside the click's foreground grant) — click-away closing depends on it.
+        if (GetForegroundWindow() != Handle) { Activate(); NativeActivate(); }
+        if (_slideOffset > 0) StartSlide(gen);
+        else { PlaceWindow(_finalBounds.Y); _opening = false; }
+        if (_ready && _web.CoreWebView2 != null) PlayOpen(_motion);
+    }
+
+    // Closed — instantly, from any path (click-away, strip click, the dashboard link, WatchFocus).
+    // Invalidate this open's prime/reveal/slide and put the page back to its resting state, so the
+    // next open starts clean however quickly it follows.
+    protected override void OnVisibleChanged(EventArgs e)
+    {
+        base.OnVisibleChanged(e);
+        if (Visible) return;
+        _openGen++;
+        _slideGen = -1;
+        _revealFallback.Stop();
+        _revealed = false;
+        _opening = false;
+        if (_cloaked) { SetCloak(false); _cloaked = false; } // hidden already, so this shows nothing
+        ResetPage();
+    }
+
+    private async void ResetPage()
+    {
+        try
+        {
+            if (!_ready || IsDisposed || _web.CoreWebView2 == null) return;
+            await _web.CoreWebView2.ExecuteScriptAsync("window.resetOpen && window.resetOpen()");
+        }
+        catch { /* shutting down */ }
+    }
+
+    private void StartSlide(int gen)
+    {
+        _slideClock.Restart();
+        _slideGen = gen;
+        PlaceWindow(SlideY(0));
+        var ticker = new Thread(() => VsyncTicker(gen))
+        {
+            IsBackground = true,
+            Name = "popover-slide",
+            Priority = ThreadPriority.AboveNormal
+        };
+        ticker.Start();
+    }
+
+    // Background thread: wakes once per DWM composition (DwmFlush) and queues ONE slide tick on the UI
+    // thread, which owns the window and computes the position from the Stopwatch. So the slide is
+    // frame-synced (60/120/144 Hz alike), time-based (a busy frame is skipped, never stretched), and
+    // a close, a re-open or a height re-target is honoured on the very next frame — no stale moves
+    // from another thread (SetWindowPos from here could land after a newer resize).
+    private void VsyncTicker(int gen)
+    {
+        var life = System.Diagnostics.Stopwatch.StartNew();
+        double last = 0;
+        while (_slideGen == gen && life.Elapsed.TotalMilliseconds < SlideMs + 500)
+        {
+            int hr;
+            try { hr = DwmFlush(); } catch { hr = -1; }
+            double now = life.Elapsed.TotalMilliseconds;
+            // No composition clock (RDP, a failure, or an idle desktop answering at once): pace ~6 ms.
+            if (hr < 0 || now - last < 3) { Thread.Sleep(6); now = life.Elapsed.TotalMilliseconds; }
+            last = now;
+            if (_slideGen != gen) break;
+            if (Interlocked.Exchange(ref _tickQueued, 1) == 0)
+            {
+                try { BeginInvoke(_slideTick); }
+                catch { Interlocked.Exchange(ref _tickQueued, 0); break; } // handle gone (exiting)
+            }
+        }
+    }
+
+    private void SlideTick()
+    {
+        Interlocked.Exchange(ref _tickQueued, 0);
+        int gen = _slideGen;
+        if (gen < 0 || gen != _openGen) return;
+        double t = SlideProgress();
+        PlaceWindow(SlideY(t));
+        if (t >= 1) { _slideGen = -1; _opening = false; }
+    }
+
+    private double SlideProgress() => Math.Min(1.0, _slideClock.Elapsed.TotalMilliseconds / SlideMs);
+
+    private int SlideY(double t) =>
+        _finalBounds.Y + (int)Math.Round(_slideOffset * (1 - OpenMotion.Ease(t)));
+
+    // Where the window belongs right now: still cloaked, the slide's start; mid-slide, the same
+    // progress towards the (new) target; otherwise the target itself.
+    private int CurrentY()
+    {
+        if (!_revealed) return _finalBounds.Y + _slideOffset;
+        int gen = _slideGen;
+        return gen >= 0 && gen == _openGen ? SlideY(SlideProgress()) : _finalBounds.Y;
+    }
+
+    // Moves the window — and, when the target size changed, resizes it — in ONE SetWindowPos, so no
+    // frame ever shows the new size at the old place. Z-order and activation are left alone.
+    private void PlaceWindow(int y)
+    {
+        var b = _finalBounds;
+        if (!IsHandleCreated) { Bounds = new Rectangle(b.X, y, b.Width, b.Height); return; }
+        bool sameSize = Width == b.Width && Height == b.Height;
+        if (sameSize && Left == b.X && Top == y) return;
+        SetWindowPos(Handle, IntPtr.Zero, b.X, y, b.Width, b.Height,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER | (sameSize ? SWP_NOSIZE : 0));
+    }
+
+    // A new content height (the prime's measurement, a re-render, a tab switch): re-target at once —
+    // one step, no resize animation. The bottom edge (nearest the strip) stays where it is, or keeps
+    // sliding on its curve, so the change never reads as a jump of the panel.
+    private void SetContentHeight(double cssHeight)
+    {
+        if (double.IsNaN(cssHeight) || cssHeight <= 0) return;
+        _lastHeightCss = Math.Max(1, (int)Math.Ceiling(Math.Min(cssHeight, MaxHeight)));
+        if (!Visible) return; // the next open sizes from _lastHeightCss
+        var f = ComputeFinalBounds();
+        if (f == _finalBounds) return;
+        _finalBounds = f;
+        PlaceWindow(CurrentY());
+    }
+
+    // Opened on a monitor with another scale: WinForms has just applied Windows' suggested rectangle;
+    // put the box back where this open wants it, sized for the new DPI (the slide keeps its progress).
+    protected override void OnDpiChanged(DpiChangedEventArgs e)
+    {
+        base.OnDpiChanged(e);
+        if (_finalBounds.IsEmpty || _sampleShots) return;
+        if (_slideOffset > 0) _slideOffset = (int)MathF.Round(SlideCss * Dpi);
+        _finalBounds = ComputeFinalBounds();
+        PlaceWindow(CurrentY());
+    }
 
     private Rectangle ComputeFinalBounds()
     {
-        var wa = Screen.FromPoint(Cursor.Position).WorkingArea;
-        int h = Math.Clamp((int)MathF.Round(_lastHeightCss * Dpi), (int)MathF.Round(MinHeightCss * Dpi), MaxScreenHeight());
+        var wa = WorkArea();
+        int minH = (int)MathF.Round(MinHeightCss * Dpi);
+        int h = Math.Clamp((int)MathF.Round(_lastHeightCss * Dpi), minH, Math.Max(minH, MaxScreenHeight()));
         int x = Math.Max(wa.Left + Margin_, wa.Right - W - Margin_);
         int y = Math.Max(wa.Top + Margin_, wa.Bottom - h - Margin_);
         return new Rectangle(x, y, W, h);
     }
 
-    private void StartGrow()
+    private Rectangle WorkArea() =>
+        _workArea.IsEmpty ? Screen.FromPoint(Cursor.Position).WorkingArea : _workArea;
+
+    // Windows' "Animation effects" setting (Settings → Accessibility → Visual effects). WebView2 maps
+    // the same switch to prefers-reduced-motion inside the page; the host passes its answer too.
+    private static bool AnimationsEnabled()
     {
-        _growing = true;
-        _growT = 0f;
-        ApplyGrow(GrowStart);
-        _grow.Start();
+        try { return !SystemParametersInfo(SPI_GETCLIENTAREAANIMATION, 0, out int on, 0) || on != 0; }
+        catch { return true; }
     }
 
-    private void GrowTick()
+    private bool SetCloak(bool on)
     {
-        _growT += 16f / GrowMs;
-        if (_growT >= 1f) { _growT = 1f; _growing = false; _grow.Stop(); }
-        float e = 1f - (float)Math.Pow(1 - _growT, 5); // easeOutQuint ≈ the page's cubic-bezier(.16,1,.3,1)
-        ApplyGrow(GrowStart + (1f - GrowStart) * e);
+        try
+        {
+            int v = on ? 1 : 0;
+            return DwmSetWindowAttribute(Handle, DWMWA_CLOAK, ref v, sizeof(int)) >= 0;
+        }
+        catch { return false; }
     }
 
-    private void ApplyGrow(float scale)
+    private void DwmSetInt(int attribute, int value)
     {
-        int w = Math.Max(8, (int)(_finalBounds.Width * scale));
-        int h = Math.Max(8, (int)(_finalBounds.Height * scale));
-        // Pin the bottom-right corner (nearest the strip) so it grows outward from there.
-        base.SetBounds(_finalBounds.Right - w, _finalBounds.Bottom - h, w, h, BoundsSpecified.All);
-        // Keep the fixed-size WebView glued to that same corner so the page never reflows.
-        _web.Location = new Point(ClientSize.Width - _finalBounds.Width, ClientSize.Height - _finalBounds.Height);
-        ApplyRoundedRegion();
+        try { DwmSetWindowAttribute(Handle, attribute, ref value, sizeof(int)); } catch { }
     }
 
     private string _data = "[]";
@@ -1129,21 +1369,24 @@ sealed class PopoverForm : Form
         var h = await core.ExecuteScriptAsync("document.body.scrollHeight");
         int height = int.TryParse(h?.Trim('"'), out var v) ? v : 900;
         _finalBounds = new Rectangle(0, 0, WidthCss, height);
-        _web.Size = new Size(WidthCss, height);
         base.SetBounds(0, 0, WidthCss, height, BoundsSpecified.All);
-        _web.Location = new Point(0, 0);
         Show();
-        await Task.Delay(600);                                  // let entrance animations finish
+        await Task.Delay(600);                                  // let the page settle
         using (var fs = File.Create(Path.Combine(outDir, "popover.png")))
             await core.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, fs);
         Application.Exit();
     }
 
-    /// Replay the spring-open animation inside the page each time the popover is shown.
-    private async void PlayOpen()
+    /// Start the page's part of the open (see "open motion" above); motion=false shows it at rest.
+    private async void PlayOpen(bool motion)
     {
-        if (_web.CoreWebView2 == null) return;
-        try { await _web.CoreWebView2.ExecuteScriptAsync("window.playOpen && window.playOpen()"); } catch { }
+        try
+        {
+            if (_web.CoreWebView2 == null) return;
+            await _web.CoreWebView2.ExecuteScriptAsync(
+                "window.playOpen && window.playOpen(" + (motion ? "true" : "false") + ")");
+        }
+        catch { }
     }
 
     /// Fetch + transform a fresh summary on a background thread and inject it (selftest path; the
@@ -1168,7 +1411,8 @@ sealed class PopoverForm : Form
         string safe = AppHost.SafeJson(payload);
         string script =
             "try{window.renderData(" + safe + ");}catch(e){}" +
-            "window.chrome.webview.postMessage({height: Math.min(document.body.scrollHeight, " + MaxHeight + ")});";
+            "window.chrome.webview.postMessage({height: window.contentHeight ? window.contentHeight()" +
+            " : Math.min(document.body.scrollHeight, " + MaxHeight + ")});";
         try { await _web.CoreWebView2.ExecuteScriptAsync(script); } catch { }
 
         if (_selfTest)
@@ -1198,8 +1442,19 @@ sealed class PopoverForm : Form
 
     private int MaxScreenHeight()
     {
-        var wa = Screen.FromPoint(Cursor.Position).WorkingArea;
+        var wa = WorkArea();
         return Math.Min((int)MathF.Round(MaxHeight * Dpi), wa.Height - 2 * Margin_);
+    }
+
+    // Windows 10 only: clip to a rounded rectangle (aliased — GDI regions cannot anti-alias). On
+    // Windows 11 a region would switch DWM's own rounding, border and shadow OFF, so none is set.
+    private Size _regionSize;
+    protected override void OnResize(EventArgs e)
+    {
+        base.OnResize(e);
+        if (Win11 || Size == _regionSize || Width <= 0 || Height <= 0) return;
+        _regionSize = Size;
+        ApplyRoundedRegion();
     }
 
     private void ApplyRoundedRegion()
@@ -1212,10 +1467,9 @@ sealed class PopoverForm : Form
         path.AddArc(rect.Right - r, rect.Bottom - r, r, r, 0, 90);
         path.AddArc(rect.X, rect.Bottom - r, r, r, 90, 90);
         path.CloseFigure();
-        Region = new Region(path);
+        Region = new Region(path); // the setter disposes the previous region
     }
 
-    // Give the borderless window a soft drop shadow, like the floating macOS panel.
     protected override CreateParams CreateParams
     {
         get
@@ -1223,7 +1477,10 @@ sealed class PopoverForm : Form
             const int CS_DROPSHADOW = 0x20000;
             const int WS_EX_TOOLWINDOW = 0x80; // keep it out of Alt-Tab
             var cp = base.CreateParams;
-            cp.ClassStyle |= CS_DROPSHADOW;
+            // Windows 10: the legacy class shadow, a soft drop shadow for the borderless window.
+            // Windows 11: DWM's own flyout shadow instead — the class shadow is a separate SQUARE
+            // window that ignores the rounded corners.
+            if (!Win11) cp.ClassStyle |= CS_DROPSHADOW;
             cp.ExStyle |= WS_EX_TOOLWINDOW;
             return cp;
         }
@@ -1232,6 +1489,15 @@ sealed class PopoverForm : Form
     [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hWnd);
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+    [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
+    [DllImport("user32.dll", EntryPoint = "SystemParametersInfoW")]
+    private static extern bool SystemParametersInfo(uint action, uint param, out int value, uint winIni);
+    [DllImport("dwmapi.dll")] private static extern int DwmSetWindowAttribute(IntPtr hWnd, int attribute, ref int value, int size);
+    [DllImport("dwmapi.dll")] private static extern int DwmFlush();
+    private const uint SWP_NOSIZE = 0x0001, SWP_NOZORDER = 0x0004, SWP_NOACTIVATE = 0x0010, SWP_NOOWNERZORDER = 0x0200;
+    private const uint SPI_GETCLIENTAREAANIMATION = 0x1042;
+    private const int DWMWA_TRANSITIONS_FORCEDISABLED = 3, DWMWA_CLOAK = 13;
+    private const int DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWA_BORDER_COLOR = 34, DWMWCP_ROUND = 2;
     private void NativeActivate() => SetForegroundWindow(Handle);
 
     private readonly System.Windows.Forms.Timer _focusWatch;
@@ -1243,7 +1509,7 @@ sealed class PopoverForm : Form
     private void WatchFocus()
     {
         if (!Visible) { _focusWatch.Stop(); return; }
-        if (_growing) return;
+        if (!_revealed || _opening) return;
 
         IntPtr foreground = GetForegroundWindow();
         if (foreground == Handle) { _hadFocus = true; return; }
@@ -1254,6 +1520,46 @@ sealed class PopoverForm : Form
         if (pid == (uint)Environment.ProcessId) return;
 
         if (_hadFocus) Hide();
+    }
+}
+
+/// The popover's open-motion curve. The window's rise (PopoverForm's slide) uses the SAME
+/// cubic-bezier as the page's --ease-decel (web/index.html, Fluent "decelerate max"), so the window
+/// and its content decelerate together; test/packaging.test.sh compares this solver against
+/// Chromium's own evaluation of the page's curve.
+static class OpenMotion
+{
+    public const double X1 = 0.1, Y1 = 0.9, X2 = 0.2, Y2 = 1.0;
+
+    public static double Ease(double t) => CubicBezier(X1, Y1, X2, Y2, t);
+
+    /// CSS cubic-bezier(x1, y1, x2, y2) at time x in [0, 1] (Newton, bisection fallback).
+    public static double CubicBezier(double x1, double y1, double x2, double y2, double x)
+    {
+        if (double.IsNaN(x) || x <= 0) return 0;
+        if (x >= 1) return 1;
+        static double B(double a, double b, double s) => 3 * a * (1 - s) * (1 - s) * s + 3 * b * (1 - s) * s * s + s * s * s;
+        static double D(double a, double b, double s) => 3 * a * (1 - s) * (1 - s) + 6 * (b - a) * (1 - s) * s + 3 * (1 - b) * s * s;
+        double s = x;
+        for (int i = 0; i < 8; i++)
+        {
+            double err = B(x1, x2, s) - x;
+            if (Math.Abs(err) < 1e-7) return B(y1, y2, s);
+            double d = D(x1, x2, s);
+            if (Math.Abs(d) < 1e-6) break;
+            s -= err / d;
+            if (s < 0 || s > 1) break;
+        }
+        double lo = 0, hi = 1;
+        s = x;
+        for (int i = 0; i < 50; i++)
+        {
+            double v = B(x1, x2, s);
+            if (Math.Abs(v - x) < 1e-7) break;
+            if (v < x) lo = s; else hi = s;
+            s = (lo + hi) / 2;
+        }
+        return B(y1, y2, s);
     }
 }
 
