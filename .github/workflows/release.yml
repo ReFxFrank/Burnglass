@@ -290,8 +290,8 @@ jobs:
             | You have | Get |
             |---|---|
             | Windows, want an installer | `BurnglassSetup.exe`: per-user install (**no admin**), Start Menu and optional Desktop shortcuts, an Add/Remove Programs entry, and opt-in checkboxes to **start Burnglass when you sign in** (silent, no browser popup) and to **include Burnglass Strip**. Uninstalling removes all of it and **keeps your settings and usage history**. |
-            | Windows, portable | `burnglass.exe`: no installer. Double-click it; Burnglass runs in the background and opens the dashboard at http://localhost:4747. Logs, updates and Stop are in the dashboard's **Server panel**. |
-            | Windows taskbar strip (optional) | `burnglass-strip.exe`: a checkbox in the installer; with the portable exe, put it next to `burnglass.exe`. Then turn on **Burnglass Strip** in the Server panel. Ported from [openusage-windows](https://github.com/CheesyPoofs346/openusage-windows) (MIT). |
+            | Windows, portable | `burnglass.exe`: no installer. Double-click it; Burnglass runs in the background and opens the dashboard at http://localhost:4747. Logs, updates and Stop are in the dashboard's **System** section. |
+            | Windows taskbar strip (optional) | `burnglass-strip.exe`: a checkbox in the installer; with the portable exe, put it next to `burnglass.exe`. Then turn on **Burnglass Strip** in System → Integrations. Ported from [openusage-windows](https://github.com/CheesyPoofs346/openusage-windows) (MIT). |
             | Linux | `burnglass-linux`: `chmod +x burnglass-linux && ./burnglass-linux` |
             | macOS (Apple Silicon) | `burnglass-macos`: `chmod +x burnglass-macos && xattr -d com.apple.quarantine burnglass-macos; ./burnglass-macos` (the `xattr` clears Gatekeeper's quarantine on the unsigned binary) |
 
@@ -321,7 +321,7 @@ jobs:
             sha256 of each is shown in the asset list.
 
             Burnglass updates itself. When a new release is out, the header shows an update pill and
-            the Server panel installs it in one click (sha256-verified). Double-clicking a newer
+            the System section installs it in one click (sha256-verified). Double-clicking a newer
             `burnglass.exe` over a running old one takes over automatically.
 
             ### Local and private
