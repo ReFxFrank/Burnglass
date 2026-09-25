@@ -4,6 +4,9 @@
 # B: disable endpoint clears the activity (activity: null).
 # C: no client id configured -> shipped default works out of the box.
 # D: discord not running -> status discord-not-found, server unaffected.
+# Second line (state): "<model> · <effort> · N sessions" from the newest MAIN-
+# conversation entry (a newer subagent line must not flip it) + live sessions;
+# config discordShowModel:false removes it (checked in phase C).
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 TMP=$(mktemp -d)
@@ -30,8 +33,15 @@ const iso = (m) => new Date(now - m * 60e3).toISOString();
 const lines = [
   // recent (within the 15-min active window) so the active provider is Claude
   { type: "user", timestamp: iso(6), sessionId: "s1", cwd: "/p", message: { role: "user", content: "hello" } },
-  { type: "assistant", timestamp: iso(5), sessionId: "s1", requestId: "r1", cwd: "/p",
+  { type: "assistant", timestamp: iso(5), sessionId: "s1", requestId: "r1", cwd: "/p", effort: "xhigh",
     message: { id: "m1", model: "claude-fable-5", usage: { input_tokens: 500000, output_tokens: 250000 } } },
+  // a SECOND live session (older than m1, zero tokens: totals unchanged)
+  { type: "assistant", timestamp: iso(7), sessionId: "s2", requestId: "r2", cwd: "/q",
+    message: { id: "m2", model: "claude-opus-5-5", usage: { input_tokens: 0, output_tokens: 0 } } },
+  // the NEWEST line is a subagent (Haiku explorer) in s1 — it must not flip
+  // the presence model away from the main conversation
+  { type: "assistant", timestamp: iso(4), sessionId: "s1", requestId: "r3", cwd: "/p", isSidechain: true,
+    message: { id: "m3", model: "claude-haiku-4-5", usage: { input_tokens: 0, output_tokens: 0 } } },
 ];
 fs.writeFileSync(process.argv[1] + "/projects/demo/s.jsonl", lines.map(JSON.stringify).join("\n") + "\n");
 ' "$CL"
@@ -58,7 +68,7 @@ sleep 0.7
 kill $SRV 2>/dev/null; wait $SRV 2>/dev/null
 
 # --- C: no client id -> shipped default kicks in, works out of the box
-echo '{"discordPresence": true}' > "$PH/config.json"
+echo '{"discordPresence": true, "discordShowModel": false}' > "$PH/config.json"
 start_pulse "$IPC"
 curl -s "http://127.0.0.1:$PORT/api/summary" > "$TMP/c.json"
 kill $SRV 2>/dev/null; wait $SRV 2>/dev/null
@@ -88,10 +98,12 @@ const detailSet = new Set(acts.filter((f) => f.payload.args.activity).map((f) =>
 ok(detailSet.has("Today") && detailSet.has("Past 7 days") && detailSet.has("All-time"),
    "A: rotation cycles Today / Past 7 days / All-time (saw: " + Array.from(detailSet).join(", ") + ")");
 ok(act && /^(Today|Past 7 days|All-time): 750K tokens · \$17\.50$/.test(act.details), "A: page format label: tokens · spend (" + (act && act.details) + ")");
-const anySessions = acts.some((f) => f.payload.args.activity && JSON.stringify(f.payload.args.activity).includes("sessions"));
-ok(!anySessions, "A: session count removed everywhere");
-const anyState = acts.some((f) => f.payload.args.activity && f.payload.args.activity.state !== undefined);
-ok(!anyState, "A: no meters line — activity is always single-line");
+// Second line: main-conversation model + effort + LIVE session count
+ok(act && act.state === "Fable 5 · Extra High · 2 sessions",
+   "A: state = model · effort · live sessions (" + (act && act.state) + ")");
+const AN = require(SP + "/a.json").activeNow;
+ok(AN && AN.model === "claude-fable-5" && AN.effort === "xhigh" && AN.sessions === 2,
+   "A: activeNow skips the newer subagent line (" + JSON.stringify(AN) + ")");
 const anyMeters = acts.some((f) => f.payload.args.activity && /5h|wk \d|%/.test(JSON.stringify(f.payload.args.activity)));
 ok(!anyMeters, "A: no 5h/weekly text anywhere in the activity");
 ok(act && act.buttons && act.buttons[0].url.includes("github.com/ReFxFrank"), "A: Get Pulse button");
@@ -112,6 +124,9 @@ const C = require(SP + "/c.json").discord;
 ok(C && C.status === "ok", "C: NO config id -> shipped default works out of the box (" + (C && C.status) + ")");
 const defaultHs = frames.filter((f) => f.op === 0).find((f) => f.payload.client_id === "1527236432375189535");
 ok(!!defaultHs, "C: handshake used the shipped default application ID");
+const cActs = frames.slice(frames.indexOf(defaultHs)).filter((f) => f.op === 1 && f.payload.cmd === "SET_ACTIVITY" && f.payload.args.activity);
+ok(cActs.length >= 1 && cActs.every((f) => f.payload.args.activity.state === undefined),
+   "C: discordShowModel:false -> no second line (" + cActs.length + " frame(s))");
 
 const D = require(SP + "/d.json").discord;
 ok(D && (D.status === "discord-not-found" || D.status === "connecting"), "D: no Discord -> " + (D && D.status));

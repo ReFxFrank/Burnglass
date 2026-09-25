@@ -361,6 +361,13 @@ Show Pulse as a Discord activity that rotates through your usage — **"Today:
 tokens · $2,581"** — one page every 45 s (set `discordRotateSecs` in
 `~/.pulse/config.json`, 15–300), with a **Get Pulse** button.
 
+While you're active, a second line shows **what you're running and how many
+sessions are live** — e.g. **"Opus 5.5 · Extra High · 3 sessions"** (Codex:
+"GPT-6 Sol · High · 1 session"). The model and effort come from your main
+conversation (subagent and advisor calls never flicker it), and a session
+counts as live if it had activity in the last 15 minutes. It disappears when
+you go idle; turn it off entirely with `{"discordShowModel": false}`.
+
 **Zero setup:** click **Discord presence: off → on** in the Server panel while
 the Discord desktop app is running. Pulse ships with the official Pulse
 application ID built in (a public identifier — every rich-presence tool works

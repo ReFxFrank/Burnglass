@@ -34,7 +34,7 @@ const url = require('url');
 const crypto = require('crypto');
 
 // Version — keep in sync with package.json (build/make-exe.mjs enforces this).
-const PULSE_VERSION = '1.31.0';
+const PULSE_VERSION = '1.32.0';
 const SERVER_START = Date.now();
 let IS_DAEMON_CHILD = false; // set when running as the hidden background child
 let IS_AFTER_UPDATE = false; // set on the relaunch right after a self-update
@@ -1072,6 +1072,10 @@ function normalize(rec) {
     webSearches: num(stu.web_search_requests),
     sessionId: intern(rec.sessionId || ''),
     project: intern(rec.cwd || ''),
+    // Subagent / workflow transcript line (Claude Code marks them isSidechain;
+    // they carry the PARENT's sessionId). Used to pick the main conversation's
+    // model for the live Discord line.
+    sidechain: rec.isSidechain === true,
     // messageId/requestId are folded into `key` (dedupKey) at parse time and
     // never read again — retaining two unique strings per entry was pure RSS.
     key: dedupKey(rec),
@@ -1131,6 +1135,8 @@ function advisorEntries(parent, mark) {
       webSearches: 0,
       sessionId: parent.sessionId,
       project: parent.project,
+      sidechain: parent.sidechain,
+      advisor: true,
       key: parent.key + ':adv' + i,
     };
     e.cost = costForEntry(e);
@@ -2310,6 +2316,32 @@ function aggregate(entries, sessionMeta, desktopTitles, now, modesBySession, ult
     const last = asc[asc.length - 1];
     activeProvider = last.source === 'codex' ? 'codex' : nonClaudeEntry(last) ? null : 'claude';
   }
+  // What you're doing right now, for the Discord line: the model + effort of
+  // the newest MAIN-conversation entry of the active provider (never a
+  // subagent's or an advisor call's — those would flicker the line to a Haiku
+  // explorer or the advisor model), plus how many distinct sessions had any
+  // activity inside the same window (subagents share their parent's id).
+  let activeNow = null;
+  if (activeProvider) {
+    const cutoff = now - ACTIVE_MS;
+    const sessions = new Set();
+    let main = null, fallback = null;
+    for (let i = asc.length - 1; i >= 0 && asc[i].ts >= cutoff; i--) {
+      const e = asc[i];
+      if (e.sessionId) sessions.add(e.sessionId);
+      const prov = e.source === 'codex' ? 'codex' : nonClaudeEntry(e) ? null : 'claude';
+      // Helper calls are not "what you're using": advisor sub-inferences and
+      // Codex's background auto-reviewer.
+      if (prov !== activeProvider || e.advisor || e.model === 'codex-auto-review' || HIDDEN_MODELS.has(e.model)) continue;
+      if (!fallback) fallback = e;
+      if (!main && !e.sidechain) main = e;
+    }
+    const pick = main || fallback;
+    if (pick) {
+      activeNow = { provider: activeProvider, model: pick.model, effort: pick.effort || null,
+        ultracode: !!pick.ultracode, sessions: sessions.size };
+    }
+  }
 
   // Activity heatmap — cost/tokens/messages by local weekday (0=Sun … 6=Sat) ×
   // hour (0–23), over all live entries. Reveals when you actually work.
@@ -2330,6 +2362,7 @@ function aggregate(entries, sessionMeta, desktopTitles, now, modesBySession, ult
     generatedAt: now,
     latestTs: asc.length ? asc[asc.length - 1].ts : null, // newest record on this machine
     activeProvider, // 'claude' | 'codex' | null (idle)
+    activeNow, // { provider, model, effort, ultracode, sessions } | null (idle)
     totals,
     currentBlock,
     idle: activeBlock === null,
@@ -4773,6 +4806,35 @@ function fmtTok(v) {
   if (v >= 1e3) return (v / 1e3).toFixed(0) + 'K';
   return String(Math.round(v));
 }
+// Human model name for the presence line: claude-opus-5-5 → "Opus 5.5",
+// claude-3-5-sonnet-20241022 → "Sonnet 3.5", gpt-6-sol → "GPT-6 Sol",
+// gpt-5.3-codex → "GPT-5.3 Codex", glm-5.1 → "GLM-5.1". Partner-cloud forms
+// are canonicalized first; anything unrecognised is shown as-is.
+function prettyModelName(model) {
+  if (!model) return '';
+  const cap = (w) => w.charAt(0).toUpperCase() + w.slice(1);
+  let m = canonicalClaudeModel(canonicalOpenAIModel(String(model))).replace(/\[1m\]$/, '').replace(/-\d{8}$/, '');
+  if (m.startsWith('claude-')) {
+    const parts = m.slice(7).split('-');
+    const fam = parts.filter((p) => /^[a-z]/.test(p) && !/^v\d+$/.test(p));
+    const ver = parts.filter((p) => /^\d+$/.test(p));
+    return fam.length ? fam.map(cap).join(' ') + (ver.length ? ' ' + ver.join('.') : '') : m;
+  }
+  if (m.startsWith('gpt-')) {
+    const [v, ...rest] = m.slice(4).split('-');
+    return /^\d/.test(v) ? 'GPT-' + v + (rest.length ? ' ' + rest.map(cap).join(' ') : '')
+      : 'GPT ' + [v, ...rest].map(cap).join(' ');
+  }
+  if (m.startsWith('glm-')) return 'GLM-' + m.slice(4);
+  return m;
+}
+// Effort level as the presence shows it ("Sonnet 5 · Medium"): xhigh reads as
+// "Extra High"; unknown levels are just capitalised.
+const EFFORT_LABELS = { minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra High', max: 'Max' };
+function effortLabel(effort) {
+  if (!effort) return '';
+  return EFFORT_LABELS[effort] || effort.charAt(0).toUpperCase() + effort.slice(1);
+}
 
 // Compose the activity from the same aggregates the dashboard shows.
 // buildSummary() is mtime-cached, so a 15s cadence costs ~the same as one
@@ -4852,8 +4914,21 @@ function buildDiscordActivity() {
   const assetText = prov === 'codex' ? 'Using OpenAI Codex'
     : prov === 'claude' ? 'Using Claude Code'
     : 'Pulse — idle';
+  // Second line while active: "Opus 5.5 · Extra High · 3 sessions" — the
+  // model + effort you're running and how many sessions are live. Absent when
+  // idle (the activity collapses back to one line). Friends can see presence,
+  // so it can be turned off with config `discordShowModel: false`.
+  let state;
+  const an = s.activeNow;
+  if (an && cfg.discordShowModel !== false) {
+    const parts = [prettyModelName(an.model), an.ultracode ? 'Ultracode' : effortLabel(an.effort)];
+    if (an.sessions > 0) parts.push(an.sessions + (an.sessions === 1 ? ' session' : ' sessions'));
+    const line = parts.filter(Boolean).join(' · ').slice(0, 128);
+    if (line.length >= 2) state = line; // Discord rejects a 1-char state
+  }
   return {
     details: details.slice(0, 128),
+    ...(state ? { state } : {}),
     timestamps: { start: discordPresenceStart() }, // persisted → survives update relaunches
     assets: {
       large_image: asset,

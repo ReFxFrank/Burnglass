@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.32.0
+
+- **Discord presence shows what you're running.** While you're active, a
+  second line reads **"Opus 5.5 · Extra High · 3 sessions"**: the model and
+  effort of your MAIN conversation (a newer subagent or advisor line never
+  flips it to a Haiku explorer or the advisor model; Codex's background
+  auto-reviewer is skipped too), and how many sessions had activity in the
+  last 15 minutes (subagents share their parent's session, so a busy
+  workflow still counts as one). Idle → the line disappears and the
+  activity is one line again. Friends can see presence, so
+  `{"discordShowModel": false}` turns the line off. New `payload.activeNow`
+  = `{provider, model, effort, ultracode, sessions}`.
+
 ## v1.31.0
 
 - **Subagent spend was under-counted — often by ~99% of its output.** Claude
