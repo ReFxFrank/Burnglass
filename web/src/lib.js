@@ -7,14 +7,17 @@ import { useEffect, useRef, useState } from 'react';
 // =============================================================================
 
 // ---- brand -------------------------------------------------------------------
-// The ONE place the product name lives. A rename is coming: every visible
-// "Pulse" in the UI must read this constant, never a string literal.
-export const BRAND = 'Pulse';
+// The ONE place the product name lives (Burnglass was called Pulse up to
+// v1.34): every visible product name in the UI reads this constant, never a
+// string literal. The server also reports it as payload.brand.
+export const BRAND = 'Burnglass';
 // The executable users double-click to start the server again (stopped page,
-// System panel copy). Kept next to BRAND so a rename touches one file.
-export const EXE_NAME = 'pulse.exe';
+// System panel copy). A DEFAULT only: prefer payload.exeName, the running
+// exe's real filename — a self-updated v1 install is still called pulse.exe
+// (null when running from source).
+export const EXE_NAME = 'burnglass.exe';
 // The Windows taskbar-strip companion's executable (System panel help copy).
-export const STRIP_EXE_NAME = 'pulse-strip.exe';
+export const STRIP_EXE_NAME = 'burnglass-strip.exe';
 
 // ---- colour ------------------------------------------------------------------
 // Categorical palette for SOURCES ONLY (validated in both themes). Values are

@@ -100,10 +100,10 @@ ok(crow && near(+crow.split(",")[1], 6), "?sources=cli: today totals only the cl
 
 const dh = fs.readFileSync(T + "/daily.h", "utf8");
 ok(/content-type:\s*text\/csv/i.test(dh), "CSV served as text/csv");
-ok(/content-disposition:\s*attachment; filename="pulse-daily-last30-\d{8}\.csv"/i.test(dh),
+ok(/content-disposition:\s*attachment; filename="burnglass-daily-last30-\d{8}\.csv"/i.test(dh),
    "CSV attachment filename carries data set, period, date");
 const jh = fs.readFileSync(T + "/json.h", "utf8");
-ok(/content-disposition:\s*attachment; filename="pulse-export-\d{8}\.json"/i.test(jh), "JSON attachment filename");
+ok(/content-disposition:\s*attachment; filename="burnglass-export-\d{8}\.json"/i.test(jh), "JSON attachment filename");
 const full = JSON.parse(fs.readFileSync(T + "/full.json", "utf8"));
 ok(full.version && Array.isArray(full.periods) && full.periods.length > 0, "JSON export is the full payload");
 

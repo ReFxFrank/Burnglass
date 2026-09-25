@@ -207,7 +207,7 @@ ok(AN && AN.model === "claude-fable-5" && AN.effort === "xhigh" && AN.sessions =
    "A: activeNow skips the newer subagent line (" + JSON.stringify(AN) + ")");
 const anyMeters = acts.some((f) => f.payload.args.activity && /5h|wk \d|%/.test(JSON.stringify(f.payload.args.activity)));
 ok(!anyMeters, "A: no 5h/weekly text anywhere in the activity");
-ok(act && act.buttons && act.buttons[0].url.includes("github.com/ReFxFrank"), "A: Get Pulse button");
+ok(act && act.buttons && act.buttons[0].url.includes("github.com/ReFxFrank/Burnglass") && act.buttons[0].label === "Get Burnglass", "A: Get Burnglass button (" + (act && act.buttons && act.buttons[0].label) + ")");
 ok(act && act.timestamps && act.timestamps.start > 0, "A: elapsed timestamp (continuous across pages)");
 const A = require(SP + "/a.json").discord;
 ok(A && A.enabled && A.status === "ok", "A: payload.discord.status ok (" + (A && A.status) + ")");

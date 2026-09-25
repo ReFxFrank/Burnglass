@@ -2,7 +2,8 @@
 'use strict';
 
 /*
- * Pulse — a local, zero-dependency Claude Code usage dashboard.
+ * Burnglass (formerly Pulse) — a local, zero-dependency usage dashboard for
+ * Claude Code, OpenAI Codex and other coding agents.
  *
  * Reads the newline-delimited JSON session logs Claude Code writes under
  * ~/.claude/projects, aggregates them, and serves a self-refreshing
@@ -20,9 +21,21 @@
  *   - chatgpt.com — Codex account token totals. Opt-in.
  *   - api.meshy.ai — Meshy 3D credit balance + task credit usage. Opt-in
  *     TWICE (config `meshy: true` AND a stored `meshyApiKey`). The API key is
- *     the one credential Pulse stores: header-only, never logged, never in a
- *     payload, never in a URL, sent to no other host.
+ *     the one credential Burnglass stores: header-only, never logged, never
+ *     in a payload, never in a URL, sent to no other host.
  *   - the Discord desktop client's LOCAL socket (opt-in; not the network).
+ *
+ * FROZEN COMPATIBILITY IDENTIFIERS (the product was called Pulse up to v1.34;
+ * these still say "pulse" ON PURPOSE — old and new processes, companions and
+ * browser tabs meet each other during every upgrade): the `X-Pulse: 1`
+ * mutation header (X-Burnglass is accepted too, but requestShutdown SENDS
+ * X-Pulse so v2 can stop a running v1), the `PulseTray<port>` and
+ * `PulseStrip_SingleInstance` mutexes, the HKCU Run value name `Pulse`, the
+ * `pulse-*` localStorage keys, the Discord client id + `pulse` asset key,
+ * every CLI flag, the /api response shapes, port 4747, the PULSE_* env vars
+ * (BURNGLASS_* aliases win), the PULSE_VERSION constant name (make-exe greps
+ * it) and the v1 release-asset names (pulse.exe / pulse-linux / pulse-macos
+ * must stay on every 2.x release: v1.x self-updaters match them exactly).
  */
 
 const fs = require('fs');
@@ -34,7 +47,18 @@ const url = require('url');
 const crypto = require('crypto');
 
 // Version — keep in sync with package.json (build/make-exe.mjs enforces this).
-const PULSE_VERSION = '1.34.0';
+// The constant keeps its v1 NAME: make-exe's drift check greps for it.
+const PULSE_VERSION = '2.0.0';
+const BRAND = 'Burnglass';
+
+// BURNGLASS_<NAME> wins; PULSE_<NAME> (the v1 spelling) stays a permanent,
+// silent alias so no user setup or test harness breaks. An empty value counts
+// as unset, so `BURNGLASS_X=` can never mask a real PULSE_X.
+function envv(name) {
+  const v = process.env['BURNGLASS_' + name];
+  if (v !== undefined && v !== '') return v;
+  return process.env['PULSE_' + name];
+}
 const SERVER_START = Date.now();
 let IS_DAEMON_CHILD = false; // set when running as the hidden background child
 let IS_AFTER_UPDATE = false; // set on the relaunch right after a self-update
@@ -57,7 +81,7 @@ function nonClaudeEntry(e) { return AGENT_SOURCES.has(e.source) || e.provider ==
 // LOGGING
 // Everything logged via console.* is mirrored into a ring buffer — served at
 // /api/logs for the dashboard's Server panel — and, when running as a hidden
-// background process, appended to ~/.pulse/pulse.log.
+// background process, appended to ~/.burnglass/burnglass.log.
 // ---------------------------------------------------------------------------
 const LOG_RING_MAX = 400;
 const LOG_FILE_MAX = 2 * 1024 * 1024;
@@ -104,39 +128,129 @@ function rotateLogFile() {
   console.error = (...a) => { pushLogLine('error', a); try { origErr(...a); } catch (_) {} };
 }
 
-// ~/.pulse — the ONLY place Pulse ever writes (sidecar log, config, logs).
-function pulseHome() {
-  return process.env.PULSE_HOME || path.join(os.homedir(), '.pulse');
+// ---------------------------------------------------------------------------
+// HOME — ~/.burnglass is the ONLY place Burnglass writes (config, logs,
+// history, caches, effort sidecar). Resolution, first match wins:
+//   1. BURNGLASS_HOME, else PULSE_HOME (v1 alias) — the user pinned it: used
+//      VERBATIM, never migrated, and no legacy compat reads/writes apply.
+//   2. ~/.burnglass when it exists.
+//   3. ~/.pulse (Pulse <= 1.34) when only IT exists — the pre-migration state.
+//      Deliberately NOT memoized: the first v2 SERVER that owns its port
+//      copies ~/.pulse to ~/.burnglass (migrateHome, called from the listen
+//      callback) and flips this. Short-lived commands (--statusline,
+//      --mode-hook, --summary, setup printers, --startup, --stop) only
+//      RESOLVE — before the first v2 server run they keep using ~/.pulse,
+//      which the migration then copies.
+//   4. ~/.burnglass (fresh install; created lazily by the first write).
+// A failed migration memoizes ~/.pulse ("degraded": fully working, retried
+// on the next start).
+// ---------------------------------------------------------------------------
+const isDir = (p) => { try { return fs.statSync(p).isDirectory(); } catch (_) { return false; } };
+const isFileAt = (p) => { try { return fs.statSync(p).isFile(); } catch (_) { return false; } };
+const samePathAbs = (a, b) => {
+  const ra = path.resolve(String(a)), rb = path.resolve(String(b));
+  return process.platform === 'win32' ? ra.toLowerCase() === rb.toLowerCase() : ra === rb;
+};
+function explicitHome() { return envv('HOME') || null; }
+function newHomePath() { return path.join(os.homedir(), '.burnglass'); }
+function legacyHomePath() { return path.join(os.homedir(), '.pulse'); }
+let homeResolved = null;
+function appHome() {
+  if (homeResolved) return homeResolved;
+  const ex = explicitHome();
+  if (ex) return (homeResolved = ex);
+  const next = newHomePath();
+  if (isDir(next)) return (homeResolved = next);
+  const legacy = legacyHomePath();
+  if (isDir(legacy)) return legacy; // pre-migration: NOT memoized (see above)
+  return (homeResolved = next);
+}
+// True while ~/.pulse is still the home and the first v2 server has not yet
+// copied it (used to defer the daemon's log file until after the migration,
+// so nothing new is created in ~/.pulse just to be abandoned).
+function homeMigrationPending() {
+  return !homeResolved && !explicitHome() && !isDir(newHomePath()) && isDir(legacyHomePath());
+}
+// The legacy home, when the v1 compat reads/writes apply: not pinned, it
+// exists, and it is not itself the active home (pre-migration and degraded
+// runs ARE ~/.pulse, so there is nothing to be compatible with).
+function legacyCompatHome() {
+  if (explicitHome()) return null;
+  const legacy = legacyHomePath();
+  if (samePathAbs(appHome(), legacy) || !isDir(legacy)) return null;
+  return legacy;
+}
+// A display form for messages: "~/.burnglass" rather than an absolute path
+// when the home lives in the user's home directory.
+function homeLabel(sub) {
+  const h = appHome();
+  const rel = path.relative(os.homedir(), h);
+  const base = (!rel.startsWith('..') && !path.isAbsolute(rel)) ? '~/' + rel.split(path.sep).join('/') : h;
+  return sub ? base + '/' + sub : base;
 }
 
-function configFilePath() { return path.join(pulseHome(), 'config.json'); }
+function configFilePath() { return path.join(appHome(), 'config.json'); }
 function readConfig() {
   try { return JSON.parse(fs.readFileSync(configFilePath(), 'utf8')) || {}; } catch (_) { return {}; }
 }
 
-// Runtime discovery file (~/.pulse/server.json): lets the short-lived
-// `pulse --statusline` process find the running server's port. Best-effort.
-function runtimeFilePath() { return path.join(pulseHome(), 'server.json'); }
+// Runtime discovery file (<home>/server.json): lets the short-lived
+// `--statusline` / `--summary` processes find the running server's port.
+// Best-effort. When the legacy ~/.pulse/server.json EXISTS it is mirrored
+// (compat write): a not-yet-updated pulse-strip.exe hard-codes that path and
+// an old `pulse --statusline` copy reads it — without the mirror both go
+// dark (and the strip exits after 40 misses).
+function runtimeFilePath() { return path.join(appHome(), 'server.json'); }
 function writeRuntimeFile(port, host) {
+  // The statusline always connects over loopback; record 127.0.0.1 unless
+  // bound loopback already, so a LAN bind still yields a reachable local URL.
+  const connectHost = (host === '0.0.0.0' || host === '::') ? '127.0.0.1' : host;
+  const json = JSON.stringify({ port, host: connectHost, pid: process.pid, startedAt: SERVER_START, version: PULSE_VERSION });
   try {
-    fs.mkdirSync(pulseHome(), { recursive: true });
-    // The statusline always connects over loopback; record 127.0.0.1 unless
-    // bound loopback already, so a LAN bind still yields a reachable local URL.
-    const connectHost = (host === '0.0.0.0' || host === '::') ? '127.0.0.1' : host;
-    fs.writeFileSync(runtimeFilePath(), JSON.stringify({ port, host: connectHost, pid: process.pid, startedAt: SERVER_START, version: PULSE_VERSION }));
+    fs.mkdirSync(appHome(), { recursive: true });
+    fs.writeFileSync(runtimeFilePath(), json);
   } catch (_) { /* non-fatal — statusline falls back to the default port */ }
+  const legacy = legacyCompatHome();
+  if (legacy && isFileAt(path.join(legacy, 'server.json'))) {
+    try { fs.writeFileSync(path.join(legacy, 'server.json'), json); } catch (_) {}
+  }
 }
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch (e) { return !!(e && e.code === 'EPERM'); }
+}
+// Reads the home's server.json AND (when compat applies) the legacy one, and
+// returns the FRESHEST LIVE record: nothing ever deletes a server.json, so
+// "new home first" would let a stale ~/.burnglass/server.json shadow a v1
+// server that is the one actually running. Live pid beats dead; newer
+// startedAt breaks ties; a dead record is still better than none (the caller
+// then fails open to its no-server path).
 function readRuntimeFile() {
-  try { return JSON.parse(fs.readFileSync(runtimeFilePath(), 'utf8')); } catch (_) { return null; }
+  const files = [runtimeFilePath()];
+  const legacy = legacyCompatHome();
+  if (legacy) files.push(path.join(legacy, 'server.json'));
+  let best = null, bestAlive = false;
+  for (const f of files) {
+    let j = null;
+    try { j = JSON.parse(fs.readFileSync(f, 'utf8')); } catch (_) { continue; }
+    if (!j || typeof j !== 'object' || !Number.isInteger(j.port)) continue;
+    const alive = pidAlive(j.pid);
+    const newer = !best || (+j.startedAt || 0) > (+best.startedAt || 0);
+    if (!best || (alive && !bestAlive) || (alive === bestAlive && newer)) { best = j; bestAlive = alive; }
+  }
+  return best;
 }
 function writeConfig(patch) {
   const next = { ...readConfig(), ...patch };
   try {
-    fs.mkdirSync(pulseHome(), { recursive: true });
+    fs.mkdirSync(appHome(), { recursive: true });
     fs.writeFileSync(configFilePath(), JSON.stringify(next, null, 2) + '\n');
   } catch (e) {
-    console.warn('[pulse] could not write config: ' + e.message);
+    console.warn('[burnglass] could not write config: ' + e.message);
   }
+  // Clearing or changing the Meshy key must not leave the OLD plaintext key
+  // behind in the v1 home, where a stale v1 copy would keep using it.
+  if (patch && Object.prototype.hasOwnProperty.call(patch, 'meshyApiKey')) scrubLegacyMeshyKey();
   // Config affects the summary payload (budget, meters, alerts, …) and the
   // statusline feed (trayEnabled drives the tray's handoff) — a
   // memoized copy must never outlive a settings change.
@@ -147,10 +261,12 @@ function writeConfig(patch) {
   return next;
 }
 
-function openLogFile() {
+// backfill: write the ring buffer's lines first — a daemon whose log opening
+// was deferred until after the home migration keeps its early lines.
+function openLogFile(backfill) {
   try {
-    fs.mkdirSync(pulseHome(), { recursive: true });
-    const p = path.join(pulseHome(), 'pulse.log');
+    fs.mkdirSync(appHome(), { recursive: true });
+    const p = path.join(appHome(), 'burnglass.log');
     logFilePath = p;
     try { // rotate an oversized file from a previous run
       const st = fs.statSync(p);
@@ -166,7 +282,209 @@ function openLogFile() {
       if (logFileStream === s) logFileStream = null;
     });
     logFileStream = s;
+    if (backfill) {
+      for (const l of logRing) {
+        const line = new Date(l.ts).toISOString() + ' ' + l.level.toUpperCase().padEnd(5) + ' ' + l.text + '\n';
+        try { s.write(line); logFileBytes += Buffer.byteLength(line); } catch (_) {}
+      }
+    }
   } catch (_) {}
+}
+let logOpenDeferred = false; // see main(): set while the migration is pending
+
+// ---------------------------------------------------------------------------
+// HOME MIGRATION  ~/.pulse → ~/.burnglass  (one-way COPY, atomic publish)
+// Runs ONLY in a server process, ONLY after it owns its port (top of the
+// listen callback): a v2 that loses the bind to a still-running v1 must not
+// use the migration up on a snapshot the v1 keeps changing for weeks.
+//   - Allowlisted copy of user data + small state (never logs, the runtime
+//     file, tray.ps1, the strip's regenerated web/ + WebView2 profile, or the
+//     105 MB bin/). Skipped names are recorded in the marker.
+//   - Staged in ~/.burnglass.migrating-<pid>-<6 hex>, which gets a SENTINEL
+//     file before anything else; cleanup (ours on failure, stale >1h ones on
+//     a later start) only ever deletes a directory whose name matches that
+//     exact pattern AND that holds the sentinel — never a glob sweep of $HOME.
+//   - Published with ONE rename: readers see no ~/.burnglass or a complete
+//     one. Two racing servers: the loser's rename fails, it adopts the
+//     winner's home.
+//   - ~/.pulse is NEVER renamed, moved or deleted. Afterwards it is touched
+//     only by compat writes: the server.json mirror, a refresh of an
+//     EXISTING tray.ps1 (a running v1 tray relaunches that file on the
+//     version change — a stale copy would respawn forever), and stripping the
+//     plaintext meshyApiKey out of its config.json (the key moved).
+//   - Any failure: keep running on ~/.pulse (degraded, retried next start),
+//     payload.homeMigration.status = 'failed'. Never a crash, never a
+//     half-switch.
+// ---------------------------------------------------------------------------
+const MIGRATE_FILES = ['config.json', 'meshy.json', 'modes.jsonl', 'discord-presence.json',
+  'strip.json', 'strip-ui.json', 'strip_cells.json'];
+const MIGRATE_DIRS = { history: /^\d{4}-\d{2}\.json$/ }; // skips *.tmp partials
+const MIGRATION_MARKER = 'migrated-from-pulse.json';
+const STAGE_PREFIX = '.burnglass.migrating-';
+const STAGE_RE = /^\.burnglass\.migrating-\d+-[0-9a-f]{6}$/;
+const STAGE_SENTINEL = 'BURNGLASS-MIGRATION-STAGE';
+const STAGE_STALE_MS = 3600 * 1000;
+let homeMigration = null; // → payload.homeMigration
+
+function sleepSync(ms) {
+  try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch (_) {}
+}
+function isMigrationStage(dir) {
+  if (!STAGE_RE.test(path.basename(dir))) return false;
+  try {
+    if (!fs.lstatSync(dir).isDirectory()) return false; // never follow a link
+    return fs.lstatSync(path.join(dir, STAGE_SENTINEL)).isFile();
+  } catch (_) { return false; }
+}
+function removeMigrationStage(dir) {
+  if (!isMigrationStage(dir)) return;
+  // Sentinel LAST: if anything is locked (Windows AV), the half-removed stage
+  // keeps its sentinel and the next start's sweep can still recognise it.
+  try {
+    for (const n of fs.readdirSync(dir)) {
+      if (n !== STAGE_SENTINEL) fs.rmSync(path.join(dir, n), { recursive: true, force: true });
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch (_) {}
+}
+function sweepStaleMigrationStages() {
+  let names;
+  try { names = fs.readdirSync(os.homedir()); } catch (_) { return; }
+  for (const n of names) {
+    if (!STAGE_RE.test(n)) continue;
+    const dir = path.join(os.homedir(), n);
+    let age;
+    try { age = Date.now() - fs.lstatSync(path.join(dir, STAGE_SENTINEL)).mtimeMs; } catch (_) { continue; }
+    if (age > STAGE_STALE_MS) removeMigrationStage(dir); // a racing peer's fresh stage is left alone
+  }
+}
+function renameWithRetry(from, to) {
+  for (let i = 0; ; i++) {
+    try { fs.renameSync(from, to); return; } catch (e) {
+      // Windows AV / indexers briefly lock freshly written files. Never retry
+      // once the target exists — that is a lost race, not a lock.
+      if (i >= 8 || !e || !['EPERM', 'EACCES', 'EBUSY'].includes(e.code) || fs.existsSync(to)) throw e;
+      sleepSync(125);
+    }
+  }
+}
+function readMigrationMarker(home) {
+  try {
+    const j = JSON.parse(fs.readFileSync(path.join(home, MIGRATION_MARKER), 'utf8'));
+    if (j && typeof j === 'object') return { status: 'migrated', from: j.from || null, at: +j.at || null, by: j.by || null };
+  } catch (_) {}
+  return null;
+}
+// Every per-home cache must forget what it read from the previous home.
+function adoptHome(dir) {
+  homeResolved = dir;
+  historyCache = { sig: '', data: null };
+  modesCache = { sig: '', bySession: {} };
+  meshyStore = null;
+  summaryMemo = { at: 0, payload: null };
+  statuslineMemo = { at: 0, data: null };
+  openusageMemo = { at: 0, key: null, path: null };
+  stripMemo = { at: 0, key: null, path: null };
+}
+function migrateHome() {
+  if (explicitHome()) { homeMigration = null; return; }
+  const next = newHomePath(), legacy = legacyHomePath();
+  sweepStaleMigrationStages();
+  if (isDir(next)) { adoptHome(next); homeMigration = readMigrationMarker(next); scrubLegacyMeshyKeyIfCopied(); return; }
+  if (!isDir(legacy)) { adoptHome(next); homeMigration = null; return; }
+  const stage = path.join(os.homedir(), STAGE_PREFIX + process.pid + '-' + crypto.randomBytes(3).toString('hex'));
+  const at = Date.now();
+  const copied = [], skipped = [];
+  try {
+    fs.mkdirSync(stage); // NOT recursive: must be a directory this call created
+    fs.writeFileSync(path.join(stage, STAGE_SENTINEL), JSON.stringify({ pid: process.pid, at }) + '\n');
+    for (const f of MIGRATE_FILES) {
+      const src = path.join(legacy, f);
+      if (!isFileAt(src)) continue; // statSync follows a dotfile-synced symlink: its CONTENT is copied
+      fs.copyFileSync(src, path.join(stage, f));
+      copied.push(f);
+    }
+    for (const [d, re] of Object.entries(MIGRATE_DIRS)) {
+      const srcDir = path.join(legacy, d);
+      if (!isDir(srcDir)) continue;
+      fs.mkdirSync(path.join(stage, d));
+      for (const n of fs.readdirSync(srcDir)) {
+        if (!re.test(n) || !isFileAt(path.join(srcDir, n))) continue;
+        fs.copyFileSync(path.join(srcDir, n), path.join(stage, d, n));
+        copied.push(d + '/' + n);
+      }
+    }
+    try {
+      for (const n of fs.readdirSync(legacy)) {
+        if (!MIGRATE_FILES.includes(n) && !Object.prototype.hasOwnProperty.call(MIGRATE_DIRS, n)) skipped.push(n);
+      }
+    } catch (_) {}
+    fs.writeFileSync(path.join(stage, MIGRATION_MARKER), JSON.stringify(
+      { from: legacy, at, by: PULSE_VERSION, copied, skipped }, null, 2) + '\n');
+    renameWithRetry(stage, next);
+    try { fs.unlinkSync(path.join(next, STAGE_SENTINEL)); } catch (_) {}
+    adoptHome(next);
+    homeMigration = { status: 'migrated', from: legacy, at, by: PULSE_VERSION, justNow: true };
+    console.log('[burnglass] moved your settings and history: copied ' + copied.length + ' item(s) from ' +
+      legacy + ' to ' + next + ' (the old folder is kept, untouched, as a backup)');
+    scrubLegacyMeshyKeyIfCopied();
+  } catch (e) {
+    removeMigrationStage(stage);
+    if (isDir(next)) { adoptHome(next); homeMigration = readMigrationMarker(next); return; } // a racing peer won
+    adoptHome(legacy); // degraded: fully working on ~/.pulse, retried next start
+    homeMigration = { status: 'failed', from: legacy, error: (e && e.message) || String(e) };
+    console.warn('[burnglass] could not move ' + legacy + ' to ' + next + ' (' + homeMigration.error +
+      ') — running from the old folder for now; retried on the next start.');
+  }
+}
+// Strip the plaintext Meshy key out of the legacy config — the one compat
+// write that edits a ~/.pulse file. onlyIf: remove it only when it equals
+// that value (i.e. it was copied into the new home); omitted: remove it
+// unconditionally (the user changed or cleared the key in v2).
+function scrubLegacyMeshyKey(onlyIf) {
+  const legacy = legacyCompatHome();
+  if (!legacy) return false;
+  const f = path.join(legacy, 'config.json');
+  let j;
+  try { j = JSON.parse(fs.readFileSync(f, 'utf8')); } catch (_) { return false; }
+  if (!j || typeof j !== 'object' || Array.isArray(j) || !j.meshyApiKey) return false;
+  if (onlyIf !== undefined && j.meshyApiKey !== onlyIf) return false;
+  delete j.meshyApiKey;
+  const tmp = f + '.burnglass-tmp';
+  const body = JSON.stringify(j, null, 2) + '\n';
+  try {
+    // tmp + rename keeps a crash from truncating the file — except for a
+    // dotfile-synced SYMLINK, which a rename would replace with a plain file:
+    // write through the link instead.
+    let link = false;
+    try { link = fs.lstatSync(f).isSymbolicLink(); } catch (_) {}
+    if (link) fs.writeFileSync(f, body);
+    else { fs.writeFileSync(tmp, body); fs.renameSync(tmp, f); }
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch (_) {}
+    console.warn('[burnglass] could not remove the Meshy API key from ' + f + ': ' + e.message +
+      ' — delete the "meshyApiKey" line there yourself.');
+    return false;
+  }
+  console.log('[burnglass] removed the Meshy API key from the old ' + f + ' (it now lives only in ' + configFilePath() + ')');
+  return true;
+}
+function scrubLegacyMeshyKeyIfCopied() {
+  const k = readConfig().meshyApiKey;
+  if (typeof k === 'string' && k) scrubLegacyMeshyKey(k);
+}
+// An old, still-running v1 tray relaunches ITS OWN script ($PSCommandPath =
+// ~/.pulse/tray.ps1) the moment /api/statusline reports a new version. Keep
+// an EXISTING legacy tray.ps1 current, or that relaunch re-runs the v1 script,
+// sees the mismatch again, and respawns forever. Never creates the file.
+function refreshLegacyTrayScript(port) {
+  const legacy = legacyCompatHome();
+  if (!legacy) return;
+  const f = path.join(legacy, 'tray.ps1');
+  if (!isFileAt(f)) return;
+  const next = trayScript(port);
+  try { if (fs.readFileSync(f, 'utf8') === next) return; } catch (_) {}
+  try { fs.writeFileSync(f, next); } catch (_) {}
 }
 
 // Wrap a callback so multiple emission paths (stream error + end, request
@@ -299,8 +617,8 @@ function logUnknownModel(model, borrowedFrom) {
   if (model && !_unknownModels.has(model)) {
     _unknownModels.add(model);
     console.warn(borrowedFrom
-      ? `[pulse] unknown model "${model}" — priced as "${borrowedFrom}" (closest known row). Add it to PRICING.`
-      : `[pulse] unknown model "${model}" — using __default__ pricing. Add it to PRICING.`);
+      ? `[burnglass] unknown model "${model}" — priced as "${borrowedFrom}" (closest known row). Add it to PRICING.`
+      : `[burnglass] unknown model "${model}" — using __default__ pricing. Add it to PRICING.`);
   }
 }
 
@@ -879,7 +1197,7 @@ function customSourcesConfig() {
       const k = JSON.stringify(row.name);
       if (!customSourceWarned.has(k)) {
         customSourceWarned.add(k);
-        console.warn('[pulse] customSources: dropped ' + k + ' — ' + why);
+        console.warn('[burnglass] customSources: dropped ' + k + ' — ' + why);
       }
       continue;
     }
@@ -1771,7 +2089,7 @@ function parseCustomFile(filePath, src) {
     if (fs.statSync(filePath).size > CUSTOM_SOURCE_MAX_BYTES) {
       if (!customSourceWarned.has(filePath)) {
         customSourceWarned.add(filePath);
-        console.warn(`[pulse] custom source "${src.name}": ${filePath} exceeds ${CUSTOM_SOURCE_MAX_BYTES / 1048576} MB — skipped (rotate the log into a directory of smaller files)`);
+        console.warn(`[burnglass] custom source "${src.name}": ${filePath} exceeds ${CUSTOM_SOURCE_MAX_BYTES / 1048576} MB — skipped (rotate the log into a directory of smaller files)`);
       }
       return { entries: [], sessionMeta: {}, ultracodeSessions: [], effortEvents: [] };
     }
@@ -1901,7 +2219,7 @@ function parseAll() {
         const k = 'overlap:' + f;
         if (!customSourceWarned.has(k)) {
           customSourceWarned.add(k);
-          console.warn(`[pulse] customSources: "${src.name}" points at ${f}, which another source already ingests — ignored (custom sources must have their own log files)`);
+          console.warn(`[burnglass] customSources: "${src.name}" points at ${f}, which another source already ingests — ignored (custom sources must have their own log files)`);
         }
         continue;
       }
@@ -2016,7 +2334,7 @@ function parseAll() {
   if (rooFiles.length) agentBits.push(`${rooFiles.length} roo`);
   if (customFiles.length) agentBits.push(`${customFiles.length} custom`);
   const agentStr = agentBits.length ? ', ' + agentBits.join(', ') : '';
-  console.log(`[pulse] walked ${files.length} file(s) (${claudeFiles.length} claude, ${codexFiles.length} codex${agentStr}) in ${walkMs}ms; parsed ${parsed}, skipped ${skipped} (cached)${failed ? `, ${failed} unreadable (will retry)` : ''}; ${merged.length} unique usage records`);
+  console.log(`[burnglass] walked ${files.length} file(s) (${claudeFiles.length} claude, ${codexFiles.length} codex${agentStr}) in ${walkMs}ms; parsed ${parsed}, skipped ${skipped} (cached)${failed ? `, ${failed} unreadable (will retry)` : ''}; ${merged.length} unique usage records`);
   return {
     entries: merged, sessionMeta, ultracodeSessions, effortEvents,
     fileCount: files.length, codexFileCount: codexFiles.length,
@@ -2040,29 +2358,48 @@ function parseAll() {
 // ---------------------------------------------------------------------------
 
 function modesFilePath() {
-  return process.env.PULSE_MODES_FILE || path.join(pulseHome(), 'modes.jsonl');
+  return envv('MODES_FILE') || path.join(appHome(), 'modes.jsonl');
+}
+// Read side: the home's sidecar plus, after the migration, the legacy
+// ~/.pulse/modes.jsonl — a not-yet-updated exe registered as the Claude Code
+// hook (its path is frozen in settings.json) keeps appending THERE, and a
+// record written during the copy lands there too. Duplicates are harmless:
+// annotateModes is a state-snapshot join.
+function modesReadPaths() {
+  const own = modesFilePath();
+  if (envv('MODES_FILE')) return [own];
+  const legacy = legacyCompatHome();
+  return legacy ? [own, path.join(legacy, 'modes.jsonl')] : [own];
 }
 
-let modesCache = { mtimeMs: -1, bySession: {} };
+let modesCache = { sig: '', bySession: {} };
 function readModes() {
-  const f = modesFilePath();
-  let st;
-  try { st = fs.statSync(f); } catch (_) { return {}; } // no log — hook not installed
-  if (st.mtimeMs === modesCache.mtimeMs) return modesCache.bySession;
+  const files = [];
+  let sig = '';
+  for (const f of modesReadPaths()) {
+    let st;
+    try { st = fs.statSync(f); } catch (_) { continue; } // no log — hook not installed
+    files.push(f);
+    sig += f + ':' + st.mtimeMs + ':' + st.size + ';';
+  }
+  if (!files.length) return {};
+  if (sig === modesCache.sig) return modesCache.bySession;
   const bySession = {};
-  let raw;
-  try { raw = fs.readFileSync(f, 'utf8'); } catch (_) { return modesCache.bySession; }
-  for (const line of raw.split('\n')) {
-    if (!line) continue;
-    let r;
-    try { r = JSON.parse(line); } catch (_) { continue; }
-    if (!r || !r.sessionId) continue;
-    const ts = typeof r.ts === 'number' && isFinite(r.ts) ? r.ts : 0;
-    (bySession[r.sessionId] = bySession[r.sessionId] || [])
-      .push({ ts, effort: r.effort ? String(r.effort) : null, ultracode: !!r.ultracode });
+  for (const f of files) {
+    let raw;
+    try { raw = fs.readFileSync(f, 'utf8'); } catch (_) { continue; }
+    for (const line of raw.split('\n')) {
+      if (!line) continue;
+      let r;
+      try { r = JSON.parse(line); } catch (_) { continue; }
+      if (!r || !r.sessionId) continue;
+      const ts = typeof r.ts === 'number' && isFinite(r.ts) ? r.ts : 0;
+      (bySession[r.sessionId] = bySession[r.sessionId] || [])
+        .push({ ts, effort: r.effort ? String(r.effort) : null, ultracode: !!r.ultracode });
+    }
   }
   for (const k of Object.keys(bySession)) bySession[k].sort((a, b) => a.ts - b.ts);
-  modesCache = { mtimeMs: st.mtimeMs, bySession };
+  modesCache = { sig, bySession };
   return bySession;
 }
 
@@ -2756,56 +3093,102 @@ function monthLabel(year, month /* 1-based */) {
 // Claude Code prunes transcripts after ~cleanupPeriodDays (30 by default),
 // which would blank the 90/180-day windows and understate all-time totals for
 // older data. Pulse keeps a daily rollup — cost/tokens/messages per
-// (day, source, model), plus a per-day session count — under ~/.pulse/history,
+// (day, source, model), plus a per-day session count — under ~/.burnglass/history,
 // one JSON file per calendar month. Only SEALED (fully-past) days are written;
 // today is always live. On read, a day is taken from the live logs if it has
 // ANY entry, else from the archive — so live and archive never double-count.
-// Writes ONLY to ~/.pulse; sources stay read-only. On by default; disable with
+// Writes ONLY to ~/.burnglass; sources stay read-only. On by default; disable with
 // {"history": false}. Test override: PULSE_HISTORY_DIR.
 // ---------------------------------------------------------------------------
 function historyEnabled() { return readConfig().history !== false; }
 function historyDir() {
-  return process.env.PULSE_HISTORY_DIR || path.join(pulseHome(), 'history');
+  return envv('HISTORY_DIR') || path.join(appHome(), 'history');
+}
+// After the migration, a v1 process that still runs somewhere (a downgrade,
+// an un-updated portable copy, a side-by-side port) keeps sealing into
+// ~/.pulse/history — and a day it alone sealed is gone for good once Claude
+// Code prunes the transcript. So the legacy archive is also READ (never
+// written), merged per cell with the same pickCell rule as everything else,
+// the new home's archive as argument `a` so it wins every tie.
+function legacyHistoryDir() {
+  if (envv('HISTORY_DIR')) return null;
+  const legacy = legacyCompatHome();
+  if (!legacy) return null;
+  const d = path.join(legacy, 'history');
+  return isDir(d) ? d : null;
 }
 
 const EMPTY_HISTORY = { byDay: {}, sources: new Set(), models: new Set(), months: new Set(), estSources: new Set() };
 let historyCache = { sig: '', data: null };
 
+function listHistoryMonths(dir) {
+  try { return fs.readdirSync(dir).filter((f) => /^\d{4}-\d{2}\.json$/.test(f)).sort(); }
+  catch (_) { return null; }
+}
+// One month file → { 'YYYY-MM-DD': { rows, sessions } } with validated rows.
+function readHistoryMonth(file) {
+  let obj;
+  try { obj = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (_) { return null; }
+  if (!obj || typeof obj !== 'object') return null;
+  const out = {};
+  for (const ds of Object.keys(obj)) {
+    const rec = obj[ds];
+    if (!rec || !Array.isArray(rec.rows)) continue;
+    const rows = [];
+    for (const r of rec.rows) {
+      if (!r || typeof r.source !== 'string' || typeof r.model !== 'string') continue;
+      const row = { source: r.source, model: r.model, cost: +r.cost || 0, tokens: +r.tokens || 0, messages: +r.messages || 0 };
+      // Identity marks written by sealHistory — est keeps the badge after
+      // the live logs prune, c lets the merges retire renamed custom cells.
+      if (r.est) row.est = 1;
+      if (r.c) row.c = 1;
+      rows.push(row);
+    }
+    out[ds] = { rows, sessions: +rec.sessions || 0 };
+  }
+  return out;
+}
+
 // Read every archived month into { byDay, sources, models, months }. Cached by
 // the set of month files and their mtimes, so we reparse only on change.
 function readHistory() {
   if (!historyEnabled()) return EMPTY_HISTORY;
-  const dir = historyDir();
-  let files;
-  try { files = fs.readdirSync(dir).filter((f) => /^\d{4}-\d{2}\.json$/.test(f)).sort(); }
-  catch (_) { return EMPTY_HISTORY; }
+  const dirs = [];
+  const own = listHistoryMonths(historyDir());
+  if (own) dirs.push({ dir: historyDir(), files: own });
+  const ld = legacyHistoryDir();
+  const legacyFiles = ld ? listHistoryMonths(ld) : null;
+  if (legacyFiles && legacyFiles.length) dirs.push({ dir: ld, files: legacyFiles });
+  if (!dirs.length) return EMPTY_HISTORY;
   let sig = '';
-  for (const f of files) {
-    try { sig += f + ':' + fs.statSync(path.join(dir, f)).mtimeMs + ';'; } catch (_) {}
+  for (const { dir, files } of dirs) {
+    sig += dir + '|';
+    for (const f of files) {
+      try { sig += f + ':' + fs.statSync(path.join(dir, f)).mtimeMs + ';'; } catch (_) {}
+    }
   }
   if (historyCache.sig === sig && historyCache.data) return historyCache.data;
   const byDay = {}, sources = new Set(), models = new Set(), months = new Set(), estSources = new Set();
-  for (const f of files) {
-    let obj;
-    try { obj = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')); } catch (_) { continue; }
-    if (!obj || typeof obj !== 'object') continue;
-    months.add(f.slice(0, 7));
-    for (const ds of Object.keys(obj)) {
-      const rec = obj[ds];
-      if (!rec || !Array.isArray(rec.rows)) continue;
-      const rows = [];
-      for (const r of rec.rows) {
-        if (!r || typeof r.source !== 'string' || typeof r.model !== 'string') continue;
-        const row = { source: r.source, model: r.model, cost: +r.cost || 0, tokens: +r.tokens || 0, messages: +r.messages || 0 };
-        // Identity marks written by sealHistory — est keeps the badge after
-        // the live logs prune, c lets the merges retire renamed custom cells.
-        if (r.est) { row.est = 1; estSources.add(r.source); }
-        if (r.c) row.c = 1;
-        rows.push(row);
-        sources.add(r.source);
-        if (!HIDDEN_MODELS.has(r.model)) models.add(r.model);
+  dirs.forEach(({ dir, files }, i) => {
+    for (const f of files) {
+      const month = readHistoryMonth(path.join(dir, f));
+      if (!month) continue;
+      months.add(f.slice(0, 7));
+      for (const ds of Object.keys(month)) {
+        if (i === 0 || !byDay[ds]) { byDay[ds] = month[ds]; continue; }
+        // Legacy day also present in the new archive: per-cell union, new
+        // archive first (pickCell keeps `a` on an equal message count).
+        const cells = indexCells(byDay[ds].rows);
+        for (const r of month[ds].rows) { const k = cellKey(r.source, r.model); cells[k] = pickCell(cells[k], r); }
+        byDay[ds] = { rows: Object.values(cells), sessions: Math.max(byDay[ds].sessions, month[ds].sessions) };
       }
-      byDay[ds] = { rows, sessions: +rec.sessions || 0 };
+    }
+  });
+  for (const ds of Object.keys(byDay)) {
+    for (const r of byDay[ds].rows) {
+      sources.add(r.source);
+      if (r.est) estSources.add(r.source);
+      if (!HIDDEN_MODELS.has(r.model)) models.add(r.model);
     }
   }
   const data = { byDay, sources, models, months, estSources };
@@ -2943,7 +3326,7 @@ function sealHistory(entries) {
       fs.writeFileSync(tmp, next);
       fs.renameSync(tmp, file);
       wrote = true;
-    } catch (err) { console.warn('[pulse] history write failed: ' + err.message); }
+    } catch (err) { console.warn('[burnglass] history write failed: ' + err.message); }
   }
   if (wrote) historyCache = { sig: '', data: null }; // force reload on next read
 }
@@ -3009,7 +3392,7 @@ function selfCheck(payload, asc, rawBlocks) {
   if (dups > 0) issues.push(`${dups} duplicate dedup key(s) survived`);
 
   if (issues.length) {
-    for (const i of issues) console.warn('[pulse] self-check: ' + i);
+    for (const i of issues) console.warn('[burnglass] self-check: ' + i);
   }
   return { ok: issues.length === 0, issues };
 }
@@ -3119,7 +3502,7 @@ function collectTitles(obj, fileName, map) {
 // Unfiltered payloads are shared this long. PULSE_SUMMARY_MEMO_MS is a test
 // hook (0 disables) — timing-sensitive suites assert the METERS trickle
 // discipline and must not race the memo window.
-const _smm = parseInt(process.env.PULSE_SUMMARY_MEMO_MS || '', 10);
+const _smm = parseInt(envv('SUMMARY_MEMO_MS') || '', 10);
 const SUMMARY_MEMO_MS = isFinite(_smm) && _smm >= 0 ? _smm : 2500;
 let summaryMemo = { at: 0, payload: null };
 function buildSummary(sourceFilter, opts) {
@@ -3137,7 +3520,7 @@ function buildSummary(sourceFilter, opts) {
   const desktopTitles = readDesktopTitles();
   const now = Date.now();
   const history = readHistory();
-  sealHistory(entries); // gated internally; archives sealed days to ~/.pulse
+  sealHistory(entries); // gated internally; archives sealed days to <home>/history
   let scoped = entries;
   let scopedHistory = history;
   let appliedFilter = null;
@@ -3182,6 +3565,22 @@ function buildSummary(sourceFilter, opts) {
   payload.pid = process.pid;
   payload.daemon = IS_DAEMON_CHILD;
   payload.packaged = !!seaApi;
+  // Rename support (all additive): the product name, the REAL home folder
+  // (the UI must never hard-code ~/.pulse or ~/.burnglass — a pinned or
+  // degraded home differs), the running executable's own filename (a
+  // self-updated v1 install is still called pulse.exe; null from source),
+  // the one-time ~/.pulse → ~/.burnglass move, and the read-only Claude Code
+  // settings.json check (status line / effort hook pointing at a deleted exe).
+  payload.brand = BRAND;
+  payload.home = appHome();
+  payload.exeName = seaApi ? path.basename(process.execPath) : null;
+  payload.homeMigration = homeMigration;
+  // Public view only: the raw command line stays out of the payload (users
+  // put env assignments in front of commands; nothing needs them here).
+  try {
+    payload.integrations = claudeIntegrations().map((i) => (
+      { kind: i.kind, event: i.event, target: i.target, exists: i.exists, legacyName: i.legacyName }));
+  } catch (_) { payload.integrations = []; }
   payload.update = updateState;
   // Community reach (public GitHub counters) — present only once fetched; the
   // fetch itself is scheduled alongside the update check and shares its opt-out.
@@ -3331,7 +3730,7 @@ function computeSpendAnomaly(periods, now) {
 
 // ---------------------------------------------------------------------------
 // BUDGET GOAL — an optional self-set spend target (`budget` USD +
-// `budgetPeriod` month|week in ~/.pulse/config.json, set via the dashboard).
+// `budgetPeriod` month|week in ~/.burnglass/config.json, set via the dashboard).
 // Reports progress against the CURRENT period's spend across all sources.
 // month = current calendar month (resets on the 1st); week = trailing 7 days
 // (payload.week, rolling — no hard reset). Returns null when unset.
@@ -3372,13 +3771,13 @@ function computeBudget(periods, week, now) {
 
 // ---------------------------------------------------------------------------
 // PLAN VALUE — "is the subscription paying for itself?". `planCost` (USD/month
-// the user actually pays) + optional `planLabel` in ~/.pulse/config.json, set
+// the user actually pays) + optional `planLabel` in ~/.burnglass/config.json, set
 // via /api/plan/set. Compares that outlay against the API list-price value of
 // the usage Pulse observed. Always present in the payload (configured:false
 // when unset) so the UI can offer the setup card without a second shape.
 // ---------------------------------------------------------------------------
 // C0 + C1 control characters. The plan label is user text that ends up printed
-// to a terminal by --summary and appended to ~/.pulse/pulse.log, where an ESC
+// to a terminal by --summary and appended to ~/.burnglass/burnglass.log, where an ESC
 // byte is an executable ANSI command rather than a character — strip on the way
 // in (the route) AND on the way out (rendering), so a label stored by an older
 // version can't still hijack the terminal.
@@ -3505,21 +3904,27 @@ function seaAsset(key) {
 
 // ---------------------------------------------------------------------------
 // UPDATES
-// Pulse's only DEFAULT-ON network calls (the opt-in ones — account meters,
-// Codex usage, Meshy — live in their own sections; see CLAUDE.md), and only
-// when enabled (default on;
-// --no-update-check / PULSE_NO_UPDATE_CHECK / {"updateCheck":false} in
-// ~/.pulse/config.json disable it):
+// Burnglass's only DEFAULT-ON network calls (the opt-in ones — account
+// meters, Codex usage, Meshy — live in their own sections; see CLAUDE.md),
+// and only when enabled (default on; --no-update-check /
+// BURNGLASS_NO_UPDATE_CHECK (PULSE_NO_UPDATE_CHECK) / {"updateCheck":false}
+// in <home>/config.json disable it):
 //   - check: GET the GitHub Releases API for the latest version tag
 //   - install (packaged builds, user-clicked): download the platform asset,
 //     verify its sha256 digest from the API, swap executables via rename
 //     (a running exe can be renamed, just not deleted), relaunch, exit.
 // Any failure leaves the current install untouched and points at the
 // releases page instead. No usage data is ever transmitted.
+//
+// REPO RENAMES: the repo was claudeusage → Pulse-Usage-Monitor → Burnglass.
+// GitHub 301-redirects every old name (API and web) as long as nobody
+// re-creates a repo under an old name — NEVER reuse `claudeusage` or
+// `Pulse-Usage-Monitor` under ReFxFrank, or every v1.x updater (which still
+// calls the old slug) loses its update path. fetchUrl follows the 301.
 // ---------------------------------------------------------------------------
-const UPDATE_REPO = 'ReFxFrank/Pulse-Usage-Monitor';
+const UPDATE_REPO = 'ReFxFrank/Burnglass';
 const RELEASES_PAGE = 'https://github.com/' + UPDATE_REPO + '/releases';
-const UPDATE_API_URL = process.env.PULSE_UPDATE_API ||
+const UPDATE_API_URL = envv('UPDATE_API') ||
   'https://api.github.com/repos/' + UPDATE_REPO + '/releases/latest';
 
 const updateState = {
@@ -3530,12 +3935,27 @@ const updateState = {
   checkedAt: null,
   installSupported: false, // packaged build with a downloadable asset
   releasesUrl: RELEASES_PAGE,
+  assetName: null, // which release asset this build would install
 };
 let updateAsset = null; // { url, digest, size, name } for this platform
 
+// Comparable number for a version tag. A pre-release ("2.0.0-rc.1") ranks
+// BELOW its release ("2.0.0"), so an RC tester is still offered the final
+// build (v1's parser read "0-rc" as 0 and treated the two as equal). Build
+// metadata ("+sha") is ignored. Within one base version: alpha < beta < rc,
+// each ordered by its trailing number.
 function versionNum(v) {
-  const p = String(v || '').replace(/^v/i, '').split('.').map((x) => parseInt(x, 10) || 0);
-  return (p[0] || 0) * 1e6 + (p[1] || 0) * 1e3 + (p[2] || 0);
+  const m = /^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?(?:\+.*)?$/.exec(String(v || '').trim());
+  if (!m) {
+    const p = String(v || '').replace(/^v/i, '').split('.').map((x) => parseInt(x, 10) || 0);
+    return ((p[0] || 0) * 1e6 + (p[1] || 0) * 1e3 + (p[2] || 0)) * 1000 + 999;
+  }
+  const base = (+m[1] || 0) * 1e6 + (+m[2] || 0) * 1e3 + (+m[3] || 0);
+  if (!m[4]) return base * 1000 + 999;
+  const pre = m[4].toLowerCase().slice(0, 64);
+  const kind = /^rc/.test(pre) ? 600 : /^beta/.test(pre) ? 300 : 0;
+  const n = /(\d+)(?!.*\d)/.exec(pre);
+  return base * 1000 + kind + Math.min(299, n ? parseInt(n[1], 10) : 0);
 }
 
 // Minimal GET with redirect-following (release assets 302 to a CDN). http is
@@ -3554,7 +3974,7 @@ function fetchUrl(u, opts, cb) {
   try {
   req = mod.get(u, {
     headers: {
-      'User-Agent': 'pulse-usage-dashboard/' + PULSE_VERSION,
+      'User-Agent': 'burnglass/' + PULSE_VERSION,
       'Accept': 'application/vnd.github+json, application/octet-stream, */*',
       ...(headers || {}),
     },
@@ -3586,10 +4006,19 @@ function fetchUrl(u, opts, cb) {
   req.on('error', (e) => cb(e));
 }
 
-function platformAssetName() {
-  if (process.platform === 'win32') return 'pulse.exe';
-  if (process.platform === 'darwin') return 'pulse-macos';
-  return 'pulse-linux';
+// Release asset names. v2 publishes burnglass-* AND byte-identical legacy
+// pulse-* copies (v1.x updaters match those exact names). The updater picks
+// the asset matching its OWN filename first, so a self-updated pulse.exe keeps
+// pulling pulse.exe; then the new name, then the legacy one — robust to a
+// release that is missing either spelling. BURNGLASS_SELF_EXE_NAME is a test
+// hook (the suites run under plain `node`).
+function platformAssetNames() {
+  const names = process.platform === 'win32' ? ['burnglass.exe', 'pulse.exe']
+    : process.platform === 'darwin' ? ['burnglass-macos', 'pulse-macos']
+      : ['burnglass-linux', 'pulse-linux'];
+  const me = String(envv('SELF_EXE_NAME') || path.basename(process.execPath)).toLowerCase();
+  const own = names.find((n) => n === me);
+  return own ? [own, ...names.filter((n) => n !== own)] : names;
 }
 
 function checkForUpdate(done) {
@@ -3603,7 +4032,7 @@ function checkForUpdate(done) {
     if (err) {
       updateState.status = 'error';
       updateState.error = 'update check failed: ' + err.message;
-      console.warn('[pulse] ' + updateState.error);
+      console.warn('[burnglass] ' + updateState.error);
       return done && done(updateState);
     }
     let rel = null;
@@ -3615,23 +4044,24 @@ function checkForUpdate(done) {
       return done && done(updateState);
     }
     updateState.latest = String(tag).replace(/^v/i, '');
-    const want = platformAssetName();
-    const a = (Array.isArray(rel.assets) ? rel.assets : []).find((x) => x && x.name === want);
+    const assets = Array.isArray(rel.assets) ? rel.assets : [];
+    const a = platformAssetNames().map((n) => assets.find((x) => x && x.name === n)).find(Boolean);
     updateAsset = a ? {
       url: a.browser_download_url || a.url,
       digest: typeof a.digest === 'string' ? a.digest.replace(/^sha256:/, '') : null,
       size: a.size || 0,
       name: a.name,
     } : null;
+    updateState.assetName = updateAsset ? updateAsset.name : null;
     if (versionNum(updateState.latest) > versionNum(PULSE_VERSION)) {
       updateState.status = 'available';
       // One-click install requires a verifiable download: no published sha256
       // digest → the UI offers the releases page instead (fail closed).
       updateState.installSupported = !!(seaApi && updateAsset && updateAsset.url && updateAsset.digest);
-      console.log(`[pulse] update available: v${updateState.latest} (running v${PULSE_VERSION}) — ${RELEASES_PAGE}`);
+      console.log(`[burnglass] update available: v${updateState.latest} (running v${PULSE_VERSION}) — ${RELEASES_PAGE}`);
     } else {
       updateState.status = 'uptodate';
-      console.log(`[pulse] up to date (v${PULSE_VERSION})`);
+      console.log(`[burnglass] up to date (v${PULSE_VERSION})`);
     }
     done && done(updateState);
   });
@@ -3651,7 +4081,7 @@ function installUpdate(done) {
   const oldPath = exePath + '.old';
   updateState.status = 'downloading';
   updateState.error = null;
-  console.log(`[pulse] downloading v${updateState.latest} (${updateAsset.name})…`);
+  console.log(`[burnglass] downloading v${updateState.latest} (${updateAsset.name})…`);
 
   fetchUrl(updateAsset.url, { asStream: true, timeoutMs: 300000 }, (err, res) => {
     if (err) return failInstall('download failed: ' + err.message, done);
@@ -3676,7 +4106,7 @@ function installUpdate(done) {
           return failInstall('sha256 mismatch — refusing to install', done);
         }
         updateState.status = 'installing';
-        console.log(`[pulse] verified download (${(bytes / 1048576).toFixed(1)} MB, sha256 ok) — swapping executables`);
+        console.log(`[burnglass] verified download (${(bytes / 1048576).toFixed(1)} MB, sha256 ok) — swapping executables`);
         try { fs.unlinkSync(oldPath); } catch (_) {}
         fs.renameSync(exePath, oldPath);
         try {
@@ -3686,9 +4116,10 @@ function installUpdate(done) {
           throw e;
         }
         if (process.platform !== 'win32') { try { fs.chmodSync(exePath, 0o755); } catch (_) {} }
+        refreshCompatTwins(exePath);
         done && done(null); // answer the HTTP request before the process exits
-        if (process.env.PULSE_UPDATE_NO_RELAUNCH) {
-          console.log('[pulse] PULSE_UPDATE_NO_RELAUNCH set — staying on the old process');
+        if (envv('UPDATE_NO_RELAUNCH')) {
+          console.log('[burnglass] UPDATE_NO_RELAUNCH set — staying on the old process');
           return;
         }
         relaunchAfterUpdate(exePath);
@@ -3700,10 +4131,40 @@ function installUpdate(done) {
   });
 }
 
+// An installer-upgraded folder holds burnglass.exe AND a compat pulse.exe
+// twin (Claude Code hooks, pinned taskbar items and old Run values point at
+// the old name). After a verified swap, refresh the twin from the new bytes
+// the same rename-aside way — a running `--statusline` copy can be renamed,
+// not overwritten. Never fatal: a stale twin still works (/api changes are
+// additive) and the next update retries it.
+function compatTwins(exePath) {
+  if (process.platform !== 'win32') return [];
+  const dir = path.dirname(exePath), me = path.basename(exePath).toLowerCase();
+  return ['burnglass.exe', 'pulse.exe'].filter((n) => n !== me)
+    .map((n) => path.join(dir, n)).filter(isFileAt);
+}
+function refreshCompatTwins(exePath) {
+  for (const twin of compatTwins(exePath)) {
+    try {
+      fs.copyFileSync(exePath, twin + '.download');
+      try { fs.unlinkSync(twin + '.old'); } catch (_) {}
+      fs.renameSync(twin, twin + '.old');
+      try { fs.renameSync(twin + '.download', twin); } catch (e) {
+        try { fs.renameSync(twin + '.old', twin); } catch (_) {}
+        throw e;
+      }
+      console.log('[burnglass] refreshed ' + path.basename(twin) + ' (same folder, same version)');
+    } catch (e) {
+      try { fs.unlinkSync(twin + '.download'); } catch (_) {}
+      console.warn('[burnglass] could not refresh ' + path.basename(twin) + ': ' + ((e && e.message) || e));
+    }
+  }
+}
+
 function failInstall(msg, done) {
   updateState.status = 'error';
   updateState.error = msg + ' — download manually: ' + RELEASES_PAGE;
-  console.error('[pulse] ' + updateState.error);
+  console.error('[burnglass] ' + updateState.error);
   try { fs.unlinkSync(process.execPath + '.download'); } catch (_) {}
   done && done(new Error(msg));
 }
@@ -3716,15 +4177,15 @@ function relaunchAfterUpdate(exePath) {
   if (process.platform === 'win32' && !wantConsole && !passthrough.includes('--daemon-child')) {
     passthrough.push('--daemon-child');
   }
-  console.log(`[pulse] restarting as v${updateState.latest}…`);
+  console.log(`[burnglass] restarting as v${updateState.latest}…`);
   if (wantConsole && process.platform === 'win32') {
-    console.log('[pulse] (Pulse reopens in a new console window)');
+    console.log('[burnglass] (Burnglass reopens in a new console window)');
   }
   const relaunchFailed = (e) => {
     updateState.status = 'error';
     updateState.error = 'relaunch failed: ' + ((e && e.message) || e) +
       ` — the new version is installed at ${exePath}; start it manually.`;
-    console.error('[pulse] ' + updateState.error);
+    console.error('[burnglass] ' + updateState.error);
   };
   setTimeout(() => {
     let child;
@@ -3751,7 +4212,7 @@ function cleanupOldExecutable() {
   try {
     if (fs.existsSync(oldPath)) {
       fs.unlinkSync(oldPath);
-      console.log('[pulse] removed previous version (' + path.basename(oldPath) + ')');
+      console.log('[burnglass] removed previous version (' + path.basename(oldPath) + ')');
     }
   } catch (_) { /* still locked — next start */ }
   // A crash mid-download can strand a partial .download file too.
@@ -3759,6 +4220,12 @@ function cleanupOldExecutable() {
     const dl = process.execPath + '.download';
     if (fs.existsSync(dl)) fs.unlinkSync(dl);
   } catch (_) { /* next start */ }
+  // …and the compat twin's aside copies (see refreshCompatTwins).
+  for (const twin of compatTwins(process.execPath)) {
+    for (const ext of ['.old', '.download']) {
+      try { if (fs.existsSync(twin + ext)) fs.unlinkSync(twin + ext); } catch (_) { /* still locked */ }
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -3772,11 +4239,11 @@ function cleanupOldExecutable() {
 // check (--no-update-check / {"updateCheck":false}). Cached for hours so it
 // never approaches GitHub's unauthenticated rate limit.
 // ---------------------------------------------------------------------------
-const REACH_RELEASES_API = process.env.PULSE_REACH_API ||
+const REACH_RELEASES_API = envv('REACH_API') ||
   'https://api.github.com/repos/' + UPDATE_REPO + '/releases?per_page=100';
-const REACH_REPO_API = process.env.PULSE_REACH_REPO_API ||
+const REACH_REPO_API = envv('REACH_REPO_API') ||
   'https://api.github.com/repos/' + UPDATE_REPO;
-const REACH_CACHE_MS = Number(process.env.PULSE_REACH_CACHE_MS) || 6 * 3600 * 1000;
+const REACH_CACHE_MS = Number(envv('REACH_CACHE_MS')) || 6 * 3600 * 1000;
 const reachState = { downloads: null, stars: null, fetchedAt: 0, status: 'idle' };
 let reachInFlight = false;
 
@@ -3817,7 +4284,7 @@ function refreshReach(done) {
       if (stars != null) reachState.stars = stars;
       reachState.status = (reachState.downloads != null || reachState.stars != null) ? 'ok' : 'error';
       if (downloads != null || stars != null) {
-        console.log(`[pulse] community reach: ${reachState.downloads != null ? reachState.downloads : '?'} downloads, ${reachState.stars != null ? reachState.stars : '?'} stars`);
+        console.log(`[burnglass] community reach: ${reachState.downloads != null ? reachState.downloads : '?'} downloads, ${reachState.stars != null ? reachState.stars : '?'} stars`);
       }
       done && done(reachState);
     });
@@ -3846,7 +4313,7 @@ function reachForPayload() {
 //
 // Privacy contract (documented in README, enforced here):
 //   - OFF by default; enabled only via the dashboard toggle
-//     ({"accountMeters": true} in ~/.pulse/config.json).
+//     ({"accountMeters": true} in ~/.burnglass/config.json).
 //   - The OAuth token is read from ~/.claude/.credentials.json READ-ONLY,
 //     never logged, never included in any payload, and sent ONLY to the
 //     meters endpoint. Pulse never refreshes tokens (that would mean writing
@@ -3854,11 +4321,11 @@ function reachForPayload() {
 //   - PULSE_METERS_API overrides the endpoint for tests (mock server).
 // The endpoint is internal/undocumented — parse defensively, degrade quietly.
 // ---------------------------------------------------------------------------
-const METERS_API_URL = process.env.PULSE_METERS_API || 'https://api.anthropic.com/api/oauth/usage';
+const METERS_API_URL = envv('METERS_API') || 'https://api.anthropic.com/api/oauth/usage';
 // Base cadence 120s; 429s back off (Retry-After honored, else 10m doubling to
 // 1h) and other errors wait 5m — the endpoint is shared with Claude Code
 // itself, so Pulse must be a polite citizen. Env override is a test hook.
-const METERS_OK_MS = parseInt(process.env.PULSE_METERS_CACHE_MS, 10) || 120 * 1000;
+const METERS_OK_MS = parseInt(envv('METERS_CACHE_MS'), 10) || 120 * 1000;
 const METERS_ERR_MS = Math.min(METERS_OK_MS * 2, 5 * 60 * 1000);
 const METERS_429_BASE_MS = Math.min(METERS_OK_MS * 5, 10 * 60 * 1000);
 const METERS_429_MAX_MS = 60 * 60 * 1000;
@@ -3900,8 +4367,8 @@ function parseCredentials(raw) {
 // Macs. The Keychain read shells out to /usr/bin/security ASYNCHRONOUSLY — it
 // can pop a one-time permission dialog, and that must never block the server.
 // Results (including misses) are cached briefly so the dialog can't nag.
-const IS_MAC = process.platform === 'darwin' || process.env.PULSE_FAKE_DARWIN === '1'; // env: test hook
-const SECURITY_BIN = process.env.PULSE_SECURITY_BIN || '/usr/bin/security';
+const IS_MAC = process.platform === 'darwin' || envv('FAKE_DARWIN') === '1'; // env: test hook
+const SECURITY_BIN = envv('SECURITY_BIN') || '/usr/bin/security';
 const KEYCHAIN_SERVICES = ['Claude Code-credentials', 'Claude Code'];
 let credCache = { at: 0, cred: null };
 const CRED_CACHE_MS = 5 * 60 * 1000;
@@ -3985,7 +4452,7 @@ function refreshAccountMeters(done) {
     schedule(METERS_OK_MS);
     metersState.status = 'no-login';
     metersState.error = IS_MAC
-      ? 'No Claude Code login found — Pulse checked ~/.claude/.credentials.json and the macOS Keychain. ' +
+      ? 'No Claude Code login found — Burnglass checked ~/.claude/.credentials.json and the macOS Keychain. ' +
         'If a Keychain permission dialog appeared, choose "Always Allow"; if you have never used Claude Code ' +
         'on this Mac, run `claude` in Terminal once.'
       : 'No Claude Code login found on this machine — run `claude` in a terminal once to log in.';
@@ -4029,7 +4496,7 @@ function refreshAccountMeters(done) {
         metersState.error = 'Anthropic rate-limited the usage check (HTTP 429) — retrying in ~' +
           Math.max(1, Math.round(waitMs / 60000)) + 'm. If this persists, something else on this machine ' +
           '(e.g. a statusline script) may be polling the usage endpoint heavily.';
-        console.warn('[pulse] account meters: ' + metersState.error);
+        console.warn('[burnglass] account meters: ' + metersState.error);
         return done && done(metersState);
       }
       schedule(METERS_ERR_MS);
@@ -4039,9 +4506,9 @@ function refreshAccountMeters(done) {
           (looksExpired ? ' — the token file is stale. ' : ' — ') +
           'Start a Claude Code CLI session on this machine (run `claude` in a terminal) to refresh ' +
           '~/.claude/.credentials.json; the desktop app keeps its own login and may not update that file. ' +
-          'Pulse never writes credentials.'
+          'Burnglass never writes credentials.'
         : 'meters fetch failed: ' + err.message;
-      console.warn('[pulse] account meters: ' + metersState.error);
+      console.warn('[burnglass] account meters: ' + metersState.error);
       return done && done(metersState);
     }
     meters429Streak = 0;
@@ -4089,7 +4556,7 @@ function refreshAccountMeters(done) {
     metersState.status = 'ok';
     metersState.lastGoodAt = Date.now();
     metersState.error = buckets.length ? null : 'no usage buckets in response';
-    console.log(`[pulse] account meters refreshed (${buckets.length} bucket(s))`);
+    console.log(`[burnglass] account meters refreshed (${buckets.length} bucket(s))`);
     done && done(metersState);
   });
   }); // readOauthTokenAsync
@@ -4114,9 +4581,9 @@ function officialFiveHourBucket() {
 // READ-ONLY, never logged, and sent only to this endpoint. Polled gently —
 // the numbers move at day granularity.
 // ---------------------------------------------------------------------------
-const CODEX_USAGE_API_URL = process.env.PULSE_CODEX_USAGE_API ||
+const CODEX_USAGE_API_URL = envv('CODEX_USAGE_API') ||
   'https://chatgpt.com/backend-api/wham/profiles/me';
-const CODEX_USAGE_OK_MS = parseInt(process.env.PULSE_CODEX_USAGE_CACHE_MS, 10) || 10 * 60 * 1000;
+const CODEX_USAGE_OK_MS = parseInt(envv('CODEX_USAGE_CACHE_MS'), 10) || 10 * 60 * 1000;
 const CODEX_USAGE_ERR_MS = Math.min(CODEX_USAGE_OK_MS * 2, 20 * 60 * 1000);
 const CODEX_USAGE_429_MAX_MS = 60 * 60 * 1000;
 
@@ -4221,7 +4688,7 @@ function refreshCodexUsage(done) {
   const headers = {
     'Authorization': 'Bearer ' + auth.token,
     'Content-Type': 'application/json',
-    'User-Agent': 'pulse-usage-dashboard/' + PULSE_VERSION,
+    'User-Agent': 'burnglass/' + PULSE_VERSION,
   };
   if (auth.accountId) headers['ChatGPT-Account-Id'] = auth.accountId;
   fetchUrl(CODEX_USAGE_API_URL, { timeoutMs: 8000, headers }, (err, body) => {
@@ -4248,16 +4715,16 @@ function refreshCodexUsage(done) {
         codexUsageState.status = 'rate-limited';
         codexUsageState.error = 'ChatGPT rate-limited the usage check (HTTP 429) — retrying in ~' +
           Math.max(1, Math.round(waitMs / 60000)) + 'm.';
-        console.warn('[pulse] codex account usage: ' + codexUsageState.error);
+        console.warn('[burnglass] codex account usage: ' + codexUsageState.error);
         return done && done(codexUsageState);
       }
       schedule(CODEX_USAGE_ERR_MS);
       codexUsageState.status = /HTTP 401|HTTP 403/.test(err.message) ? 'expired' : 'error';
       codexUsageState.error = codexUsageState.status === 'expired'
         ? 'ChatGPT rejected the Codex login (' + err.message + ') — run `codex` in a terminal once to ' +
-          'refresh ~/.codex/auth.json. Pulse never writes credentials.'
+          'refresh ~/.codex/auth.json. Burnglass never writes credentials.'
         : 'codex usage fetch failed: ' + err.message;
-      console.warn('[pulse] codex account usage: ' + codexUsageState.error);
+      console.warn('[burnglass] codex account usage: ' + codexUsageState.error);
       return done && done(codexUsageState);
     }
     codexUsage429Streak = 0;
@@ -4275,7 +4742,7 @@ function refreshCodexUsage(done) {
     codexUsageState.status = 'ok';
     codexUsageState.lastGoodAt = Date.now();
     codexUsageState.error = null;
-    console.log('[pulse] codex account usage refreshed (' + stats.buckets.length + ' day bucket(s))');
+    console.log('[burnglass] codex account usage refreshed (' + stats.buckets.length + ' day bucket(s))');
     done && done(codexUsageState);
   });
 }
@@ -4307,7 +4774,7 @@ function codexUsageForPayload(background) {
 // local log — there is nothing on disk to parse, so this is an authenticated
 // API integration modelled on the account meters above, NOT on the transcript
 // parsers. Two consents are required before a single byte leaves the machine:
-// `meshy: true` in ~/.pulse/config.json AND a stored `meshyApiKey`.
+// `meshy: true` in ~/.burnglass/config.json AND a stored `meshyApiKey`.
 //
 // CREDITS ARE THEIR OWN UNIT. Meshy bills in credits and publishes no
 // credit→dollar rate, so credits NEVER enter totals.cost, any period cost,
@@ -4326,16 +4793,16 @@ function codexUsageForPayload(background) {
 //
 // Fetching is deliberately gentle — this is a shared third-party API. One
 // refresh every ~15 minutes at most; task pages are persisted to
-// ~/.pulse/meshy.json so a restart doesn't re-page the world; paging stops as
+// ~/.burnglass/meshy.json so a restart doesn't re-page the world; paging stops as
 // soon as it reaches tasks already known or older than the window; 401 stops
 // retrying until the configured key changes; 429/5xx back off and keep the
 // last-good numbers on screen.
 // ---------------------------------------------------------------------------
-const MESHY_API_BASE = String(process.env.PULSE_MESHY_API || 'https://api.meshy.ai').replace(/\/+$/, '');
+const MESHY_API_BASE = String(envv('MESHY_API') || 'https://api.meshy.ai').replace(/\/+$/, '');
 // Explicit 0 is honored (timing-sensitive suites disable the cache) — hence
 // the isFinite check rather than the usual `|| default`.
 const MESHY_OK_MS = (() => {
-  const v = parseInt(process.env.PULSE_MESHY_CACHE_MS, 10);
+  const v = parseInt(envv('MESHY_CACHE_MS'), 10);
   return isFinite(v) && v >= 0 ? v : 15 * 60 * 1000;
 })();
 const MESHY_ERR_MS = Math.min(Math.max(MESHY_OK_MS, 60 * 1000) * 2, 30 * 60 * 1000);
@@ -4395,10 +4862,10 @@ function meshyKeyHash(key) {
   catch (_) { return null; }
 }
 
-// ~/.pulse/meshy.json — the incremental task cache. Meshy tasks are immutable
+// ~/.burnglass/meshy.json — the incremental task cache. Meshy tasks are immutable
 // once finished, so remembering them means a restart re-reads one page per
 // family instead of the whole account history.
-function meshyStorePath() { return path.join(pulseHome(), 'meshy.json'); }
+function meshyStorePath() { return path.join(appHome(), 'meshy.json'); }
 function emptyMeshyStore() {
   return { version: 1, tasks: {}, pruned: { credits: 0, tasks: 0, byType: {} } };
 }
@@ -4443,11 +4910,11 @@ function readMeshyStore() {
 }
 function writeMeshyStore(store) {
   try {
-    fs.mkdirSync(pulseHome(), { recursive: true });
+    fs.mkdirSync(appHome(), { recursive: true });
     fs.writeFileSync(meshyStorePath(), JSON.stringify(store));
   } catch (e) {
-    // ~/.pulse unwritable → Pulse just re-pages next start. Never fatal.
-    console.warn('[pulse] meshy: could not write task cache: ' + e.message);
+    // ~/.burnglass unwritable → Burnglass just re-pages next start. Never fatal.
+    console.warn('[burnglass] meshy: could not write task cache: ' + e.message);
   }
 }
 
@@ -4579,7 +5046,7 @@ function refreshMeshy(done) {
     meshyState.status = 'no-key';
     meshyState.error = meshyConfiguredKey()
       ? 'The stored Meshy API key has characters that cannot go in an HTTP header — re-paste it.'
-      : 'No Meshy API key stored — add one from the dashboard (or set "meshyApiKey" in ~/.pulse/config.json).';
+      : 'No Meshy API key stored — add one from the dashboard (or set "meshyApiKey" in ' + homeLabel('config.json') + ').';
     return finish(meshyState);
   }
   const keyHash = meshyKeyHash(key);
@@ -4609,7 +5076,7 @@ function refreshMeshy(done) {
     // a hard 'error'.
     meshyState.status = status;
     meshyState.error = message;
-    console.warn('[pulse] meshy: ' + message);
+    console.warn('[burnglass] meshy: ' + message);
     return finish(meshyState);
   };
   const softStatus = () => (meshyState.fetchedAt ? 'stale' : 'error');
@@ -4629,8 +5096,8 @@ function refreshMeshy(done) {
         schedule(MESHY_ERR_MS);
         meshyState.status = 'error';
         meshyState.error = 'Meshy rejected the API key (' + err.message + ') — check the key in the ' +
-          'dashboard or ~/.pulse/config.json. Pulse will not retry until it changes.';
-        console.warn('[pulse] meshy: ' + meshyState.error);
+          'dashboard or ' + homeLabel('config.json') + '. Burnglass will not retry until it changes.';
+        console.warn('[burnglass] meshy: ' + meshyState.error);
         return finish(meshyState);
       }
       if (err.status === 429) {
@@ -4722,7 +5189,7 @@ function refreshMeshy(done) {
         meshyState.status = 'stale';
         meshyState.error = 'Meshy rate-limited the task listing (HTTP 429) — retrying in ~' +
           Math.max(1, Math.round(waitMs / 60000)) + 'm.';
-        console.warn('[pulse] meshy: ' + meshyState.error);
+        console.warn('[burnglass] meshy: ' + meshyState.error);
         return finish(meshyState);
       }
       // A complete walk: report exactly what answered THIS time, even if that
@@ -4734,7 +5201,7 @@ function refreshMeshy(done) {
       meshyState.error = families.length ? null : 'no Meshy task endpoints answered — credits shown are balance only';
       // NOTE: nothing here logs the key, the balance aside. Task prompts are
       // never stored or logged either.
-      console.log('[pulse] meshy refreshed (' + balance + ' credits left, ' +
+      console.log('[burnglass] meshy refreshed (' + balance + ' credits left, ' +
         families.length + ' family/families, +' + added + ' new / ' + updated + ' updated task(s), ' +
         (Date.now() - startedAt) + 'ms)');
       return finish(meshyState);
@@ -4758,7 +5225,7 @@ function meshyForPayload(background) {
   if (!hasKey) {
     return {
       enabled: true, hasKey: false, status: 'no-key', balance: null, ...blank(), families: [], fetchedAt: null,
-      error: 'No Meshy API key stored — add one from the dashboard (or set "meshyApiKey" in ~/.pulse/config.json).',
+      error: 'No Meshy API key stored — add one from the dashboard (or set "meshyApiKey" in ' + homeLabel('config.json') + ').',
     };
   }
   const due = Date.now() >= (meshyState.nextAttemptAt || 0);
@@ -4792,19 +5259,22 @@ function meshyForPayload(background) {
 // Requires a Discord Application ID (free, discord.com/developers) in
 // config discordClientId — client IDs are public identifiers, not secrets.
 // ---------------------------------------------------------------------------
-// The official Pulse application (registered by the repo owner). Client IDs
-// are public identifiers — every rich-presence tool ships one. Override with
-// config discordClientId / env PULSE_DISCORD_CLIENT_ID to use your own app.
+// The official application (registered by the repo owner as "Pulse" and
+// renamed "Burnglass" in the Developer Portal — the id is FROZEN, and so is
+// the `pulse` idle-art asset key: the art behind it is swapped, not the key).
+// Client IDs are public identifiers — every rich-presence tool ships one.
+// Override with config discordClientId / env BURNGLASS_DISCORD_CLIENT_ID
+// (PULSE_DISCORD_CLIENT_ID) to use your own app.
 const DISCORD_CLIENT_ID_DEFAULT = '1527236432375189535';
-const DISCORD_TICK_MS = parseInt(process.env.PULSE_DISCORD_TICK_MS, 10) || 15 * 1000;
+const DISCORD_TICK_MS = parseInt(envv('DISCORD_TICK_MS'), 10) || 15 * 1000;
 const DISCORD_RETRY_MS = 30 * 1000;
 const DISCORD_FAST_RETRY_MS = 4 * 1000; // quick re-sweeps right after a miss (startup race)
-const PULSE_REPO_URL = 'https://github.com/ReFxFrank/Pulse-Usage-Monitor';
+const BURNGLASS_REPO_URL = 'https://github.com/' + UPDATE_REPO;
 
 function discordEnabled() { return readConfig().discordPresence === true; }
 function discordClientId() {
   const c = readConfig();
-  return process.env.PULSE_DISCORD_CLIENT_ID ||
+  return envv('DISCORD_CLIENT_ID') ||
     (typeof c.discordClientId === 'string' && /^\d{5,25}$/.test(c.discordClientId) ? c.discordClientId : '') ||
     DISCORD_CLIENT_ID_DEFAULT;
 }
@@ -4825,7 +5295,7 @@ let discordNotFoundStreak = 0; // consecutive failed sweeps → fast retries fir
 // Candidate IPC socket paths, most likely first. Discord numbers them 0-9;
 // Linux packagings (snap/flatpak) nest them one directory deeper.
 function discordIpcCandidates() {
-  if (process.env.PULSE_DISCORD_IPC) return [process.env.PULSE_DISCORD_IPC];
+  if (envv('DISCORD_IPC')) return [envv('DISCORD_IPC')];
   const out = [];
   if (process.platform === 'win32') {
     // Discord's named pipe lives in the same object namespace under either
@@ -4870,7 +5340,7 @@ function discordConnect() {
   const id = discordClientId();
   if (!id) {
     discordState.status = 'no-client-id';
-    discordState.error = 'No Discord application ID configured — set discordClientId in ~/.pulse/config.json ' +
+    discordState.error = 'No Discord application ID configured — set discordClientId in ' + homeLabel('config.json') + ' ' +
       '(create one free at discord.com/developers/applications).';
     return;
   }
@@ -4882,8 +5352,8 @@ function discordConnect() {
       discordConnecting = false;
       discordState.status = 'discord-not-found';
       discordState.error = 'Discord desktop client not found — is it running? (Browser Discord has no local IPC.) ' +
-        'If Discord is open, make sure it and Pulse run at the same privilege level (both normal, or both as admin). ' +
-        'Pulse retries automatically.';
+        'If Discord is open, make sure it and Burnglass run at the same privilege level (both normal, or both as admin). ' +
+        'Burnglass retries automatically.';
       // Fast re-sweeps for the first few misses (covers a Discord/Pulse startup
       // race — heals in seconds instead of leaving "not found" up for 30s),
       // then back off. A one-shot timer drives the quick retries so they don't
@@ -4938,7 +5408,7 @@ function discordConnect() {
           discordState.status = 'ok';
           discordState.error = null;
           discordState.connectedAt = Date.now();
-          console.log('[pulse] discord presence connected (' + p + ')');
+          console.log('[burnglass] discord presence connected (' + p + ')');
           sock.setTimeout(0);
           discordTick(); // publish immediately
         } else if (msg.evt === 'ERROR') {
@@ -4947,7 +5417,7 @@ function discordConnect() {
           // re-sent; the next real change is)
           discordState.status = 'error';
           discordState.error = 'Discord: ' + ((msg.data && msg.data.message) || 'unknown error');
-          console.warn('[pulse] discord presence: ' + discordState.error);
+          console.warn('[burnglass] discord presence: ' + discordState.error);
         } else if (settled && msg.cmd === 'SET_ACTIVITY' && !msg.evt && discordState.status === 'error') {
           // A later activity was accepted — the error is over. Without this
           // the panel showed "error" until the next reconnect.
@@ -4994,7 +5464,7 @@ const LIVE_STATE_RANK = { waiting: 4, working: 3, thinking: 2, idle: 1 };
 const SIDE_ACTIVE_MS = 30 * 1000;       // a subagent line this recent = the session is working
 const LIVE_STATE_MAX_AGE_MS = 15 * 60 * 1000; // transcript-only states expire (crashed sessions)
 function liveStateMemoMs() {
-  const v = Number(process.env.PULSE_LIVE_STATE_MEMO_MS);
+  const v = Number(envv('LIVE_STATE_MEMO_MS'));
   return Number.isFinite(v) && v >= 0 ? v : 3000;
 }
 function pidAlive(pid) {
@@ -5038,7 +5508,7 @@ const PID_IMAGE_TTL_MS = 10 * 60 * 1000;
 const CLAUDE_IMAGE_RE = /^(claude|node|bun)\b/i;
 const pidImages = new Map(); // pid -> { name, at, pending }
 function pidImageMode() {
-  const v = process.env.PULSE_IMAGE_CHECK; // test/dev hook: ps | tasklist | off
+  const v = envv('IMAGE_CHECK'); // test/dev hook: ps | tasklist | off
   if (v === 'ps' || v === 'tasklist' || v === 'off') return v;
   return process.platform === 'win32' ? 'tasklist' : process.platform === 'darwin' ? 'ps' : 'off';
 }
@@ -5110,7 +5580,7 @@ function convState(c, now) {
 }
 // How long a registry record may go without any sign of life before it is
 // treated as a leftover (Windows/macOS have no cheap process start time).
-const REG_BUSY_MAX_MS = Number(process.env.PULSE_REG_BUSY_MAX_MS) || 6 * 60 * 60 * 1000; // env: test hook
+const REG_BUSY_MAX_MS = Number(envv('REG_BUSY_MAX_MS')) || 6 * 60 * 60 * 1000; // env: test hook
 const REG_IDLE_MAX_MS = 24 * 60 * 60 * 1000;
 
 // → { provider, state, sessions, source } for the most urgent live session,
@@ -5206,7 +5676,7 @@ function effortLabel(effort) {
 // rotation state survives reconnects — it just keeps cycling.
 const DISCORD_ROTATE_MS_DEFAULT = 45 * 1000;
 function discordRotateMs() {
-  const env = parseInt(process.env.PULSE_DISCORD_ROTATE_MS, 10);
+  const env = parseInt(envv('DISCORD_ROTATE_MS'), 10);
   if (isFinite(env) && env >= 500) return env;
   const c = readConfig().discordRotateSecs;
   if (typeof c === 'number' && isFinite(c)) return Math.min(300, Math.max(15, c)) * 1000;
@@ -5217,21 +5687,21 @@ function discordRotateMs() {
 // it to SERVER_START would reset the timer to 0 on every process restart —
 // including the relaunch a self-update performs — which is jarring (your
 // "Pulse for 3h" jumps back to 0s just because it updated). So we PERSIST the
-// anchor to ~/.pulse and reuse it when Pulse was only briefly down: definitely
+// anchor to ~/.burnglass and reuse it when Burnglass was only briefly down: definitely
 // on a post-update relaunch (IS_AFTER_UPDATE), and on a quick manual restart
 // (last heartbeat within the grace window). A cold start after a long gap
 // resets, so the counter never shows a misleading multi-day age.
 const DISCORD_START_GRACE_MS = 10 * 60 * 1000;
-function discordStartFilePath() { return path.join(pulseHome(), 'discord-presence.json'); }
+function discordStartFilePath() { return path.join(appHome(), 'discord-presence.json'); }
 let discordStart = null;         // resolved presence anchor (ms epoch)
 let discordStartLastSaved = 0;   // last heartbeat write (throttle)
 function persistDiscordStart(now) {
   if (discordStart == null) return;
   try {
-    fs.mkdirSync(pulseHome(), { recursive: true });
+    fs.mkdirSync(appHome(), { recursive: true });
     fs.writeFileSync(discordStartFilePath(), JSON.stringify({ start: discordStart, savedAt: now }));
     discordStartLastSaved = now;
-  } catch (_) { /* ~/.pulse unwritable → timer just resets next relaunch */ }
+  } catch (_) { /* home unwritable → timer just resets next relaunch */ }
 }
 function discordPresenceStart() {
   if (discordStart != null) return discordStart;
@@ -5263,7 +5733,7 @@ const DISCORD_STATE_TEXT = { working: 'working', thinking: 'thinking', waiting: 
 // the hold. The hold only ever applies within one provider.
 let discordShownState = { prov: null, state: null, since: 0 };
 function discordStateHoldMs() {
-  const v = Number(process.env.PULSE_DISCORD_STATE_HOLD_MS);
+  const v = Number(envv('DISCORD_STATE_HOLD_MS'));
   return Number.isFinite(v) && v >= 0 ? v : 45 * 1000;
 }
 // ag = computeAgentState() result or null → the { prov, state } to show.
@@ -5315,7 +5785,7 @@ function buildDiscordActivity() {
   const verb = live && DISCORD_STATE_TEXT[live];
   const assetText = prov === 'codex' ? (verb ? 'OpenAI Codex · ' + verb : 'Using OpenAI Codex')
     : prov === 'claude' ? (verb ? 'Claude Code · ' + verb : 'Using Claude Code')
-    : 'Pulse — idle';
+    : 'Burnglass — idle';
   // Second line while active: "Opus 5.5 · Extra High · 3 sessions" — the
   // model + effort you're running and how many sessions are live. Absent when
   // idle (the activity collapses back to one line). Friends can see presence,
@@ -5336,7 +5806,7 @@ function buildDiscordActivity() {
       large_image: asset,
       large_text: assetText,
     },
-    buttons: [{ label: 'Get Pulse', url: PULSE_REPO_URL }],
+    buttons: [{ label: 'Get Burnglass', url: BURNGLASS_REPO_URL }],
     instance: false,
   };
 }
@@ -5445,6 +5915,9 @@ function statuslineMeterPcts(s) {
     const fh = s.meters.buckets.find((b) => b.key === 'five_hour');
     const wk = s.meters.buckets.find((b) => b.key === 'seven_day' || b.key === 'seven_day_overall');
     if (fh) out.claudeFiveHour = Math.round(fh.pct);
+    // Additive: the tray shows its neutral base icon for stale data (the
+    // tooltip still carries the last %).
+    if (fh && fh.stale) out.claudeFiveHourStale = true;
     if (wk) out.claudeWeekly = Math.round(wk.pct);
   }
   if (s.codexMeters && Array.isArray(s.codexMeters.buckets)) {
@@ -5452,6 +5925,12 @@ function statuslineMeterPcts(s) {
     if (cw) out.codexWeekly = Math.round(cw.pct);
   }
   return out;
+}
+function trayLevels() {
+  const th = alertThresholds();
+  const warn = th[0];
+  const crit = th.length > 1 ? th[th.length - 1] : Math.max(95, warn);
+  return { warn, crit };
 }
 function statuslineData() {
   const now = Date.now();
@@ -5470,6 +5949,9 @@ function statuslineData() {
     // flag-started tray with no config key.
     trayEnabled: trayDesired !== null ? trayDesired : readConfig().tray === true,
     stripEnabled: readConfig().strip === true,
+    // Additive: the tray's warn/crit levels = the dashboard's alertThresholds,
+    // so the icon, the meters and the notifications always agree.
+    trayLevels: trayLevels(),
     version: PULSE_VERSION,
   } : { today: null, trayEnabled: trayDesired !== null ? trayDesired : readConfig().tray === true, stripEnabled: readConfig().strip === true, version: PULSE_VERSION };
   statuslineMemo = { at: now, data: d };
@@ -5491,7 +5973,7 @@ const TRAY_METERS_MS = 5 * 60 * 1000;
 // Per-bucket (ts, pct) sample history for the "~N% left at reset" projection.
 // In-memory only, bounded, and self-clearing when a window rolls over (a pct
 // DROP means the window reset — earlier samples describe a dead window).
-const METER_PROJ_MIN_MS = parseInt(process.env.PULSE_METER_PROJ_MIN_MS || '', 10) || 10 * 60e3;
+const METER_PROJ_MIN_MS = parseInt(envv('METER_PROJ_MIN_MS') || '', 10) || 10 * 60e3;
 const METER_PROJ_WINDOW_MS = 2 * 3600e3; // project from at most the last 2h
 const _meterSamples = new Map(); // key -> { resetsAt, arr: [{ts, pct}] }
 function recordMeterSamples(buckets) {
@@ -5624,7 +6106,10 @@ function allowMutation(req, res) {
   const isLoop = ra === '127.0.0.1' || ra === '::1' || ra === '::ffff:127.0.0.1';
   const hostHdr = String(req.headers.host || '')
     .replace(/:\d+$/, '').replace(/^\[|\]$/g, '').toLowerCase();
-  if (req.method === 'POST' && isLoop && LOOPBACK_HOSTS.has(hostHdr) && req.headers['x-pulse'] === '1') {
+  // `X-Pulse: 1` is the FROZEN wire header (v1 servers accept only it, and
+  // the web app, tray and old strips send it); `X-Burnglass: 1` is an alias.
+  const marked = req.headers['x-pulse'] === '1' || req.headers['x-burnglass'] === '1';
+  if (req.method === 'POST' && isLoop && LOOPBACK_HOSTS.has(hostHdr) && marked) {
     return true;
   }
   res.writeHead(403, { 'Content-Type': 'application/json' });
@@ -5699,23 +6184,28 @@ function probeInstance(port, cb) {
   req.on('error', (e) => cb(e && e.code === 'ECONNREFUSED' ? { kind: 'free' } : { kind: 'other' }));
 }
 
+// What to call a running instance by its /api/health version: v1 was Pulse.
+function instanceName(version) {
+  return version && versionNum(version) >= versionNum('2.0.0-alpha') ? BRAND : 'Pulse';
+}
+
 // Port taken — say WHO has it. The classic upgrade trap is double-clicking a
 // new pulse.exe while the old one still runs; name that case explicitly.
 function diagnosePortConflict(port) {
   probeInstance(port, (inst) => {
     if (inst.kind === 'pulse') {
       const v = inst.version ? 'v' + inst.version : 'an older version (v1.0.3 or earlier)';
-      console.error(`\n[pulse] Another Pulse — ${v} — is already running on port ${port}.`);
+      console.error(`\n[burnglass] Another ${instanceName(inst.version)} — ${v} — is already running on port ${port}.`);
       if (inst.version === PULSE_VERSION) {
-        console.error(`[pulse] The dashboard is already available: http://localhost:${port}`);
+        console.error(`[burnglass] The dashboard is already available: http://localhost:${port}`);
       } else {
-        console.error(`[pulse] This is v${PULSE_VERSION}. Stop the old one first — from its dashboard`);
-        console.error('[pulse] (Server panel → Stop), its console window, or Task Manager →');
-        console.error('[pulse] pulse.exe → End task — then run this again.');
+        console.error(`[burnglass] This is v${PULSE_VERSION}. Stop the old one first — from its dashboard`);
+        console.error('[burnglass] (Server panel → Stop), its console window, or Task Manager →');
+        console.error('[burnglass] burnglass.exe / pulse.exe → End task — then run this again.');
       }
     } else {
-      console.error(`\n[pulse] Port ${port} is already in use by another program.`);
-      console.error('[pulse] Try: --port 4748   (or set PORT=)');
+      console.error(`\n[burnglass] Port ${port} is already in use by another program.`);
+      console.error('[burnglass] Try: --port 4748   (or set PORT=)');
     }
     holdOpenAndExit(1);
   });
@@ -5744,34 +6234,76 @@ function openBrowser(port) {
 
 // ---------------------------------------------------------------------------
 // WINDOWS TRAY (opt-in: --tray or {"tray": true})
-// A hand-rolled notification-area icon with zero dependencies: Pulse writes a
-// PowerShell script to ~/.pulse (the only writable location) and spawns it
-// detached. The script owns a WinForms NotifyIcon: tooltip refreshed from the
-// slim /api/statusline feed (loopback only — the tray never talks to any
-// provider), left-click opens the mini overview, right-click menu offers the
-// dashboard / mini / Stop Pulse / Exit tray. A named mutex (per port) makes it
-// single-instance, and it exits by itself once the server stops answering.
+// A hand-rolled notification-area icon with zero dependencies: Burnglass
+// writes a PowerShell script to its home (the only writable location) and
+// spawns it detached. The script owns a WinForms NotifyIcon: tooltip refreshed
+// from the slim /api/statusline feed (loopback only — the tray never talks to
+// any provider), left-click opens the mini overview, right-click menu offers
+// the dashboard / mini / Stop Burnglass / Exit tray. A named mutex (per port,
+// FROZEN as `PulseTray<port>` so a v1 icon and a v2 icon exclude each other
+// during the upgrade handoff) makes it single-instance, and it exits by
+// itself once the server stops answering.
+//
+// Icons follow the brand guide (BRAND.md "Tray"): the tray NEVER loads the app
+// icon (its ember dot sits in the status slot and would read as a warning).
+// It shows `tray-base` (ice dot) when meters are off / no login / stale /
+// loading, and swaps the WHOLE icon to `tray-status-{good,warn,crit}` for the
+// live Claude 5-hour window — good = solid green disc, warn = yellow ring,
+// crit = red disc with a white bar — at the dashboard's alertThresholds
+// (default 80 / 95). Shape carries the state; the tooltip carries the %.
+// The per-size PNGs (16/20/24/32, picked from the DPI's small-icon size) are
+// embedded below as base64, decoded once at start: no per-tick GDI churn.
 // ---------------------------------------------------------------------------
+// Generated from the brand kit (tray-base-N.png, tray-status-<state>-N.png).
+const TRAY_ICONS = {
+  base: {
+    16: 'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAB/ElEQVR4nIxTzWsTURD/vdetrGklVqNJiPjVkwXxJHowEA+KsaDgQXvQgwe9eLOlKOLJSKpS/CtEbyJSvw5qsvTmRTx40BaKFI0nixabpDvTeS/7tkm/6MDs7G9+M495M2+8noGjGc3qIYNPK6XSzAylALCo/DgsRqzDqib8O1I86inixwwaMjldiV4YWZz/BwUTTBbb5MhGOC38FcXo1qCwaDxEhOyp81YNZgpbGeJ3fDs2vCIqagFJFqfSGrkzF6xyVDPHwcK3Her8xJTULSdh17EC/FTa6u7jhSiI4PjOQyjmtTtxz7lLcNJ/8Soye/fF5aZ29GFsrIRq9T2C4APK5RJSO/ssrxL7B9h09+TLT2iXy1kfs9NTGL9xDXdvj2Bw8GwHPzHxCsM3R+HZCqJur5TcwX7UZSL5fH4VZ31yHR13ex2x/LokL/dgLZmd+g5/awJBpbKKMz6T59nuytT+fP2M7YeOWHJh5htuXR9GbWbaFle+V0Kj2cSJ6CqTQYBH5Qd2CsrPHrD1pwtFHL4zbgO+3Jfkj6+xGdHuUfyqvMH/3z+t1qpvOx7RRtZMYU6mkDQz/fHiSas3zQYQ70K75ah3ESaeU1tSuafyDoYM2b0taYPC+b9u6za0GnjW5ff4kyEp2S5kwvpCLzXqHWu3llVMNfk+93RjZAkAAP//EzMXwwAAAAZJREFUAwDaZmael8H3YwAAAABJRU5ErkJggg==',
+    20: 'iVBORw0KGgoAAAANSUhEUgAAABQAAAAUCAYAAACNiR0NAAACl0lEQVR4nJRUXUiTURh+zuey5VxmoU5XytZNI6iLoqC0hUYESWgX3UUXtroYdSNhN5ndRRBEMai8sViXy1ALqs0uzFiSgUyZNxsxNNykmI5hi/adzjnb2R/7Zr0Xe77nvM95937nfO+jAwvjviPdUOhN9rifUuwghADsAQwpw0ocVI0zXIBK7iYWZyaI0Xaoh1IyylJgEugbTfgVW4HkMiQvxcI8CO1VaJoOEPZvlKogW6pxYPABFIaciy74ejYPqSvgxXkMKOzXJpPN9jOoMZlhYijFKNlcidO0alOoqtZxoqoqzN0XRPscORei/0HQOkWShqMnYNjdJgpy5LxE/E9cEe0y0nr+Igojw7Ovg/wmu70d7hcj8Pun4P88Bbd7BPaTHbk8MVj4lwJ0jn9BaVi+voP/zTgWZvyik65TnXC5HqJcOJ3X4fNOQpFtl4vjZ8+h3zWM+699aNrTCoejD1rhuNwn6ugyr0NRKeobG7GRWIfVatXUWPdaxa2LDgkqF+SROaPNRBRK/pa042c0im21RoRDIU0Nz+VvWeMMp8de4d6VS+g/3YGVb2EMP36iWfApz7E6VTpj/RA/x52H26FvMOUE8eAcJm5cxepSRAj5rIZYF4FAAM3mFhgMtUilUpifD2Do1iA+vJ/ktwGiN1mEuuFYFw7eeZQrOHf7GlY/+co7QgVU5Ecbm/YiGQmLYhxjH73FE4FNJkZOippW18QZMhLxPBcFI55nGRcBijZLTrITVJpny2usQzUoXWP5rQfJ5QjDl0WDn3MVDWPIu046SKp3tfQQooxmnBjY2mRGKvo958zFKI2alM2zE+ytSm8kFnU1xllmkm1sbfuf5Lo+58VidyFmL6A4H2d7Z4lCnL9/LI39BQAA//9YQZ7sAAAABklEQVQDABA6GbCf5kYjAAAAAElFTkSuQmCC',
+    24: 'iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAYAAADgdz34AAADeElEQVR4nKRVW0hUTxj/zdnjX3cV/9nF1VXaWI0uECwUSBe6YBeiixV0pZ7KLq8R9NJDRL1FT4GVBSH0VhH0UJRm9RAU0QUqwW1XS7PVas0t012PM30z58xxrcTcBpbf/OZ8M9/8vsusCWcUzl2wFmAnhUAIjE0CTQgJBAHD33F8JYgZTBxLvnl6S57rAbZ68md7TzGwOggETK83Dx4TYnhIbbL32jg+Rx5hKdFdedPKzNTnxQ9Zwaz5K2jxnnMhBNdswqA1jHjjTWRcNAsUXBjGGoOmR2mq3MuPFRu2wb96s5QLdz0rhME4P2IIzsP2IkdwQRUKyoPwls+Ab3YYej1rFCIsFfglkSEMb95hZ5ykTKmuGWWsQjxx7jdAciQpnh4kBQttBxRE35wwTH8Z9He9eaLc0B5nVS2CO1RVGMitnDdKNtwY/z03lRy6cVFJqUqsVkBmMMtDMIumwUr0qMRJu0xcvmIZamv3oXJmhdr2NhJFff1FPLj/0LXz5BQVH5c3XrxlO3IDQfRZAv1pC6nUEAYGBuFfsgplVUvx/9RiDCW/IvUtqRRWr6pGXd1ZBAKlyMvNVT85X79+HVpaWtAWa1ciKAdcef+TAiO/UFFfSTkqa3ai5uwV7L50FYwasXbfXow1pCpk5kCSyYEyNWWwu0Wi4SuQ3uSy69swPBBDaYQqQmM6CIVC0OcabkJgnyIgXAXM6X82YqGrAOMN3XSGTTh62mMj+xwFVrI3Q4GtgXNLVVgsGh3zcPub3dGOAqC7LfpbDrhyIDAQ70Tr9QbcOLQdDXs2gg9buHDu/JgO6s9fcEvVZI6nRNcH+H9RkO6I4l3DaaQ/xUc/ZGTfdOcu9u+txYFDB6lMZ6ptkUgE9XXn0NzU7NqZKlZEvnzo/E2B9T6CdM9H5+GDW/+aP6CD7jfeg04Sc/4fMu0N3XGRJ4/A6ZnWCmQFDLY8R7YdrLlbRYmuTkSab7sK+h43Y7i3599eU1lFpKZbJ/rltStuHySabkCvZ4ukpFsqeGETjo5nT9DX1oofHTH0v34GvZ4tUh2+8OR4C+IUsd1MXp0Lldze1y/xPfLKKRtki5wJccBjDXyL5eQX+kjJEllayfa36G9vBU+nR/2hTxghTqQ+d13WhYn/JpfMpaI6TNOV5D84chMG9zEan7+jQDRSaM6kE/E38tyfAAAA//8nUVWSAAAABklEQVQDAMmy84ygYp3pAAAAAElFTkSuQmCC',
+    32: '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',
+  },
+  good: {
+    16: 'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAB+klEQVR4nIxTv2tTcRD/3Dcv+kwrz6GahhRRM7Ug1aHo4BAHxSwKDlqwDg66OCoiOLsIRf8BwUHRTcTBH5MVxUFRioOgppJKsNElRYtJzLvzvt+893ihaenBvXuf+9x9Oe6HNzQxNWqEbgjkKBHlRQREAERVf2KsRm2MqaH8cya54hHLTQFP25xMbhhWuit/QLDB7LBLjmyE88qfJUHWgMOK9TAzCkdOOLVYOOxlqD/m09jyxFwxCgJRJxmD4rGTTiWqWZJg5VOPxn4WDkzPydh+oAx/JO90x8FyFMSI+f5HOOE996Lq2PHTiKV06hxM7TOWat8c5mAzwpkp8GTRYZqvw7v7FqbZAuV2TYjt7uHH75CWmYKP+kIVsxfP49eZccihUh9Pr6rI3pqLK2AMkuKeEto6Ed435qaQFuvTAcAk3V5DHL8mKTBJVwdIvfoV/pYczPvFVZz12TzPdVfra36ax7bxSUe2al9w9cIlNGoLrrjM7Sa63RCyf2cv+cMizJ03bgrkF3a7+vPlCvZem3UBH69r8osn2IiYeCmW5p7i788fThsvn/Ut0XrWTmFZpxDYFf3+6F6vN/86QHILaStR7yLMskybRor3dQ+mLZndGrigcOV3fHXrWgM8yPhD/uuQSa8Lo2G7Ncyddt/ZDbIk3NDvQ890Lv8HAAD//2zbtpoAAAAGSURBVAMAu6NldOjNawsAAAAASUVORK5CYII=',
+    20: 'iVBORw0KGgoAAAANSUhEUgAAABQAAAAUCAYAAACNiR0NAAACpElEQVR4nJRUQWhTQRB9u4kxrY1JtWljY1vwokEoiEUPFgVBUCzSePDm2YN4EmlBlHrzIggiHvSiJw+N0RIPQgUFgzYQQUTSg2gbEzHRatqQVoN/19n9+Ul+TFIdSN5/O7Pz5+/bGSfIPLv2jYHLSXrcLSV8jDGAHkAoCdtxSFEgfAfBrhbnEzHmCe0dl5JFyQUKgbs3gJ/5L7C4ZRZvxHo/mAxzacgJRm+TUoBtcGH48nVwQsV1FWq94ocVV8ftfkxw+g9Zzm2HjqIzEESA0ApGw+Z2XBoixKUQXkWEEAiOndLlK1RcB/0PQnq5Rfz7D2LT9iGdUKHiDcH/xJ36TEitwZOnUW+Kf3v1rKqqFCYae4IwwsMQAz4dx9MFOB69BU9+0n6Hy+efUptC5y7ZErp7+nB45xDKq6vIZzO6EmNkAMbkEaCnC8zl1D/4uyBGdwAfl8CyBXCr7GZ24PgJnL95G9ceP0XfwCAEVdbKxPiwzuM0v12inXX39mKtuALR7zXvW7OEQa9WXVfI0D6hMvPg1wuS4DWVWtv3XA4dXR5wOqNWpnw1lVt8SHzmIeKxKFJzL7XafFrAuHisaSybfq0rdDg93VPqHLeMjMLtD1QDCqk3iF04g6+ZtA7Ur8z8AN7nIUlZ2eECygYYcX7rORyJRaUGiaIEoejF+3fgu3KjmlBxs72g/VKacXxuATyx8NekkBXk1g3Px2dRSn/QyRTmX8zaOwLrdEwFuTDEsk5PJB25pxOmI3fNKQLYNltc3QrZxE/Ly1ShSFlTI/skglI2TfjA1vjVqdJiMNSmjpFirq3944zxqNmzwMa+IH7lPtd62IbWoGZN/XSCYYexVpx3dnqSNCSHaG3z79KKuzqLK0LUsCKE3V+gvUnG2dnyUmbmDwAAAP//G1gbVgAAAAZJREFUAwD9+x5xiLxHUAAAAABJRU5ErkJggg==',
+    24: 'iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAYAAADgdz34AAADXElEQVR4nKRVW0iUQRT+Zv6/clex2qj1lhsllNFlqSi6vEQ3eggTKip676G3CHooCKIegugp6CmIoLeCIqKgi1AQqOEl0khTV1dtNVtvmbruznRm/n9+11TUbf6HM2fmzJzznfOd+W24I3fjjqMAuyEl1oKxZaAJSRKSBMP8dAyQaOVMXh1q/PRS3WsBJ63sDb6bDOweJApsny8Llg2ZmtCHnLOOnFtHFsl8Us9mrSy0x/v2vmc567fvp8V3bkAIHTmOsWQKsTfPkRZoBlIKyfkRTtPLNNXu1ea6Y6cQPFyu4MJbz0iCMyEucSlE2FkUCO3YhZyiEHxFa+DfEIZZz1hKGVYIgkpRKQyXn3YqTlBWHCibYqxTvHA9yEFwlLKqOEQIdjsOKIn+0jDsYCHMvjm8UJ0bj+t37YE3NCs4lpRsngIbXo7nr9saDkW8PC9fF9YgIDPYRWthL1+JZLxXF07ZpUuxfTVSx7dAFC/Tx3jHAKynn2HVdHp2Nlw4K/ILtVMPAX123moUX7gG/9gwxr7Vo6f6A4a6o9o+tTOE1OWDTjzmWGkQydJDkLdew6qOaidUA6E3Z0LAs3O16s8rQknZGZTdfYRz9x+DUSMKiny2Icq3Auk1UEqgwEHAwDwE3J+j45NpUXJuQU4kIAqXzu6gYCnMvdwriItVQnoImNv/bNLCJANzDdN03FEEeiOt02qQHOpPQ+BgECKpGca7Bma93NlzOtpjUU9bC4Ilm1wkDgKhHAQCGI11oundM13kwWhE27PHNZBXjs7s4EktzL02cz3Fu7sQ/AdBItqC9oe3kfgZm/qQkb1V2QZcfwF5YhvRNODE1RGHRY5ZdbtnZ+tckfKrq3Mai5IdzUj0/nAfPnj8N7pFF8mqCCy3SMz9P6Tbc9NxzVUfIeiZNggUA8a+1iLTDja6x6J4dyeaK155CAYrK5Dq7/2/11SxiND0SLfZ6p888vog/vYpzHqmkpD0KAR1Lv8QranCYFsT/kRbMdJQA7OeqSQe1lmLfDkxytg5xTyVO/X1N9Tjd/MX8yPPVAom5XkrOTrcuig7109I9ilqDUW+YyTSBJFITPmhL1hCXh/v635giInFgbyNRKqLND1I/kOTkTB4j9Hcejsl4g2l5k4iHmtU9/4FAAD//322qAQAAAAGSURBVAMAYJbwVuJuTVMAAAAASUVORK5CYII=',
+    32: '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',
+  },
+  warn: {
+    16: 'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAACHUlEQVR4nIxTTWhTQRD+dvsiL2k0QmvTEAW1Fy3Un4PowUNKUcxFRUR7MKAHvXhUilC86UWoehe8iOhB0OrBH4p/6M2fioditZUgxaanVhPaxGbG2cl7MYFQHJg3+823s7vvm12vvXdXt2VzhcH7jTFJZoYxAFhcBiGWIDHEpiD8MzI85BniawwadDVtsTicLZeKMHCTSbEWBzHASeFzhhGxoGrWZYgIqX2H1B1mqtYqJB/yjdjxhihrBSRYksZapA8cUefgzFyfLHzDomGemBK2liSs252B35lU79qTCSYRQr55Earznq4ovv7gcYTWc+wUbH4Ss/nvirsSFVzKFTCwo6h4bDyOi7eSmJuPwMQ29rJTt//ROzTaiZSPmekpjJw9jeu59zi691cTf+/NGpy8uiE8AaGVpTf3oCwdyfSVFMcPb3G9RfHBBPq3SU5+x1M1tfGtrcaj3r9/m7FiW1e1hc1MfYMfjeHFeFRxcfQLSg8ndfz8Y0zrPFVXdpif+IS1W7cruZT/igtnzqGQn9bWD93owLLsMbBzUa/B2Icohm92aBeMn9qk9yuZyaJveEQX+HxZil8+xv+YDS/F7KsnWJz7qV54/bTpEq0UXRcWRJiEO9uP0ds1ef5UVO2aYI2RAy0DTLxgVnWm70gXBh0ZWZ3QSdXS7/DVrRgtcLfNb/ffVsnI60J3tbwUp0q56dm1ioapIN/7nq2c/wsAAP//Tg+SUgAAAAZJREFUAwB8eXHGiIgIpwAAAABJRU5ErkJggg==',
+    20: 'iVBORw0KGgoAAAANSUhEUgAAABQAAAAUCAYAAACNiR0NAAAC1ElEQVR4nJRUX0iTURT/3c+5luvTLDenM2VJf0ZQD82CioJ8KZNQi6Cg5x7CIEQMgywq6KEgqJ56KqiX0kFaaCr0kGbmDAmZ9O9haqXTUMfyD+673Xu2b25rbXUevt/9nXPuuee7555jgBB1665KKPyCWG7jHGsZY4BYQCAXmIqDazMCh6GxG4GR/jamOndWcc7cwgThApPVhoXJH9C5LjpPxFg7GK9WeIg3MHEa5xpYphHbL92GIlByykLqI3bofjE83o4GRXydurHgwCFk2eywCdSdkbA5FechzalwTcuRRNM02CtPUPoSJSen/0HwHEUnlt37YS4qoYASJU9w/iduoDsR1SquOY1YkXyq71W0qlwLY4VrFuerp+AsWiA/76gJN1ssaPeoZGdmh3wpwMHWASSKY/Al+l60Yri/jzI57ArgSaMPyeTYtWJ0DKpQ9LSTyd4jR1F37z5uPe9G/oZi1NX4Se/uVeGq3Yiy2lJaS6k/7qc4SvQuUkiu1Yr5wBw2FS4Rv/ooDyOjRvG7mbj+OI90m+2LVHXKkIEjnZAfC/spLKYgPCYZypCnz/DnxARWr1HxccxIvPHkFGW0xT6Pi6emSSdtdKjJXspFbVDe8eGPQI537ehpc8P79g1Vu6IsiKdN35MeWtVUgE6PGRkGNfeyvMd1rn0wWWxRhxnvENrqz8A/5qNfkb36adyAwc9GlFiXkZ3F8WuR4f0XI87dtaBzwCyrITK0OcjbsqccO67ciQYcaqqFv7c7+URIgdEqT/Z0Iej7SsEkTr7uiu8IpOmYCCpaSJuldyiIr/khBfQ1PwhPkUh19c06l6+CJ7EL9azIUPPqU2O8oxnBcZ/AlrjGj06VvwyGlakT8jLj+sIqxhR3uGeBVfl2LE58W+nhONQHNUtqFzdYnRGaD4wYslSPGJIlQpe9HJwzRWcx7Y7FSAHi7TNir4cp7OzS9Niz3wAAAP//18gRvgAAAAZJREFUAwDBRCzZyT7GzwAAAABJRU5ErkJggg==',
+    24: 'iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAYAAADgdz34AAADwUlEQVR4nKRVa2gUVxT+7uwk2d2kqdmu2Zhd3RLTmkgLC00b2ohQ+hChJZpiWsX//dNC6ZM+oA/sj9LQX4X+KoigYDCo+MMIPkBBMNGo4IuNiTEb4+bhxt0kZnd2Mtdz78yd7KqgWS8M555zH+d853znjg5nVK9v2QywXZyjAYytAE1IkuAkGJ5Nx30Swxrjv2SunT8q7vUA2zyVTb4/Gdh/4KjXfT4vPDr4Yl4ess/a8uk6vCRXkbrDuzKs56bbTrOqdW+8S8aTTkCIbtqCrLmI5PEjKAi0BMktrmmbNJr+QFPpXiyu/bgToQ+3Crhw7SVJaMyyvtW4ZcVso4VoSyuqIlH4Ii/D3xSDspcsOY8JBCGhiBTGtn5mV5ygvPRee9FmmeLl6yENBEcotWuihOBt2wEl0d8cgx4KQ62rw8vVNeVxXes7cIdkhYaKxteLYMPN8bPruoRDEdfUrZKFVQhoG/RIA/SalTBTk7JwYl+h/OitWXy1ZQrNq3Py2PWEF109QRwbqHb3ecpqan8TEbd1fIqK+ijSJse8YSKXy2NhIYvQhg8Qbt2IF4O1yGfuIzebkQg3vzmH7h9HEQma8JZz+UWCeXRuTONCvAJDyQoJgmpgSe9PQqBVVkvVXxdBY/t2tP+7Fzv/PwBGjfhNx5RcO3j2BbR8uRYtXzTIuRjfbZsGCmsglEB9WE4Z7G4RUvNXCW/C7PrWNA943sAr9YbUd+0L4sZoGW6Mlcu5GK+Gc1D3am5BYN/CwV0EzOl/trRDsYDWHAtX1OROKMrMFQKbUpMjw0u3OAjMzEwBAhuDZZmSYXGKWIyfd9wjNFk0rc7ip+3T0mav2U5dFk3cGkKo8bWiGljCQSCAheQY4icPY6L/DNKJEbn/7+4a9Px6Fx1tc/IrHH/tD0DdqzPHU2r8DkKPIDASQ7i9pwvGVLL4IaP9vf1+fPJ7Hb7vnEHzmjwWLUHTcnR1r8Cxfp9MoYNAVhb37ow9xiJzdBDG5F3n4YPLf6X39lXi6Dk/VJGY83+AvNzWNdVxg31nYdEzrRAIBmSvX0SpHax0l0Wp8TEMnup1EaTPncLizOTzvaaCRYRugjvNdrlnr9sHqROHoOylSkIyIRBccviHxEAf0rfieJAYxvzVASh7qZJ4eMlT5qtKUsZ2MhG6xWVxZ65extzgFYc2KFVajPPPPebC7HBZZbWfkGwQFMyM3MT8SByWYRT90Jctwf/ITY/vVsREeaBuPZHqa5q+T/6jS5EwuI/R0/XblIjjlJp/jFTymrj3IQAAAP//tI0tkQAAAAZJREFUAwC7HhPiRULuSQAAAABJRU5ErkJggg==',
+    32: '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',
+  },
+  crit: {
+    16: 'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAACC0lEQVR4nHxTPWgUURD+3stGN8npXuTiRU4sPEUUxEKDYpXCiGkULDSNhYVir4hgJ1goiKUiVqKoIP5VaqdgFS2sBBMNRxCzQn6O5JLcXXYm897u29zCJQNzszPfzNzsNztez4GBfs3qLoNPKqWKzAylALCoPDhfjFjnq1DwT6T4uqeI7zNoxNR0dOdgZKW2AAWTTNa3xYlN/KLgFxSjU4OiYRMhIuwYOmPV+ExRXCFxh7f6BldEw1qcgCWotEbp1FmrnMzMabLgLU1dnJgCHQcJfUcH4ReKVrcfG0ySCA7PNqEU92xH0Z2nz8NJ+dxF6MovTFUmrN/bjHBpZgWHl2JOvnVpPN7mYdbT0K5zsO9g2sDfVcbtV+9x6+VbBIU+XJlu4kSN0Cv1Rofk2cTMHycTENpJaXcZddnIwCLhOI1nsAW9RwiNoFO21xGLrwvyGgft5O/vcfhd3Rj1q8jpvRls1Icl0rMcyNbmfv5Afv8hCy5XxnDj8lWElT92uAcBQ94YR+rK4t83Mx5thdsC2aTJ10+Qv3nPJow9fYhwYu2dp6XuTt7OnB2RON6C6TD1+QOW/v+zGn75mPmINrKGg6psITCf6OS7ZzE3zQaQ3kKr5YS7xCeuqk2F0nO5rhEDdm4JbFJUm3dXt6HVwIsOv8f/GpGS60J/VF/OUaOeObt2VjGF8vvG041rqwAAAP//pnYpBwAAAAZJREFUAwBQ53mxk1njTAAAAABJRU5ErkJggg==',
+    20: 'iVBORw0KGgoAAAANSUhEUgAAABQAAAAUCAYAAACNiR0NAAACrElEQVR4nJRUTUwTQRT+Zrpba6UCIqWK0otGGxMvGknQaMLJRGLAg5w8ezCejMGLBjx5MTEaT3rRExwQQ/BggokH0WrCwYMpIWrCCkZaf1ragtbujG9mu223lqIv2f3mm/fm7Zv39j0DJKH9R/rA5RVaHpASLYwxgBYglISNOKRIE76DYDeyc2+mWCh2qF9KNkEqkAkC4Qh+Jr/A5a64vBar9WBygEtbDjH6mpQCzPTj4LVb4ISK6yjUfkkP166Ke/UY4vSOucodJ04iGOlEhNA1Rs3hRlzaIsalEM2KCCHQ2XdWh69QcW30PwjZzF3S3n0cW3ZFtUOFitcY/xM3dE6oWl1nzqFaFP8af16uqhQOdud+YzBjI1oQ2m7B5BhrNRAP+rTe529pH1aHYhevehwGtnegd18UhdVVJJcWdSQ9uSKup4oI28Amqqt61Lo3L/DBBD6ZDNwNu54cPXUal+7ew80nz9Cxu0tHtp4Mpm3tx3DuLtFIWsNhrGVX0EXX7BHv69rk+B5ddR0hQ2OHSpzEb2SkItT/UWOH35eXsbkpBMtM4SXfW9fGMllVlZ3G+UtmJh9jZmoCidev9EfHmiRGftS3HW2Suhd9Rqh1WK22HT6GQHukbJBOvMXU5fNILVr6KsqNZUjMm0JXNkgZKNDevClxu1kgHlCJU1dWBSHrhdH7aBm5U3aouNNe0HqdFsK4n542WZo2qEwKlWNC7v7hyZlp5K2P2pnC5Itpb0dgg44pIRe2yOivEbHGHzoJHn/gTBHAc9jl+nJ19LSdoQhFwp0aS0/HkV+yCB95Gr88VdYZDJWpYyeYv21nP2N8wulZaqmOTvxa/lzpYQ+6g5rV1VMGB3z2WnbOCIZmaUhGaW9rMb8SKM/icuJrCuDVp+nsLOPsQuHb4uQfAAAA//+SqJzgAAAABklEQVQDAG3uIzU0SApYAAAAAElFTkSuQmCC',
+    24: 'iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAYAAADgdz34AAADbElEQVR4nKRVXWxMQRT+ZvaudreroVLb6uoKFdVUsgkJyosQ4kHwQBGJJyHxJhIPJEJ4E69eRSLhQUI88OAnIVmKoImfaKmtrdoudnVVf7Z3Z5yZe+e2W5W2azbZM9/MmTnnOz9zLbijsmnVVoCdlRKLwdgc0IQkCUmCYXoYP0l0cSZP5t4+v63u9QG7fBWNgXMM7CIkFliBQDl8FmRhVB9yzjpyaoxykrUE95VX11kj39c9ZKFlKzfQ4n3XIUS37MCwXUDq7i2Mc7QEKYXkfAun6XGaavNqc8m23Qhv3qnowlsvSYIzIY5xKUTMWRSIrlqNUCSKQGQRgo0xmPWSpZQxxSCsgAphbOceJ+NEZd7G7UXKOsQzx2EOoqPA/PooMVjrGKAgBpfHYIXrYPbN4ZlibiwuW90Cb+iq4ChrWFFEG16Mp48tTYc8nltTqxNrGJAarMhiWHOrYWfSOnFKb7xcM1hA688CoqNCH+v2c1yb40NbheXpWXDpzKut00Y9BvSzahai/sgpBId/Yfh9O/qePUKuN6n1WwYFTn+zjUf6vzkv0Zy2capaIu4asaDouAzsCQx4RSWBAoI1EUQam7DmwGHIbBpXDraS50P412jtF4gHnHstE6uqBXVI625nHgMeDAFDOU3M2ObcBzmaRz2FpUV8mNTAAG/wcsC9hLhMleeGAXP7n41pmBhiqmGazstBOtFFbdxclAM7lwUs7jJwOAhh6wr77GeI86WTXq72nGrCWBX1ffqIcINrwGUglIGqKgyletBx/6ZOcn8yofWvhiTOZNmkBq7NdpzWVcTctyPT+wXhCVWUT35E9+XzyH9LFT9kpB8PACcgsHeAUZk6xxJ+upwMPy5jbrPpPtCZxY8vPX/1gf25E/n0V/fhg1f/BreVMzwpc7CTOqadMOFRmJtsdz6NQ9AzbRio8h1+9xKldrDBXhVlenvQ+eCOx6C/7QEK2fT/vaaql4hdnwOA9utXvD7I3LsBs16qJCZ9isErt/6QfPEU/Z86MJjswu83L2DWS5VUh698/kAoRRHbz5TrQurkZt+0Y6DztfmQlyoFk/KQzx761eWvqAwSk/WqBHOJD/id6IDI54s+6DOWkGdGvvde8jplVlVNExXVUZpuIvvRMU8YvMdoatxNgbhLobmQz6Teqnv/AAAA//9bVwBnAAAABklEQVQDAJQe9AGVL4fIAAAAAElFTkSuQmCC',
+    32: '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',
+  },
+};
 // Effective tray state: --tray starts it without touching config, and the
 // dashboard toggle must override either source — the statusline feed reports
 // THIS (falling back to config when nothing has decided yet), or a
 // flag-started tray would read config tray!==true and kill itself in 30s.
 let trayDesired = null;
 function trayScript(port) {
-  return [
+  const pngTable = (state) => '@{ ' + [16, 20, 24, 32].map((n) => n + " = '" + TRAY_ICONS[state][n] + "'").join('; ') + ' }';
+  return '﻿' + [ // BOM: PowerShell 5.1 reads a BOM-less script as ANSI and would garble a non-ASCII home path
     // The tray is spawned detached with stdio ignored, so anything it prints is
-    // discarded — it logs to ~/.pulse/pulse.log instead, which is exactly what
-    // the Server panel tails.
-    "$logFile = Join-Path $env:USERPROFILE '.pulse\\pulse.log'",
+    // discarded — it logs to <home>/burnglass.log instead, which is exactly
+    // what the Server panel tails. (v1 hard-coded ~/.pulse here and so ignored
+    // a pinned home.)
+    '$logFile = ' + psQuote(path.join(appHome(), 'burnglass.log')),
     // Same shape as the server's own lines so the tail reads uniformly.
     // ASCII only: PowerShell 5.1 + the log's other readers disagree about
     // encoding often enough that a stray em-dash shows up as mojibake.
-    'function Write-PulseLog([string]$msg) {',
+    'function Write-BgLog([string]$msg) {',
     '  try {',
     "    $ts = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')",
-    "    Add-Content -Path $logFile -Value ($ts + ' INFO  [pulse] tray: ' + $msg) -Encoding UTF8 -ErrorAction Stop",
+    "    Add-Content -Path $logFile -Value ($ts + ' INFO  [burnglass] tray: ' + $msg) -Encoding UTF8 -ErrorAction Stop",
     '  } catch { }',
     '}',
+    // FROZEN name: an old v1 tray holds 'PulseTray<port>' during the handoff.
     "$mtx = New-Object System.Threading.Mutex($false, 'PulseTray" + port + "')",
     // 10s (not 0): during a version handoff the new instance starts before
     // the old one has released the mutex.
@@ -5779,196 +6311,133 @@ function trayScript(port) {
     // but exiting silently meant the dashboard reported the tray as enabled
     // with nothing on screen and nothing anywhere explaining why. Say it.
     'if (-not $mtx.WaitOne(10000)) {',
-    "  Write-PulseLog 'another instance already owns the icon on port " + port + "; this one is exiting. If no icon is visible, that owner is stale - end the powershell process running tray.ps1, or toggle the tray off and on in the Server panel.'",
+    "  Write-BgLog 'another instance already owns the icon on port " + port + "; this one is exiting. If no icon is visible, that owner is stale - end the powershell process running tray.ps1, or toggle the tray off and on in the Server panel.'",
     '  exit',
     '}',
     "$myVer = '" + PULSE_VERSION + "'",
     'Add-Type -AssemblyName System.Windows.Forms',
     'Add-Type -AssemblyName System.Drawing',
-    // GetHicon handles must be destroyed or every badge repaint leaks a GDI
-    // handle (2880/day at a 30s tick).
-    "Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public class PulseIconUtil{[DllImport(\"user32.dll\")]public static extern bool DestroyIcon(IntPtr h);}'",
+    // GetHicon handles must be destroyed once cloned into a managed Icon.
+    "Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public class BurnglassIconUtil{[DllImport(\"user32.dll\")]public static extern bool DestroyIcon(IntPtr h);}'",
     "$base = 'http://127.0.0.1:" + port + "'",
     '$ni = New-Object System.Windows.Forms.NotifyIcon',
-    // ---- Pulse's brand mark, drawn (see .github/assets/logo.svg) ----------
-    // Everything is painted at 32px, not the tray's nominal 16: Windows asks
-    // for 20/24/32 on scaled displays, and a 16px source upscaled to 24 is the
-    // mush the old ExtractAssociatedIcon path produced. Drawing our own also
-    // means the idle icon is PULSE — the packaged exe carries node's icon, so
-    // ExtractAssociatedIcon was showing node's logo in the user's tray.
-    "$PULSE_A = [System.Drawing.ColorTranslator]::FromHtml('#8F7FF5')",
-    "$PULSE_B = [System.Drawing.ColorTranslator]::FromHtml('#B3A5FF')",
-    '$ICO = 32',
-    'function New-PulseRounded([int]$size, [int]$r) {',
-    '  $p = New-Object System.Drawing.Drawing2D.GraphicsPath',
-    '  $d = $r * 2',
-    '  $p.AddArc(0, 0, $d, $d, 180, 90)',
-    '  $p.AddArc($size - $d, 0, $d, $d, 270, 90)',
-    '  $p.AddArc($size - $d, $size - $d, $d, $d, 0, 90)',
-    '  $p.AddArc(0, $size - $d, $d, $d, 90, 90)',
-    '  $p.CloseFigure()',
-    '  return $p',
+    // Windows asks for 16 at 100% scaling, 20 at 125%, 24 at 150%, 32 at 200%:
+    // take the smallest drawn size that covers it (never a non-integer
+    // rescale of a smaller drawing).
+    '$want = [System.Windows.Forms.SystemInformation]::SmallIconSize.Width',
+    '$px = 32',
+    'foreach ($c in @(16, 20, 24, 32)) { if ($c -ge $want) { $px = $c; break } }',
+    '$PNG = @{',
+    '  base = ' + pngTable('base'),
+    '  good = ' + pngTable('good'),
+    '  warn = ' + pngTable('warn'),
+    '  crit = ' + pngTable('crit'),
     '}',
-    // Shared canvas setup: the rounded gradient square every variant sits on.
-    'function New-PulseCanvas {',
-    '  $bmp = New-Object System.Drawing.Bitmap -ArgumentList $ICO, $ICO',
-    '  $g = [System.Drawing.Graphics]::FromImage($bmp)',
-    "  $g.SmoothingMode = 'AntiAlias'; $g.TextRenderingHint = 'AntiAlias'",
-    '  $g.Clear([System.Drawing.Color]::Transparent)',
-    '  $path = New-PulseRounded $ICO ([int]($ICO * 0.25))',
-    '  $grad = New-Object System.Drawing.Drawing2D.LinearGradientBrush(',
-    '    (New-Object System.Drawing.Point -ArgumentList 0, 0),',
-    '    (New-Object System.Drawing.Point -ArgumentList $ICO, $ICO), $PULSE_A, $PULSE_B)',
-    '  $g.FillPath($grad, $path)',
-    '  $grad.Dispose()',
-    '  return @{ bmp = $bmp; g = $g; path = $path }',
-    '}',
-    'function ConvertTo-PulseIcon($bmp) {',
+    'function New-BgIcon([string]$b64) {',
+    '  $bytes = [Convert]::FromBase64String($b64)',
+    '  $ms = New-Object System.IO.MemoryStream(,$bytes)',
+    '  $bmp = New-Object System.Drawing.Bitmap($ms)',
     '  $h = $bmp.GetHicon()',
     '  $icon = [System.Drawing.Icon]::FromHandle($h).Clone()',
-    '  [void][PulseIconUtil]::DestroyIcon($h)',
-    '  $bmp.Dispose()',
+    '  [void][BurnglassIconUtil]::DestroyIcon($h)',
+    '  $bmp.Dispose(); $ms.Dispose()',
     '  return $icon',
     '}',
-    // Idle / meters-off: the logo's heartbeat stroke, so the tray still says
-    // "Pulse" rather than falling back to a generic application icon.
-    'function New-PulseMark {',
-    '  $c = New-PulseCanvas',
-    '  $k = $ICO / 96.0',
-    '  $pen = New-Object System.Drawing.Pen -ArgumentList ([System.Drawing.Color]::White), ([float](7 * $k))',
-    "  $pen.StartCap = 'Round'; $pen.EndCap = 'Round'; $pen.LineJoin = 'Round'",
-    '  $pts = @()',
-    '  foreach ($p in @(@(16,48), @(30,48), @(37,27), @(51,76), @(58,48), @(80,48))) {',
-    '    $pts += New-Object System.Drawing.PointF -ArgumentList ([float]($p[0] * $k)), ([float]($p[1] * $k))',
-    '  }',
-    '  $c.g.DrawLines($pen, [System.Drawing.PointF[]]$pts)',
-    '  $pen.Dispose(); $c.g.Dispose(); $c.path.Dispose()',
-    '  return (ConvertTo-PulseIcon $c.bmp)',
-    '}',
-    '$baseIcon = New-PulseMark',
-    '$script:curIcon = $baseIcon',
-    '$ni.Icon = $baseIcon',
-    "$ni.Text = 'Pulse'",
+    '$icons = @{}',
+    "foreach ($k in @('base', 'good', 'warn', 'crit')) { $icons[$k] = New-BgIcon $PNG[$k][$px] }",
+    "$script:state = 'base'",
+    "$ni.Icon = $icons['base']",
+    "$ni.Text = 'Burnglass'",
     '$ni.Visible = $true',
-    "Write-PulseLog ('icon shown (v' + $myVer + ', port " + port + "). Windows hides new tray icons behind the ^ chevron until you drag one out or promote it in Taskbar settings.')",
-    // Live badge: the Claude 5h used-% painted on the icon, colored by level —
-    // the number is readable at a glance without hovering.
-    // The brand square keeps the identity; the number gives the exact figure;
-    // the bottom bar is FILLED to the same percentage, so the icon still reads
-    // as a gauge at 16px where two digits are barely legible. Colour and width
-    // encode the same thing on purpose — whichever one survives the scaling,
-    // the user still learns how much of the window is gone.
-    'function New-PulseBadge([string]$txt, [string]$hex, [double]$pct) {',
-    '  $c = New-PulseCanvas',
-    '  $bh = [float]($ICO * 0.26)',
-    '  $c.g.SetClip($c.path)',
-    '  $track = New-Object System.Drawing.SolidBrush -ArgumentList ([System.Drawing.Color]::FromArgb(90, 0, 0, 0))',
-    '  $c.g.FillRectangle($track, 0, ($ICO - $bh), $ICO, $bh)',
-    '  $track.Dispose()',
-    '  $fill = New-Object System.Drawing.SolidBrush -ArgumentList ([System.Drawing.ColorTranslator]::FromHtml($hex))',
-    '  $w = [float]($ICO * [Math]::Max(0.0, [Math]::Min(1.0, $pct / 100.0)))',
-    '  if ($w -gt 0) { $c.g.FillRectangle($fill, 0, ($ICO - $bh), $w, $bh) }',
-    '  $fill.Dispose(); $c.g.ResetClip()',
-    '  $fs = if ($txt.Length -ge 3) { $ICO * 0.44 } elseif ($txt.Length -eq 2) { $ICO * 0.56 } else { $ICO * 0.62 }',
-    "  $f = New-Object System.Drawing.Font -ArgumentList 'Segoe UI', $fs, ([System.Drawing.FontStyle]::Bold), ([System.Drawing.GraphicsUnit]::Pixel)",
-    '  $sf = New-Object System.Drawing.StringFormat',
-    "  $sf.Alignment = 'Center'; $sf.LineAlignment = 'Center'",
-    '  $rect = New-Object System.Drawing.RectangleF -ArgumentList 0, (-$ICO * 0.12), $ICO, $ICO',
-    '  $c.g.DrawString($txt, $f, [System.Drawing.Brushes]::White, $rect, $sf)',
-    '  $f.Dispose(); $c.g.Dispose(); $c.path.Dispose()',
-    '  return (ConvertTo-PulseIcon $c.bmp)',
+    "Write-BgLog ('icon shown (v' + $myVer + ', port " + port + ", ' + $px + 'px). Windows hides new tray icons behind the ^ chevron until you drag one out or promote it in Taskbar settings.')",
+    'function Set-BgState([string]$st) {',
+    '  if ($st -ne $script:state) { $ni.Icon = $icons[$st]; $script:state = $st }',
     '}',
-    'function Set-PulseIcon($icon) {',
-    '  $old = $script:curIcon',
-    '  $ni.Icon = $icon',
-    '  $script:curIcon = $icon',
-    '  if ($old -and -not [object]::ReferenceEquals($old, $baseIcon) -and -not [object]::ReferenceEquals($old, $icon)) { $old.Dispose() }',
+    // base = meters off / no login / stale / loading; otherwise the live
+    // 5-hour used-% against the dashboard's own alert thresholds.
+    'function Get-BgState($s) {',
+    '  $m = $s.meters',
+    "  if (-not $m -or $m.claudeFiveHour -eq $null -or $m.claudeFiveHourStale) { return 'base' }",
+    '  $p = [double]$m.claudeFiveHour',
+    '  $w = 80.0; $c = 95.0',
+    '  if ($s.trayLevels) { $w = [double]$s.trayLevels.warn; $c = [double]$s.trayLevels.crit }',
+    "  if ($p -ge $c) { return 'crit' }",
+    "  if ($p -ge $w) { return 'warn' }",
+    "  return 'good'",
     '}',
     // Left-click opens the mini overview as a chromeless app window (Edge is
     // on every Windows 11 box); falls back to the default browser.
-    'function Open-PulseMini {',
+    'function Open-BgMini {',
     "  try { Start-Process 'msedge' -ArgumentList ('--app=' + $base + '/#mini'), '--window-size=380,800' -ErrorAction Stop }",
     '  catch { Start-Process ($base + \'/#mini\') }',
     '}',
     '$menu = New-Object System.Windows.Forms.ContextMenuStrip',
     "[void]$menu.Items.Add('Open dashboard', $null, { Start-Process ($base + '/') })",
-    "[void]$menu.Items.Add('Open mini overview', $null, { Open-PulseMini })",
+    "[void]$menu.Items.Add('Open mini overview', $null, { Open-BgMini })",
     "[void]$menu.Items.Add('-')",
-    "[void]$menu.Items.Add('Stop Pulse', $null, { try { Invoke-RestMethod -Method Post -Uri ($base + '/api/shutdown') -Headers @{ 'X-Pulse' = '1' } -TimeoutSec 3 | Out-Null } catch {}; $ni.Visible = $false; [System.Windows.Forms.Application]::Exit() })",
+    // X-Pulse is the FROZEN mutation header (a v1 server only accepts it).
+    "[void]$menu.Items.Add('Stop Burnglass', $null, { try { Invoke-RestMethod -Method Post -Uri ($base + '/api/shutdown') -Headers @{ 'X-Pulse' = '1' } -TimeoutSec 3 | Out-Null } catch {}; $ni.Visible = $false; [System.Windows.Forms.Application]::Exit() })",
     "[void]$menu.Items.Add('Exit tray', $null, { $ni.Visible = $false; [System.Windows.Forms.Application]::Exit() })",
     '$ni.ContextMenuStrip = $menu',
-    "$ni.add_MouseClick({ if ($_.Button -eq [System.Windows.Forms.MouseButtons]::Left) { Open-PulseMini } })",
+    "$ni.add_MouseClick({ if ($_.Button -eq [System.Windows.Forms.MouseButtons]::Left) { Open-BgMini } })",
     '$script:fails = 0',
-    'function Update-PulseTray {',
+    'function Update-BgTray {',
     '  try {',
     "    $s = Invoke-RestMethod -Uri ($base + '/api/statusline') -TimeoutSec 3",
     // The dashboard toggle turns the tray off by flipping this field.
-    "    if ($s.trayEnabled -eq $false) { Write-PulseLog 'turned off in the dashboard - hiding the icon and exiting.'; $ni.Visible = $false; [System.Windows.Forms.Application]::Exit(); return }",
+    "    if ($s.trayEnabled -eq $false) { Write-BgLog 'turned off in the dashboard - hiding the icon and exiting.'; $ni.Visible = $false; [System.Windows.Forms.Application]::Exit(); return }",
     // Server updated under us: the server rewrote tray.ps1, so relaunch
     // from the fresh file and hand over the mutex.
     '    if ($s.version -and $s.version -ne $myVer) {',
-    "      Write-PulseLog ('server is now v' + $s.version + ' (icon was built for v' + $myVer + ') - relaunching from the rewritten script.')",
+    "      Write-BgLog ('server is now v' + $s.version + ' (icon was built for v' + $myVer + ') - relaunching from the rewritten script.')",
     "      Start-Process 'powershell.exe' -WindowStyle Hidden -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', $PSCommandPath",
     '      $ni.Visible = $false; [System.Windows.Forms.Application]::Exit(); return',
     '    }',
-    "    $t = 'Pulse'",
-    "    if ($s.today) { $t = 'Pulse - today $' + [math]::Round([double]$s.today.cost, 2) }",
+    "    $t = 'Burnglass'",
+    "    if ($s.today) { $t = 'Burnglass - today $' + [math]::Round([double]$s.today.cost, 2) }",
     '    $m = $s.meters',
     "    if ($m -and $m.claudeFiveHour -ne $null) { $t = $t + ' - 5h ' + $m.claudeFiveHour + '%' }",
     "    if ($m -and $m.claudeWeekly -ne $null) { $t = $t + ' - wk ' + $m.claudeWeekly + '%' }",
     '    if ($t.Length -gt 63) { $t = $t.Substring(0, 63) }',
     '    $ni.Text = $t',
-    '    if ($m -and $m.claudeFiveHour -ne $null) {',
-    '      $p = [int]$m.claudeFiveHour',
-    "      $txt = if ($p -ge 100) { '!' } else { [string]$p }",
-    "      $hex = if ($p -ge 85) { '#f27878' } elseif ($p -ge 60) { '#e0a132' } else { '#22b892' }",
-    '      Set-PulseIcon (New-PulseBadge $txt $hex $p)',
-    '    } else { Set-PulseIcon $baseIcon }',
+    '    Set-BgState (Get-BgState $s)',
     '    $script:fails = 0',
     '  } catch {',
     '    $script:fails = $script:fails + 1',
-    "    $ni.Text = 'Pulse - server not responding'",
-    "    if ($script:fails -ge 6) { Write-PulseLog 'server unreachable for 6 polls (~3 min) - exiting. Start Pulse again and the icon comes back.'; $ni.Visible = $false; [System.Windows.Forms.Application]::Exit() }",
+    "    $ni.Text = 'Burnglass - server not responding'",
+    "    Set-BgState 'base'",
+    "    if ($script:fails -ge 6) { Write-BgLog 'server unreachable for 6 polls (~3 min) - exiting. Start Burnglass again and the icon comes back.'; $ni.Visible = $false; [System.Windows.Forms.Application]::Exit() }",
     '  }',
     '}',
     '$timer = New-Object System.Windows.Forms.Timer',
     '$timer.Interval = 30000',
-    '$timer.add_Tick({ Update-PulseTray })',
-    'Update-PulseTray', // first paint immediately, not 30s in
+    '$timer.add_Tick({ Update-BgTray })',
+    'Update-BgTray', // first paint immediately, not 30s in
     '$timer.Start()',
     '[System.Windows.Forms.Application]::Run()',
     '$ni.Visible = $false',
   ].join('\r\n') + '\r\n';
 }
 
-
-
-
-
-
-
-
-
-
 function startTray(port) {
   trayDesired = true;
   // Test hook FIRST, before the platform gate: its log line is the e2e proof
   // that a boot path reached startTray at all, and the suites run on Linux —
   // behind the win32 check the boot-path regression guard could never fire.
-  if (process.env.PULSE_NO_TRAY_SPAWN) {
-    console.log('[pulse] tray spawn suppressed (PULSE_NO_TRAY_SPAWN — test hook)');
+  if (envv('NO_TRAY_SPAWN')) {
+    console.log('[burnglass] tray spawn suppressed (BURNGLASS_NO_TRAY_SPAWN / PULSE_NO_TRAY_SPAWN — test hook)');
     return;
   }
   if (process.platform !== 'win32') {
-    console.log('[pulse] --tray is Windows-only (notification-area icon) — ignored on this OS.');
+    console.log('[burnglass] --tray is Windows-only (notification-area icon) — ignored on this OS.');
     return;
   }
-  const scriptPath = path.join(pulseHome(), 'tray.ps1');
+  const scriptPath = path.join(appHome(), 'tray.ps1');
   try {
-    fs.mkdirSync(pulseHome(), { recursive: true });
+    fs.mkdirSync(appHome(), { recursive: true });
     fs.writeFileSync(scriptPath, trayScript(port));
   } catch (e) {
-    console.warn('[pulse] tray: could not write script: ' + e.message);
+    console.warn('[burnglass] tray: could not write script: ' + e.message);
     return;
   }
   try {
@@ -5978,11 +6447,11 @@ function startTray(port) {
     // Spawn failures surface as an ASYNC 'error' event, not a throw — without
     // this listener a blocked/missing powershell.exe would crash the whole
     // server (and with {"tray": true} persisted, crash-loop every start).
-    child.on('error', (e) => console.warn('[pulse] tray failed to start: ' + e.message));
+    child.on('error', (e) => console.warn('[burnglass] tray failed to start: ' + e.message));
     child.unref();
-    console.log('[pulse] tray icon started (Windows notification area) — right-click it for the menu.');
+    console.log('[burnglass] tray icon started (Windows notification area) — right-click it for the menu.');
   } catch (e) {
-    console.warn('[pulse] tray failed to start: ' + e.message);
+    console.warn('[burnglass] tray failed to start: ' + e.message);
   }
 }
 // ---- OPENUSAGE COMPANION (opt-in, Windows) -------------------------------
@@ -6035,15 +6504,33 @@ function openusageRunning(exe, cb) {
     cb(false);
   }
 }
+// Any of several image names running? One unfiltered tasklist (IMAGENAME
+// filters can't be OR-ed) — still a Windows builtin, still zero-dep.
+function imagesRunning(names, cb) {
+  const want = new Set(names.map((n) => String(n).toLowerCase()));
+  try {
+    require('child_process').execFile('tasklist', ['/FO', 'CSV', '/NH'],
+      { windowsHide: true, maxBuffer: 8 * 1024 * 1024 }, (err, out) => {
+        if (err || typeof out !== 'string') return cb(false);
+        for (const line of out.split(/\r?\n/)) {
+          const m = /^"([^"]+)"/.exec(line);
+          if (m && want.has(m[1].toLowerCase())) return cb(true);
+        }
+        cb(false);
+      });
+  } catch {
+    cb(false);
+  }
+}
 function launchOpenUsage() {
   if (process.platform !== 'win32') return;
-  if (process.env.PULSE_NO_OPENUSAGE_SPAWN) {
-    console.log('[pulse] openusage spawn suppressed (PULSE_NO_OPENUSAGE_SPAWN — test hook)');
+  if (envv('NO_OPENUSAGE_SPAWN')) {
+    console.log('[burnglass] openusage spawn suppressed (BURNGLASS_NO_OPENUSAGE_SPAWN — test hook)');
     return;
   }
   const exe = findOpenUsage();
   if (!exe) {
-    console.warn('[pulse] openusage: OpenUsageTray.exe not found — set "openusagePath" in ~/.pulse/config.json (get it from github.com/CheesyPoofs346/openusage-windows/releases)');
+    console.warn('[burnglass] openusage: OpenUsageTray.exe not found — set "openusagePath" in ' + homeLabel('config.json') + ' (get it from github.com/CheesyPoofs346/openusage-windows/releases)');
     return;
   }
   openusageRunning(exe, (running) => {
@@ -6062,11 +6549,11 @@ function launchOpenUsage() {
         { detached: true, stdio: 'ignore', cwd: path.dirname(exe), env });
       // Same async-'error' trap as the tray: a bad/blocked exe must warn,
       // not crash the server (and crash-loop every start via the config).
-      child.on('error', (e) => console.warn('[pulse] openusage failed to start: ' + e.message));
+      child.on('error', (e) => console.warn('[burnglass] openusage failed to start: ' + e.message));
       child.unref();
-      console.log('[pulse] openusage companion started (' + exe + ')');
+      console.log('[burnglass] openusage companion started (' + exe + ')');
     } catch (e) {
-      console.warn('[pulse] openusage failed to start: ' + e.message);
+      console.warn('[burnglass] openusage failed to start: ' + e.message);
     }
   });
 }
@@ -6087,10 +6574,20 @@ function findPulseStrip() {
   if (key) {
     resolved = isFile(key) ? key : null; // explicit-but-missing must NOT fall back
   } else {
+    // New name first at every spot, then the v1 name (upgraders put
+    // pulse-strip.exe beside pulse.exe or in ~/.pulse/bin — the 105 MB bin/
+    // folder is deliberately NOT copied by the migration, so it is looked up
+    // in place).
+    const exeDir = path.dirname(process.execPath);
+    const legacy = legacyCompatHome();
     const candidates = [
-      path.join(path.dirname(process.execPath), 'pulse-strip.exe'), // beside the packaged exe
-      path.join(pulseHome(), 'bin', 'pulse-strip.exe'),
-      path.join(__dirname, 'strip', 'dist-strip', 'pulse-strip.exe'), // dev builds
+      path.join(exeDir, 'burnglass-strip.exe'), // beside the packaged exe
+      path.join(exeDir, 'pulse-strip.exe'),
+      path.join(appHome(), 'bin', 'burnglass-strip.exe'),
+      path.join(appHome(), 'bin', 'pulse-strip.exe'),
+      ...(legacy ? [path.join(legacy, 'bin', 'burnglass-strip.exe'), path.join(legacy, 'bin', 'pulse-strip.exe')] : []),
+      path.join(__dirname, 'strip', 'dist-strip', 'burnglass-strip.exe'), // dev builds
+      path.join(__dirname, 'strip', 'dist-strip', 'pulse-strip.exe'),
     ];
     for (const p of candidates) {
       if (isFile(p)) { resolved = p; break; }
@@ -6101,47 +6598,62 @@ function findPulseStrip() {
 }
 function launchPulseStrip() {
   if (process.platform !== 'win32') return;
-  if (process.env.PULSE_NO_STRIP_SPAWN) {
-    console.log('[pulse] strip spawn suppressed (PULSE_NO_STRIP_SPAWN — test hook)');
+  if (envv('NO_STRIP_SPAWN')) {
+    console.log('[burnglass] strip spawn suppressed (BURNGLASS_NO_STRIP_SPAWN — test hook)');
     return;
   }
   const exe = findPulseStrip();
   if (!exe) {
-    console.warn('[pulse] strip: pulse-strip.exe not found — download it from the Pulse release next to your server binary, or set "stripPath" in ~/.pulse/config.json');
+    console.warn('[burnglass] strip: burnglass-strip.exe not found — download it from the Burnglass release next to your server binary, or set "stripPath" in ' + homeLabel('config.json'));
     return;
   }
-  openusageRunning(exe, (running) => { // same tasklist IMAGENAME dedupe
+  // Dedupe on BOTH image names: an old pulse-strip.exe still on the taskbar
+  // means don't start burnglass-strip.exe (the frozen PulseStrip_SingleInstance
+  // mutex would bounce it anyway, but this avoids the flash).
+  imagesRunning(['burnglass-strip.exe', 'pulse-strip.exe', path.basename(exe)], (running) => {
     if (running) return;
     try {
+      // The strip resolves its home from BURNGLASS_HOME first, so a pinned or
+      // degraded home reaches it (v1's strip hard-coded ~/.pulse).
+      const env = Object.assign({}, process.env, { BURNGLASS_HOME: appHome() });
       const child = require('child_process').spawn(exe, [],
-        { detached: true, stdio: 'ignore', cwd: path.dirname(exe) });
-      child.on('error', (e) => console.warn('[pulse] strip failed to start: ' + e.message));
+        { detached: true, stdio: 'ignore', cwd: path.dirname(exe), env });
+      child.on('error', (e) => console.warn('[burnglass] strip failed to start: ' + e.message));
       child.unref();
-      console.log('[pulse] strip started (' + exe + ')');
+      console.log('[burnglass] strip started (' + exe + ')');
     } catch (e) {
-      console.warn('[pulse] strip failed to start: ' + e.message);
+      console.warn('[burnglass] strip failed to start: ' + e.message);
     }
   });
 }
 
 // ---- RUN AT STARTUP (opt-in, Windows) -------------------------------------
-// The ONE thing Pulse deliberately writes outside ~/.pulse: a value under the
+// The ONE thing Burnglass deliberately writes outside ~/.burnglass: a value under the
 // per-user Run key. That is inherent — a startup entry has to live where
 // Windows looks for one. It stays honest by being opt-in, reversible from the
 // same UI/CLI that created it, and HKCU-only (no admin rights, no machine-wide
 // state). Written with reg.exe, a Windows builtin, via execFile with an argv
 // array (never a shell string) so the quoted path can't be re-parsed.
 const STARTUP_RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
+// FROZEN at 'Pulse' across the rename (it is invisible — Settings > Startup
+// shows the exe, not the value name). One name = one slot: the installer's
+// startup task, --install, and this toggle keep overwriting the SAME value as
+// in v1, so a portable v1 entry and a v2 install can never both launch at
+// sign-in, and a still-v1 Inno uninstaller (which only knows 'Pulse') can
+// still remove whatever v2 wrote.
 const STARTUP_VALUE_NAME = 'Pulse';
 // Test hook: PULSE_STARTUP_STUB=<file> routes the whole feature through a JSON
 // file instead of the registry, so the suites can exercise enable/disable
 // without ever touching a real machine's Run key (same convention as
-// PULSE_METERS_API / PULSE_DISCORD_IPC / PULSE_MODES_FILE).
-function startupStubFile() { return process.env.PULSE_STARTUP_STUB || ''; }
+// PULSE_METERS_API / PULSE_DISCORD_IPC / PULSE_MODES_FILE; BURNGLASS_STARTUP_STUB
+// is the v2 spelling).
+function startupStubFile() { return envv('STARTUP_STUB') || ''; }
 // `--no-open` suppresses the browser, so signing in starts the server silently.
 // From a source checkout the value has to carry node + the script path; that
 // still works, it's just tied to wherever node lives.
-function startupCommand() {
+// exe: --install passes the INSTALLED copy it just wrote.
+function startupCommand(exe) {
+  if (exe) return `"${exe}" --no-open`;
   return seaApi
     ? `"${process.execPath}" --no-open`
     : `"${process.execPath}" "${__filename}" --no-open`;
@@ -6176,7 +6688,7 @@ function readStartupEntry() {
     if (!e || e.status !== 1) {
       if (!startupWarned) {
         startupWarned = true;
-        console.warn('[pulse] could not read the startup registry entry: ' + ((e && e.message) || e));
+        console.warn('[burnglass] could not read the startup registry entry: ' + ((e && e.message) || e));
       }
     }
     return { enabled: false, command: '' };
@@ -6196,8 +6708,8 @@ function startupForPayload() {
   return { supported: startupSupported(), enabled: !!startupState().enabled };
 }
 // Returns { ok, command, error } — callers report, never throw.
-function setStartup(on) {
-  const command = startupCommand();
+function setStartup(on, exe) {
+  const command = startupCommand(exe);
   startupMemo = { at: 0, state: null }; // a write must never be shadowed by the read memo
   const stub = startupStubFile();
   if (stub) {
@@ -6251,7 +6763,7 @@ function startServer(port, host, opts) {
           if (names.length) sourceFilter = new Set(names);
         }
         const payload = buildSummary(sourceFilter);
-        console.log(`[pulse] /api/summary built in ${payload.buildMs}ms`);
+        console.log(`[burnglass] /api/summary built in ${payload.buildMs}ms`);
         // charset matters: PowerShell 5.1 consumers (the tray) decode JSON as
         // Latin-1 without it, mojibaking "·" in meter labels.
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -6281,7 +6793,7 @@ function startServer(port, host, opts) {
         if (q.get('format') === 'json') {
           res.writeHead(200, {
             'Content-Type': 'application/json; charset=utf-8',
-            'Content-Disposition': 'attachment; filename="pulse-export-' + stamp + '.json"',
+            'Content-Disposition': 'attachment; filename="burnglass-export-' + stamp + '.json"',
             'Cache-Control': 'no-store',
           });
           res.end(JSON.stringify(payload, null, 2));
@@ -6304,8 +6816,8 @@ function startServer(port, host, opts) {
         // Sessions is the whole-session recent list, not period-scoped — its
         // filename must not imply a period.
         const fname = data === 'sessions'
-          ? 'pulse-sessions-' + stamp + '.csv'
-          : 'pulse-' + data + '-' + period.key + '-' + stamp + '.csv';
+          ? 'burnglass-sessions-' + stamp + '.csv'
+          : 'burnglass-' + data + '-' + period.key + '-' + stamp + '.csv';
         res.writeHead(200, {
           'Content-Type': 'text/csv; charset=utf-8',
           'Content-Disposition': 'attachment; filename="' + fname + '"',
@@ -6321,7 +6833,7 @@ function startServer(port, host, opts) {
       }
       if (route === '/api/shutdown') {
         if (!allowMutation(req, res)) return;
-        console.log('[pulse] stop requested — shutting down');
+        console.log('[burnglass] stop requested — shutting down');
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, stopping: true }));
         setTimeout(() => {
@@ -6337,7 +6849,7 @@ function startServer(port, host, opts) {
         // both endpoints. Pre-1.6.0 configs with accountMeters alone never
         // gain the ChatGPT call until the user re-toggles here.
         writeConfig({ accountMeters: on, codexAccountUsage: on });
-        console.log('[pulse] account meters ' + (on ? 'enabled' : 'disabled') + ' from the dashboard');
+        console.log('[burnglass] account meters ' + (on ? 'enabled' : 'disabled') + ' from the dashboard');
         if (!on) {
           metersState.status = 'off';
           metersState.buckets = [];
@@ -6391,7 +6903,7 @@ function startServer(port, host, opts) {
         if (!allowMutation(req, res)) return;
         const on = route.endsWith('enable');
         writeConfig({ discordPresence: on });
-        console.log('[pulse] discord presence ' + (on ? 'enabled' : 'disabled') + ' from the dashboard');
+        console.log('[burnglass] discord presence ' + (on ? 'enabled' : 'disabled') + ' from the dashboard');
         if (!on) {
           discordSetActivity(null); // clear the presence before dropping the socket
           discordDisconnect();
@@ -6427,7 +6939,7 @@ function startServer(port, host, opts) {
           }
           if (!Object.keys(patch).length) return fail('no image slots given (' + Object.keys(DISCORD_IMAGE_SLOTS).join(', ') + ')');
           writeConfig(patch);
-          console.log('[pulse] discord images updated from the dashboard (' +
+          console.log('[burnglass] discord images updated from the dashboard (' +
             Object.keys(patch).map((k) => k + '=' + (patch[k] ? 'set' : 'default')).join(', ') + ')');
           // Publish now rather than on the next 15s tick.
           discordLastActivity = '';
@@ -6442,7 +6954,7 @@ function startServer(port, host, opts) {
         const on = route.endsWith('enable');
         writeConfig({ tray: on });
         trayDesired = on;
-        console.log('[pulse] tray ' + (on ? 'enabled' : 'disabled') + ' from the dashboard');
+        console.log('[burnglass] tray ' + (on ? 'enabled' : 'disabled') + ' from the dashboard');
         // Enable starts it right now (Windows only). Disable is picked up by
         // the running tray's own poll: the feed carries trayEnabled.
         if (on && process.platform === 'win32' && boundLoopback) startTray(port);
@@ -6456,7 +6968,7 @@ function startServer(port, host, opts) {
         // Like openusage: NO path parameter — a spawn path must come from the
         // user-gated config file, never from a loopback-reachable route.
         writeConfig({ strip: on });
-        console.log('[pulse] strip ' + (on ? 'enabled' : 'disabled') + ' from the dashboard');
+        console.log('[burnglass] strip ' + (on ? 'enabled' : 'disabled') + ' from the dashboard');
         // Enable launches now; disable is picked up by the strip's own
         // statusline poll (stripEnabled:false -> it exits itself).
         if (on && process.platform === 'win32' && boundLoopback) launchPulseStrip();
@@ -6472,7 +6984,7 @@ function startServer(port, host, opts) {
           // Consent withdrawn: stop fetching and clear the live numbers. The
           // stored key is left alone (re-enabling shouldn't demand a re-paste)
           // — clearing it is an explicit enable with an empty key. The task
-          // cache in ~/.pulse/meshy.json also stays: it is the user's own
+          // cache in ~/.burnglass/meshy.json also stays: it is the user's own
           // local history, and keeping it means re-enabling doesn't re-page
           // the whole account.
           meshyState.status = 'disabled';
@@ -6481,7 +6993,7 @@ function startServer(port, host, opts) {
           meshyState.fetchedAt = null;
           meshyState.nextAttemptAt = 0;
           meshyState.error = null;
-          console.log('[pulse] meshy credits disabled from the dashboard');
+          console.log('[burnglass] meshy credits disabled from the dashboard');
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, meshy: meshyForPayload() }));
           return;
@@ -6513,7 +7025,7 @@ function startServer(port, host, opts) {
           }
           writeConfig(patch);
           // Deliberately logs the ACT, never the key or any part of it.
-          console.log('[pulse] meshy credits enabled from the dashboard' +
+          console.log('[burnglass] meshy credits enabled from the dashboard' +
             (Object.prototype.hasOwnProperty.call(patch, 'meshyApiKey')
               ? (patch.meshyApiKey ? ' (api key set)' : ' (api key cleared)') : ''));
           // A new key deserves a fresh attempt: drop the 401 latch and any
@@ -6536,7 +7048,7 @@ function startServer(port, host, opts) {
         // what gets written into the Run key comes from THIS binary's own
         // path, never from anything a loopback caller supplies.
         const r = setStartup(on);
-        console.log('[pulse] run at startup ' + (on ? 'enabled' : 'disabled') + ' from the dashboard'
+        console.log('[burnglass] run at startup ' + (on ? 'enabled' : 'disabled') + ' from the dashboard'
           + (r.ok ? '' : ' — FAILED: ' + r.error));
         res.writeHead(r.ok ? 200 : 500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(r.ok
@@ -6550,9 +7062,9 @@ function startServer(port, host, opts) {
         // Deliberately NO path parameter: allowMutation proves loopback, not
         // same-user — any local account can reach 127.0.0.1, and a spawn path
         // must not be settable by a different user. openusagePath comes only
-        // from ~/.pulse/config.json, which the OS user-gates.
+        // from ~/.burnglass/config.json, which the OS user-gates.
         writeConfig({ openusage: on });
-        console.log('[pulse] openusage companion ' + (on ? 'enabled' : 'disabled') + ' from the dashboard');
+        console.log('[burnglass] openusage companion ' + (on ? 'enabled' : 'disabled') + ' from the dashboard');
         // Enable launches it right now (Windows only); disable only stops
         // future auto-launches — Pulse never kills the user's own app.
         if (on && process.platform === 'win32' && boundLoopback) launchOpenUsage();
@@ -6568,7 +7080,7 @@ function startServer(port, host, opts) {
         // amount <= 0 / blank / NaN clears the budget.
         const target = isFinite(amount) && amount > 0 ? amount : null;
         writeConfig({ budget: target, budgetPeriod: period });
-        console.log('[pulse] budget ' + (target ? '$' + target + '/' + period : 'cleared') + ' from the dashboard');
+        console.log('[burnglass] budget ' + (target ? '$' + target + '/' + period : 'cleared') + ' from the dashboard');
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, budget: target ? { target, period } : null }));
         return;
@@ -6595,11 +7107,11 @@ function startServer(port, host, opts) {
         // could cut a multi-byte escape and leave a fragment). An unsanitized
         // label reaches the terminal via --summary OUTSIDE the colour gate, so
         // an embedded ESC would run as an ANSI command (\x1b[2J clears the
-        // screen) even under NO_COLOR, and be replayed from ~/.pulse/pulse.log.
+        // screen) even under NO_COLOR, and be replayed from ~/.burnglass/burnglass.log.
         const rawLabel = typeof q.label === 'string' ? q.label.replace(CONTROL_CHARS, '').trim() : '';
         const planLabel = planCost && rawLabel ? rawLabel.slice(0, 60) : null;
         writeConfig({ planCost, planLabel });
-        console.log('[pulse] plan ' + (planCost ? '$' + planCost + '/mo' + (planLabel ? ' (' + planLabel + ')' : '') : 'cleared') + ' from the dashboard');
+        console.log('[burnglass] plan ' + (planCost ? '$' + planCost + '/mo' + (planLabel ? ' (' + planLabel + ')' : '') : 'cleared') + ' from the dashboard');
         // Echo the payload block, not just the config, so the caller can render
         // the new state without a second round trip. writeConfig busted the
         // summary memo, so this build already reflects the new plan. If the
@@ -6635,9 +7147,9 @@ function startServer(port, host, opts) {
 
       // Frontend not built.
       res.writeHead(503, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end('<h1>Pulse frontend not built</h1><p>Run <code>npm run build</code> (installs and builds <code>web/</code>), then reload.</p>');
+      res.end('<h1>Burnglass frontend not built</h1><p>Run <code>npm run build</code> (installs and builds <code>web/</code>), then reload.</p>');
     } catch (err) {
-      console.error('[pulse] request error:', err && err.stack ? err.stack : err);
+      console.error('[burnglass] request error:', err && err.stack ? err.stack : err);
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: String(err && err.message || err) }));
     }
@@ -6652,6 +7164,11 @@ function startServer(port, host, opts) {
         setTimeout(() => { try { server.listen(port, host); } catch (_) {} }, 400);
         return;
       }
+      // The bind is lost for good. A daemon whose log was deferred for the
+      // migration opens it now (in the still-legacy home — the migration is
+      // NOT run: this process never owned the port), so the reason lands
+      // somewhere a hidden process can be diagnosed from.
+      if (logOpenDeferred) { logOpenDeferred = false; openLogFile(true); }
       diagnosePortConflict(port);
       return;
     }
@@ -6661,12 +7178,26 @@ function startServer(port, host, opts) {
   // Local-only by default: bind to loopback (§2). A non-loopback host is an
   // explicit opt-in (--host / HOST) for VPS/LAN use and is warned about.
   server.listen(port, host, () => {
-    console.log(`\n  Pulse v${PULSE_VERSION} — Claude Code usage dashboard`);
+    // FIRST, before anything reads the home: this process owns the port now,
+    // so it is the one that may copy ~/.pulse → ~/.burnglass (a v2 that lost
+    // the bind to a running v1 must not use the migration up — see
+    // migrateHome). Every earlier read resolved to ~/.pulse, whose content is
+    // exactly what was just copied.
+    migrateHome();
+    if (logOpenDeferred) { logOpenDeferred = false; openLogFile(true); }
+    console.log(`\n  Burnglass v${PULSE_VERSION} — local usage dashboard for Claude Code, Codex and more`);
     console.log(`  reading (read-only): ${claudeDir()}`);
+    console.log(`  home: ${appHome()}${homeMigration && homeMigration.status === 'failed' ? '  (the old Pulse folder — the move to ~/.burnglass failed, retried next start)' : ''}`);
     console.log(`  listening: http://${host}:${port}${IS_DAEMON_CHILD ? '  (background)' : ''}`);
     // Record where this instance is listening so the short-lived `--statusline`
-    // process (and any other helper) can find it. Writes ONLY to ~/.pulse.
+    // process (and any other helper) can find it. Writes ONLY to the home
+    // (+ the legacy server.json mirror when that file exists).
     writeRuntimeFile(port, host);
+    // A still-running v1 tray relaunches ~/.pulse/tray.ps1 on the version
+    // change — keep an existing copy current (any platform: the file check
+    // is the gate, which also lets the Linux suites assert it).
+    refreshLegacyTrayScript(port);
+    warnBrokenIntegrations();
     // Packaged exe on Windows: open the dashboard for the user.
     if (seaApi && process.platform === 'win32' && (!opts || opts.open !== false) && LOOPBACK_HOSTS.has(host)) {
       openBrowser(port);
@@ -6677,9 +7208,9 @@ function startServer(port, host, opts) {
     // spawn is skipped (non-loopback bind): a surviving pre-1.24 strip
     // version-handoff relaunches from this file, and without the rewrite it
     // would respawn its own old script in a loop.
-    if (process.platform === 'win32' && !process.env.PULSE_NO_TRAY_SPAWN &&
+    if (process.platform === 'win32' && !envv('NO_TRAY_SPAWN') &&
         ((opts && opts.tray) || readConfig().tray === true)) {
-      try { fs.writeFileSync(path.join(pulseHome(), 'tray.ps1'), trayScript(port)); } catch {}
+      try { fs.mkdirSync(appHome(), { recursive: true }); fs.writeFileSync(path.join(appHome(), 'tray.ps1'), trayScript(port)); } catch {}
     }
     // Spawn from the CONFIG too, not just the --tray flag. `tray: true` is a
     // persisted preference (the dashboard toggle writes it), so a flag-only
@@ -6687,9 +7218,9 @@ function startServer(port, host, opts) {
     // reporting enabled:true — the toggle looked on with nothing on screen.
     // Matches how openusage/strip launch from config on the next two lines.
     if (((opts && opts.tray) || readConfig().tray === true) && LOOPBACK_HOSTS.has(host)) startTray(port);
-    // OpenUsage companion (opt-in) — start the taskbar app alongside Pulse.
+    // OpenUsage companion (opt-in) — start the taskbar app alongside Burnglass.
     if (readConfig().openusage === true && LOOPBACK_HOSTS.has(host)) launchOpenUsage();
-    // Pulse Strip (opt-in) — Pulse's own taskbar strip companion.
+    // Burnglass Strip (opt-in) — the own taskbar strip companion.
     if (readConfig().strip === true && LOOPBACK_HOSTS.has(host)) launchPulseStrip();
     if (LOOPBACK_HOSTS.has(host)) {
       console.log(`  open: http://localhost:${port}\n`);
@@ -6726,7 +7257,7 @@ function startServer(port, host, opts) {
 // Double-clicking pulse.exe should not leave a console window around: the
 // visible parent preflights the port (so conflicts are readable — including
 // auto-replacing an older running Pulse), then hands off to a hidden child
-// (--daemon-child) that logs to ~/.pulse/pulse.log and is controlled from the
+// (--daemon-child) that logs to ~/.burnglass/burnglass.log and is controlled from the
 // dashboard's Server panel. --no-daemon keeps it in the console.
 // ---------------------------------------------------------------------------
 function shouldDaemonize(args) {
@@ -6738,25 +7269,28 @@ function daemonize(args, port, host) {
     // Same version OR NEWER already running → just open its dashboard. Never
     // auto-replace a newer Pulse with an older exe (silent downgrade).
     if (inst.kind === 'pulse' && versionNum(inst.version) >= versionNum(PULSE_VERSION)) {
-      console.log(`[pulse] v${inst.version || PULSE_VERSION} is already running — opening the dashboard.`);
-      openBrowser(port);
+      // --no-open is what the sign-in (Run key) launch passes: a second copy
+      // racing the first at sign-in must not pop a browser window.
+      console.log(`[burnglass] v${inst.version || PULSE_VERSION} is already running` +
+        (args.noOpen ? ' — nothing to do (--no-open).' : ' — opening the dashboard.'));
+      if (!args.noOpen) openBrowser(port);
       setTimeout(() => process.exit(0), 1200);
       return;
     }
     if (inst.kind === 'pulse') {
       // An OLDER Pulse holds the port. v1.1.0+ accepts a local stop request;
       // anything older must be closed by hand.
-      console.log(`[pulse] replacing running Pulse ${inst.version ? 'v' + inst.version : '(pre-1.1.0)'}…`);
+      console.log(`[burnglass] replacing running ${instanceName(inst.version)} ${inst.version ? 'v' + inst.version : '(pre-1.1.0)'}…`);
       requestShutdown(port, (ok) => {
         if (!ok) {
-          console.error('\n[pulse] The running Pulse is too old to stop automatically.');
-          console.error('[pulse] Close it (Task Manager → pulse.exe → End task), then run this again.');
+          console.error('\n[burnglass] The running Pulse is too old to stop automatically.');
+          console.error('[burnglass] Close it (Task Manager → pulse.exe → End task), then run this again.');
           holdOpenAndExit(1);
           return;
         }
         waitForPortFree(port, 8000, (free) => {
           if (!free) {
-            console.error('[pulse] The old instance did not exit — close it manually and retry.');
+            console.error('[burnglass] The old instance did not exit — close it manually and retry.');
             holdOpenAndExit(1);
             return;
           }
@@ -6766,8 +7300,8 @@ function daemonize(args, port, host) {
       return;
     }
     if (inst.kind === 'other') {
-      console.error(`\n[pulse] Port ${port} is already in use by another program.`);
-      console.error('[pulse] Try: pulse.exe --port 4748');
+      console.error(`\n[burnglass] Port ${port} is already in use by another program.`);
+      console.error('[burnglass] Try: ' + path.basename(process.execPath) + ' --port 4748');
       holdOpenAndExit(1);
       return;
     }
@@ -6815,15 +7349,15 @@ function spawnDaemon(args, port, host) {
       { detached: true, stdio: 'ignore', windowsHide: true });
     child.unref();
   } catch (e) {
-    console.error('[pulse] failed to start the background process: ' + e.message);
-    console.error('[pulse] falling back to running in this window.');
+    console.error('[burnglass] failed to start the background process: ' + e.message);
+    console.error('[burnglass] falling back to running in this window.');
     startServer(port, host, serverOpts(args));
     return;
   }
-  console.log(`\n  Pulse v${PULSE_VERSION} is starting in the background.`);
+  console.log(`\n  Burnglass v${PULSE_VERSION} is starting in the background.`);
   console.log(`  Dashboard: http://localhost:${port}  (opens automatically)`);
   console.log(`  Logs, updates and Stop live in the dashboard's Server panel.`);
-  console.log('  Tip: pulse.exe --install-shortcuts adds Start/Stop buttons to your Desktop.');
+  console.log('  Tip: ' + path.basename(process.execPath) + ' --install-shortcuts adds Start/Stop buttons to your Desktop.');
   console.log('  (Run with --no-daemon to keep it in a console window.)');
   setTimeout(() => process.exit(0), 2500);
 }
@@ -6841,23 +7375,23 @@ function stopRunning(port) {
     seaApi && process.platform === 'win32' && process.stdin.isTTY ? 1600 : 0);
   probeInstance(port, (inst) => {
     if (inst.kind === 'free') {
-      console.log(`[pulse] nothing is running on port ${port}.`);
+      console.log(`[burnglass] nothing is running on port ${port}.`);
       return exitSoon(0);
     }
     if (inst.kind === 'other') {
-      console.log(`[pulse] port ${port} is in use by another program — nothing to stop.`);
+      console.log(`[burnglass] port ${port} is in use by another program — nothing to stop.`);
       return exitSoon(1);
     }
     requestShutdown(port, (ok) => {
       if (!ok) {
-        console.error(`[pulse] the running Pulse (${inst.version ? 'v' + inst.version : 'pre-1.1.0'}) does not support remote stop.`);
-        console.error('[pulse] Close it via Task Manager → pulse.exe → End task.');
+        console.error(`[burnglass] the running ${instanceName(inst.version)} (${inst.version ? 'v' + inst.version : 'pre-1.1.0'}) does not support remote stop.`);
+        console.error('[burnglass] Close it via Task Manager → pulse.exe / burnglass.exe → End task.');
         return exitSoon(1);
       }
       waitForPortFree(port, 8000, (free) => {
         console.log(free
-          ? `[pulse] stopped Pulse ${inst.version ? 'v' + inst.version + ' ' : ''}on port ${port}.`
-          : '[pulse] stop acknowledged — the instance is taking a while to exit.');
+          ? `[burnglass] stopped ${instanceName(inst.version)} ${inst.version ? 'v' + inst.version + ' ' : ''}on port ${port}.`
+          : '[burnglass] stop acknowledged — the instance is taking a while to exit.');
         exitSoon(free ? 0 : 1);
       });
     });
@@ -6907,30 +7441,31 @@ function desktopDirs() {
 // targetExe: what the shortcuts should point at (--install passes the INSTALLED
 // copy; on its own this defaults to the running exe). Returns success.
 function installShortcuts(targetExe) {
+  const me = path.basename(process.execPath);
   if (process.platform !== 'win32') {
-    console.log('[pulse] Desktop shortcuts are Windows-only.');
-    console.log('[pulse] Start: run the binary (idempotent). Stop: --stop.');
+    console.log('[burnglass] Desktop shortcuts are Windows-only.');
+    console.log('[burnglass] Start: run the binary (idempotent). Stop: --stop.');
     return false;
   }
   if (!seaApi) {
-    console.log('[pulse] run this from the packaged pulse.exe so shortcuts point at it.');
+    console.log('[burnglass] run this from the packaged burnglass.exe so shortcuts point at it.');
     return false;
   }
   const exe = targetExe || process.execPath;
   const desktop = desktopDirs()[0];
   try {
     createShortcuts([
-      { path: path.join(desktop, 'Pulse.lnk'), target: exe,
-        description: 'Start Pulse (opens the dashboard if already running)' },
-      { path: path.join(desktop, 'Pulse - Stop.lnk'), target: exe, args: '--stop',
-        description: 'Stop the running Pulse' },
+      { path: path.join(desktop, 'Burnglass.lnk'), target: exe,
+        description: 'Start Burnglass (opens the dashboard if already running)' },
+      { path: path.join(desktop, 'Burnglass - Stop.lnk'), target: exe, args: '--stop',
+        description: 'Stop the running Burnglass' },
     ]);
-    console.log('[pulse] created Desktop shortcuts:');
-    console.log('  "Pulse"        — start (or open the dashboard if already running)');
-    console.log('  "Pulse - Stop" — stop the running Pulse');
+    console.log('[burnglass] created Desktop shortcuts (-> ' + (targetExe ? path.basename(exe) : me) + '):');
+    console.log('  "Burnglass"        — start (or open the dashboard if already running)');
+    console.log('  "Burnglass - Stop" — stop the running Burnglass');
     return true;
   } catch (e) {
-    console.error('[pulse] could not create shortcuts: ' + ((e && e.message) || e));
+    console.error('[burnglass] could not create shortcuts: ' + ((e && e.message) || e));
     return false;
   }
 }
@@ -6942,67 +7477,192 @@ function installShortcuts(targetExe) {
 // exe into the per-user Programs folder, add Start Menu + Desktop shortcuts,
 // and register in Add/Remove Programs. Everything lands under HKCU and
 // %LOCALAPPDATA%/%APPDATA% — no admin rights anywhere, and nothing
-// machine-wide. Uninstall reverses all of it but NEVER touches ~/.pulse: a
-// user's config and archived history are not ours to delete.
+// machine-wide. Uninstall reverses it but NEVER touches either home
+// (~/.burnglass or the old ~/.pulse): a user's config and archived history
+// are not ours to delete.
+//
+// PARITY WITH THE INSTALLER (build/installer.iss) — both must pick the SAME
+// folder, or a v1 `--install` user who runs BurnglassSetup ends up with two
+// installs, two Apps entries and two sign-in launches:
+//   1. an Inno install (its {AppId}_is1 key's InstallLocation) — the installer
+//      reuses it via UsePreviousAppDir;
+//   2. else %LOCALAPPDATA%\Programs\Pulse when it holds pulse.exe or
+//      burnglass.exe (a v1 install of either kind) — the installer's
+//      DefaultDirName applies the same rule;
+//   3. else %LOCALAPPDATA%\Programs\Burnglass (fresh).
+// The main exe is burnglass.exe; a pulse.exe already in that folder is kept
+// and refreshed as a byte-identical COMPAT TWIN (Claude Code hooks, pinned
+// taskbar items and old Run values hold its absolute path, and Burnglass may
+// never edit ~/.claude to re-point them). The HKCU Run value keeps its FROZEN
+// name 'Pulse'. Inno-managed folders (unins000.exe present) are left to the
+// installer: files written there outside it would be orphaned by its log.
+// Removal only ever touches Run values, shortcuts and Apps entries whose
+// target / InstallLocation is inside THIS install's folder.
 // ---------------------------------------------------------------------------
-const UNINSTALL_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Pulse';
-function programsDir() {
+const UNINSTALL_ROOT = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall';
+const UNINSTALL_KEY = UNINSTALL_ROOT + '\\Burnglass';
+const LEGACY_UNINSTALL_KEY = UNINSTALL_ROOT + '\\Pulse'; // written by v1 --install
+const INNO_UNINSTALL_KEY = UNINSTALL_ROOT + '\\{76C28179-9CBE-42EA-B9E6-7BE166115AD3}_is1'; // installer AppId: NEVER change
+function localProgramsDir() {
   const local = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
-  return path.join(local, 'Programs', 'Pulse');
+  return path.join(local, 'Programs');
 }
-function installedExePath() { return path.join(programsDir(), 'pulse.exe'); }
-function startMenuLnk() {
+// reg.exe query → the value's data, or null (absent / unreadable / not win32).
+function regQueryValue(key, name) {
+  if (process.platform !== 'win32') return null;
+  try {
+    const out = require('child_process').execFileSync('reg.exe', ['query', key, '/v', name],
+      { windowsHide: true, encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] });
+    const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const m = new RegExp('^\\s*' + esc + '\\s+REG_[A-Z_]+\\s+(.*?)\\s*$', 'm').exec(out || '');
+    return m ? m[1] : null;
+  } catch (_) { return null; }
+}
+function regDeleteKey(key) {
+  try {
+    require('child_process').execFileSync('reg.exe', ['delete', key, '/f'],
+      { windowsHide: true, timeout: 10000, stdio: ['ignore', 'ignore', 'pipe'] });
+    return true;
+  } catch (e) {
+    if (e && e.status === 1) return false; // already gone
+    throw e;
+  }
+}
+const stripTrailingSep = (p) => String(p || '').replace(/[\\/]+$/, '');
+// Is file p inside dir (case-insensitive on Windows)?
+function pathInside(p, dir) {
+  if (!p || !dir) return false;
+  const norm = (x) => { const r = path.resolve(String(x)); return process.platform === 'win32' ? r.toLowerCase() : r; };
+  const rel = path.relative(norm(dir), norm(p));
+  return !!rel && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+function innoInstallDir() {
+  const v = stripTrailingSep(regQueryValue(INNO_UNINSTALL_KEY, 'InstallLocation'));
+  return v && isDir(v) ? v : null;
+}
+function programsDir() {
+  const inno = innoInstallDir();
+  if (inno) return inno;
+  const legacy = path.join(localProgramsDir(), 'Pulse');
+  if (isFileAt(path.join(legacy, 'pulse.exe')) || isFileAt(path.join(legacy, 'burnglass.exe'))) return legacy;
+  return path.join(localProgramsDir(), 'Burnglass');
+}
+function installManagedByInno(dir) { return isFileAt(path.join(dir, 'unins000.exe')); }
+function installedExePath(dir) { return path.join(dir || programsDir(), 'burnglass.exe'); }
+function startMenuDir() {
   const appdata = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
-  return path.join(appdata, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Pulse.lnk');
+  return path.join(appdata, 'Microsoft', 'Windows', 'Start Menu', 'Programs');
+}
+function startMenuLnk() { return path.join(startMenuDir(), 'Burnglass.lnk'); }
+// Every shortcut name either version creates (Start Menu + each Desktop).
+function shortcutCandidates() {
+  const out = [path.join(startMenuDir(), 'Burnglass.lnk'), path.join(startMenuDir(), 'Pulse.lnk'),
+    path.join(startMenuDir(), 'Burnglass - Stop.lnk'), path.join(startMenuDir(), 'Pulse - Stop.lnk')];
+  for (const d of desktopDirs()) {
+    for (const n of ['Burnglass.lnk', 'Burnglass - Stop.lnk', 'Pulse.lnk', 'Pulse - Stop.lnk']) out.push(path.join(d, n));
+  }
+  return out;
+}
+// .lnk → TargetPath via WScript.Shell (one powershell spawn). A shortcut whose
+// target cannot be read is reported as '' — callers then leave it alone.
+function shortcutTargets(paths) {
+  const existing = paths.filter(isFileAt);
+  const out = {};
+  if (!existing.length || process.platform !== 'win32') return out;
+  const lines = ['[Console]::OutputEncoding = [Text.Encoding]::UTF8;', '$W = New-Object -ComObject WScript.Shell;', '$o = [ordered]@{};'];
+  for (const p of existing) lines.push(`try { $o[${psQuote(p)}] = $W.CreateShortcut(${psQuote(p)}).TargetPath } catch { $o[${psQuote(p)}] = '' };`);
+  lines.push('$o | ConvertTo-Json -Compress');
+  try {
+    const raw = require('child_process').execFileSync('powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-Command', lines.join(' ')],
+      { encoding: 'utf8', windowsHide: true, timeout: 30000 });
+    const j = JSON.parse(String(raw).replace(/^﻿/, '').trim() || '{}');
+    for (const p of existing) out[p] = typeof j[p] === 'string' ? j[p] : '';
+  } catch (_) { for (const p of existing) out[p] = ''; }
+  return out;
 }
 const samePath = (a, b) => String(a).toLowerCase() === String(b).toLowerCase();
 const errMsg = (e) => (e && e.message) || String(e);
+// Copy src over dst the rename-aside way (dst may be running — a Claude Code
+// --statusline copy — which blocks overwriting but not renaming).
+function replaceFileFrom(src, dst) {
+  fs.copyFileSync(src, dst + '.download');
+  try { fs.unlinkSync(dst + '.old'); } catch (_) {}
+  let aside = false;
+  if (isFileAt(dst)) { fs.renameSync(dst, dst + '.old'); aside = true; }
+  try { fs.renameSync(dst + '.download', dst); } catch (e) {
+    if (aside) { try { fs.renameSync(dst + '.old', dst); } catch (_) {} }
+    try { fs.unlinkSync(dst + '.download'); } catch (_) {}
+    throw e;
+  }
+  if (aside) { try { fs.unlinkSync(dst + '.old'); } catch (_) { /* still running — removed on the next update */ } }
+}
 
 function installApp() {
+  const me = path.basename(process.execPath);
   if (process.platform !== 'win32') {
-    console.log('[pulse] --install is Windows-only. Elsewhere: put the binary on your PATH.');
+    console.log('[burnglass] --install is Windows-only. Elsewhere: put the binary on your PATH.');
     return;
   }
   if (!seaApi) {
-    console.log('[pulse] run --install from the packaged pulse.exe (a source checkout has nothing to install).');
+    console.log('[burnglass] run --install from the packaged burnglass.exe (a source checkout has nothing to install).');
     return;
   }
-  const target = installedExePath();
+  const dir = programsDir();
+  if (installManagedByInno(dir)) {
+    console.log('[burnglass] ' + dir + ' is managed by the Burnglass (formerly Pulse) installer.');
+    console.log('  Update it with BurnglassSetup.exe or the dashboard\'s one-click update;');
+    console.log('  remove it from Settings > Apps. Nothing was changed.');
+    return;
+  }
+  const target = installedExePath(dir);
+  const twin = path.join(dir, 'pulse.exe');
   const changed = [];
 
   if (samePath(process.execPath, target)) {
     changed.push('already installed at ' + target + ' (no copy needed)');
   } else {
     try {
-      fs.mkdirSync(programsDir(), { recursive: true });
-      fs.copyFileSync(process.execPath, target);
-      changed.push('copied pulse.exe -> ' + target);
+      fs.mkdirSync(dir, { recursive: true });
+      replaceFileFrom(process.execPath, target);
+      changed.push('copied ' + me + ' -> ' + target);
     } catch (e) {
-      console.error('[pulse] could not copy the executable to ' + target + ': ' + errMsg(e));
-      // A running Pulse holds its own exe open — that is the usual cause.
-      console.error('[pulse] if a Pulse is running from there, stop it first:  pulse --stop');
+      console.error('[burnglass] could not copy the executable to ' + target + ': ' + errMsg(e));
+      console.error('[burnglass] if Burnglass is running from there, stop it first:  ' + me + ' --stop');
       return;
     }
   }
+  // Upgrading a v1 --install folder: keep pulse.exe as a same-bytes twin.
+  if (isFileAt(twin) && !samePath(process.execPath, twin)) {
+    try { replaceFileFrom(target, twin); changed.push('refreshed the compat copy ' + twin + ' (older shortcuts, hooks and sign-in entries point at it)'); }
+    catch (e) { console.warn('[burnglass] could not refresh ' + twin + ': ' + errMsg(e) + ' (it keeps working; retry after stopping it)'); }
+  }
 
   // Shortcuts point at the INSTALLED copy, not at wherever this exe was run
-  // from (the download in ~/Downloads is often deleted afterwards).
+  // from (the download in ~/Downloads is often deleted afterwards). Old
+  // "Pulse" shortcuts are replaced only when they point into this folder — a
+  // portable copy's own shortcuts are not ours.
+  const olds = shortcutTargets(shortcutCandidates().filter((p) => /[\\/]Pulse( - Stop)?\.lnk$/i.test(p)));
+  for (const [lnk, tgt] of Object.entries(olds)) {
+    if (!pathInside(tgt, dir)) continue;
+    try { fs.unlinkSync(lnk); changed.push('removed old shortcut ' + lnk); } catch (_) {}
+  }
   try {
-    fs.mkdirSync(path.dirname(startMenuLnk()), { recursive: true });
-    createShortcuts([{ path: startMenuLnk(), target, description: 'Start Pulse (local usage dashboard)' }]);
+    fs.mkdirSync(startMenuDir(), { recursive: true });
+    createShortcuts([{ path: startMenuLnk(), target, description: 'Start Burnglass (local usage dashboard)' }]);
     changed.push('Start Menu shortcut -> ' + startMenuLnk());
   } catch (e) {
-    console.warn('[pulse] could not create the Start Menu shortcut: ' + errMsg(e));
+    console.warn('[burnglass] could not create the Start Menu shortcut: ' + errMsg(e));
   }
-  if (installShortcuts(target)) changed.push('Desktop shortcuts "Pulse" and "Pulse - Stop"');
+  if (installShortcuts(target)) changed.push('Desktop shortcuts "Burnglass" and "Burnglass - Stop"');
 
   // Add/Remove Programs. HKCU\...\Uninstall is the per-user list, so this shows
   // up in Settings > Apps without any elevation.
   const vals = [
-    ['DisplayName', 'REG_SZ', 'Pulse'],
+    ['DisplayName', 'REG_SZ', BRAND],
     ['DisplayVersion', 'REG_SZ', PULSE_VERSION],
     ['Publisher', 'REG_SZ', 'ReFxFrank'],
-    ['InstallLocation', 'REG_SZ', programsDir()],
+    ['InstallLocation', 'REG_SZ', dir],
     ['UninstallString', 'REG_SZ', `"${target}" --uninstall`],
     ['DisplayIcon', 'REG_SZ', target + ',0'],
     ['NoModify', 'REG_DWORD', '1'],
@@ -7014,86 +7674,118 @@ function installApp() {
         ['add', UNINSTALL_KEY, '/v', name, '/t', type, '/d', data, '/f'],
         { windowsHide: true, timeout: 10000, stdio: ['ignore', 'ignore', 'pipe'] });
     }
-    changed.push('registered in Add/Remove Programs (uninstall with:  pulse --uninstall)');
+    changed.push('registered in Add/Remove Programs (uninstall with:  burnglass --uninstall)');
+    // v1 --install's own entry for this same folder → one Apps entry, not two.
+    if (samePath(stripTrailingSep(regQueryValue(LEGACY_UNINSTALL_KEY, 'InstallLocation') || ''), stripTrailingSep(dir))) {
+      try { if (regDeleteKey(LEGACY_UNINSTALL_KEY)) changed.push('removed the old "Pulse" Add/Remove Programs entry'); } catch (_) {}
+    }
   } catch (e) {
-    console.warn('[pulse] could not register in Add/Remove Programs: ' + errMsg(e));
+    console.warn('[burnglass] could not register in Add/Remove Programs: ' + errMsg(e));
+  }
+
+  // A sign-in entry (FROZEN value name 'Pulse') that launches a copy in this
+  // folder is re-pointed at burnglass.exe; one elsewhere is not ours to touch.
+  const st = startupState(true);
+  if (st.enabled && pathInside(commandTarget(st.command), dir)) {
+    const r = setStartup(true, target);
+    if (r.ok) changed.push('run-at-startup entry now starts ' + target);
   }
 
   console.log('');
-  console.log('[pulse] installed v' + PULSE_VERSION + ':');
+  console.log('[burnglass] installed v' + PULSE_VERSION + ':');
   for (const c of changed) console.log('  • ' + c);
   console.log('');
-  console.log('  Your data stays in ' + pulseHome() + ' (config + archived history).');
-  console.log('  Run at sign-in:  pulse --startup on   (off again with --startup off)');
-  console.log('  Note: Pulse binaries are UNSIGNED, so Windows SmartScreen may warn');
+  console.log('  Your data stays in ' + appHome() + ' (config + archived history).');
+  console.log('  Run at sign-in:  burnglass --startup on   (off again with --startup off)');
+  console.log('  Note: Burnglass binaries are UNSIGNED, so Windows SmartScreen may warn');
   console.log('  the first time you run one. "More info" -> "Run anyway".');
   console.log('');
 }
 
 function uninstallApp() {
   if (process.platform !== 'win32') {
-    console.log('[pulse] --uninstall is Windows-only. Elsewhere: delete the binary you downloaded.');
+    console.log('[burnglass] --uninstall is Windows-only. Elsewhere: delete the binary you downloaded.');
     return;
   }
   if (!seaApi) {
-    console.log('[pulse] run --uninstall from the packaged pulse.exe (a source checkout was never installed).');
+    console.log('[burnglass] run --uninstall from the packaged burnglass.exe (a source checkout was never installed).');
     return;
   }
-  const removed = [], left = [];
-  const cp = require('child_process');
-
-  // 1. Startup entry first — an uninstalled Pulse must not be launched at sign-in.
-  if (startupState(true).enabled) {
-    const r = setStartup(false);
-    if (r.ok) removed.push('run-at-startup entry (' + STARTUP_RUN_KEY + '\\' + STARTUP_VALUE_NAME + ')');
-    else left.push('startup entry — ' + r.error);
+  // The folder to remove: the one this exe runs from when it is an install
+  // folder (the Apps entry's UninstallString runs exactly that), else the
+  // folder --install would pick.
+  const exeDir = path.dirname(process.execPath);
+  const isInstallDir = (d) => samePath(stripTrailingSep(d), stripTrailingSep(path.join(localProgramsDir(), 'Burnglass'))) ||
+    samePath(stripTrailingSep(d), stripTrailingSep(path.join(localProgramsDir(), 'Pulse'))) ||
+    samePath(stripTrailingSep(regQueryValue(UNINSTALL_KEY, 'InstallLocation') || ''), stripTrailingSep(d)) ||
+    samePath(stripTrailingSep(regQueryValue(LEGACY_UNINSTALL_KEY, 'InstallLocation') || ''), stripTrailingSep(d));
+  const dir = isInstallDir(exeDir) ? exeDir : programsDir();
+  if (installManagedByInno(dir)) {
+    console.log('[burnglass] ' + dir + ' was installed by the Burnglass (formerly Pulse) installer —');
+    console.log('  uninstall it from Settings > Apps so its own uninstaller cleans up. Nothing was changed.');
+    return;
   }
+  const removed = [], left = [], kept = [];
 
-  // 2. Add/Remove Programs entry (status 1 = already gone, which is the goal).
-  try {
-    cp.execFileSync('reg.exe', ['delete', UNINSTALL_KEY, '/f'],
-      { windowsHide: true, timeout: 10000, stdio: ['ignore', 'ignore', 'pipe'] });
-    removed.push('Add/Remove Programs entry');
-  } catch (e) {
-    if (!e || e.status !== 1) left.push('Add/Remove Programs entry — ' + errMsg(e));
-  }
-
-  // 3. Shortcuts (every Desktop candidate: the folder may be OneDrive-redirected).
-  const links = [startMenuLnk()];
-  for (const d of desktopDirs()) { links.push(path.join(d, 'Pulse.lnk'), path.join(d, 'Pulse - Stop.lnk')); }
-  for (const l of links) {
-    try { fs.unlinkSync(l); removed.push('shortcut ' + l); }
-    catch (e) { if (e && e.code !== 'ENOENT') left.push('shortcut ' + l + ' — ' + errMsg(e)); }
-  }
-
-  // 4. The installed copy. Windows will not let a running process delete its
-  // own image, so say so plainly instead of pretending it worked.
-  const target = installedExePath();
-  let selfLeft = false;
-  if (fs.existsSync(target)) {
-    if (samePath(process.execPath, target)) {
-      selfLeft = true;
-      left.push(target + ' — still running as this process; delete it after this exits');
+  // 1. Startup entry first — an uninstalled copy must not be launched at
+  // sign-in. Only when it launches a copy in THIS folder.
+  const st = startupState(true);
+  if (st.enabled) {
+    if (pathInside(commandTarget(st.command), dir)) {
+      const r = setStartup(false);
+      if (r.ok) removed.push('run-at-startup entry (' + STARTUP_RUN_KEY + '\\' + STARTUP_VALUE_NAME + ')');
+      else left.push('startup entry — ' + r.error);
     } else {
-      try {
-        fs.unlinkSync(target);
-        removed.push(target);
-        try { fs.rmdirSync(programsDir()); } catch (_) { /* other files there: leave the folder */ }
-      } catch (e) {
-        left.push(target + ' — ' + errMsg(e) + (String(errMsg(e)).match(/EBUSY|EPERM/) ? ' (stop it first:  pulse --stop)' : ''));
-      }
+      kept.push('run-at-startup entry — it starts ' + st.command + ', not this install');
     }
   }
 
+  // 2. Add/Remove Programs entries that describe THIS folder.
+  for (const key of [UNINSTALL_KEY, LEGACY_UNINSTALL_KEY]) {
+    const loc = regQueryValue(key, 'InstallLocation');
+    if (loc == null || !samePath(stripTrailingSep(loc), stripTrailingSep(dir))) continue;
+    try { if (regDeleteKey(key)) removed.push('Add/Remove Programs entry (' + key.split('\\').pop() + ')'); }
+    catch (e) { left.push('Add/Remove Programs entry — ' + errMsg(e)); }
+  }
+
+  // 3. Shortcuts of either name whose target is inside this folder (every
+  // Desktop candidate: the folder may be OneDrive-redirected).
+  for (const [lnk, tgt] of Object.entries(shortcutTargets(shortcutCandidates()))) {
+    if (!pathInside(tgt, dir)) continue;
+    try { fs.unlinkSync(lnk); removed.push('shortcut ' + lnk); }
+    catch (e) { if (e && e.code !== 'ENOENT') left.push('shortcut ' + lnk + ' — ' + errMsg(e)); }
+  }
+
+  // 4. The installed copies. Windows will not let a running process delete
+  // its own image, so say so plainly instead of pretending it worked.
+  let selfLeft = null;
+  for (const n of ['burnglass.exe', 'pulse.exe', 'burnglass-strip.exe', 'pulse-strip.exe']) {
+    const f = path.join(dir, n);
+    if (!fs.existsSync(f)) continue;
+    if (samePath(process.execPath, f)) {
+      selfLeft = f;
+      left.push(f + ' — still running as this process; delete it after this exits');
+      continue;
+    }
+    try { fs.unlinkSync(f); removed.push(f); }
+    catch (e) {
+      left.push(f + ' — ' + errMsg(e) + (String(errMsg(e)).match(/EBUSY|EPERM/) ? ' (stop it first:  burnglass --stop)' : ''));
+    }
+  }
+  if (!selfLeft) { try { fs.rmdirSync(dir); } catch (_) { /* other files there: leave the folder */ } }
+
   console.log('');
-  console.log('[pulse] uninstalled:');
-  if (!removed.length) console.log('  • nothing to remove — Pulse was not installed');
+  console.log('[burnglass] uninstalled:');
+  if (!removed.length) console.log('  • nothing to remove — Burnglass was not installed in ' + dir);
   for (const r of removed) console.log('  • removed ' + r);
   for (const l of left) console.log('  ! could not remove ' + l);
+  for (const k of kept) console.log('  • kept ' + k);
   console.log('');
-  console.log('  KEPT: ' + pulseHome() + ' — your config, budget and archived history are');
-  console.log('  untouched. Delete that folder yourself if you want it gone.');
-  if (selfLeft) console.log('  KEPT: ' + target + ' (this executable) — remove it manually.');
+  const homes = [appHome()];
+  if (!explicitHome() && isDir(legacyHomePath()) && !samePathAbs(appHome(), legacyHomePath())) homes.push(legacyHomePath());
+  for (const h of homes) console.log('  KEPT: ' + h + ' — your config, budget and archived history are untouched.');
+  console.log('  Delete a folder yourself if you want it gone.');
+  if (selfLeft) console.log('  KEPT: ' + selfLeft + ' (this executable) — remove it manually.');
   console.log('');
 }
 
@@ -7104,40 +7796,40 @@ function uninstallApp() {
 function startupCli(mode) {
   const m = String(mode || 'status').trim().toLowerCase();
   const where = startupStubFile()
-    ? 'stub file ' + startupStubFile() + ' (PULSE_STARTUP_STUB)'
+    ? 'stub file ' + startupStubFile() + ' (BURNGLASS_STARTUP_STUB)'
     : STARTUP_RUN_KEY + '\\' + STARTUP_VALUE_NAME;
   if (!startupSupported()) {
-    console.log('[pulse] run at startup is Windows-only.');
-    console.log('[pulse] on macOS/Linux use launchd / a systemd --user unit running:');
+    console.log('[burnglass] run at startup is Windows-only.');
+    console.log('[burnglass] on macOS/Linux use launchd / a systemd --user unit running:');
     console.log('        ' + startupCommand());
     return;
   }
   if (m !== 'on' && m !== 'off' && m !== 'status') {
-    console.log('[pulse] usage: pulse --startup on|off|status  (got "' + mode + '")');
+    console.log('[burnglass] usage: burnglass --startup on|off|status  (got "' + mode + '")');
   }
   if (m === 'on' || m === 'off') {
     const r = setStartup(m === 'on');
     if (!r.ok) {
-      console.error('[pulse] could not ' + (m === 'on' ? 'enable' : 'disable') + ' run at startup: ' + r.error);
+      console.error('[burnglass] could not ' + (m === 'on' ? 'enable' : 'disable') + ' run at startup: ' + r.error);
       return; // still exit 0 — a startup toggle is never worth a failing shell
     }
     if (m === 'on') {
-      console.log('[pulse] run at startup ENABLED.');
+      console.log('[burnglass] run at startup ENABLED.');
       console.log('  ' + where);
       console.log('  = ' + r.command);
       if (!seaApi) console.log('  (source checkout — the entry runs node with this script; it breaks if either moves)');
-      console.log('  Pulse will start silently at sign-in (--no-open: no browser tab).');
-      console.log('  Turn it off with:  pulse --startup off');
+      console.log('  Burnglass will start silently at sign-in (--no-open: no browser tab).');
+      console.log('  Turn it off with:  burnglass --startup off');
     } else {
-      console.log('[pulse] run at startup DISABLED — removed ' + where);
+      console.log('[burnglass] run at startup DISABLED — removed ' + where);
     }
     return;
   }
   const s = startupState(true); // status must never answer from the memo
-  console.log('[pulse] run at startup: ' + (s.enabled ? 'ON' : 'off'));
+  console.log('[burnglass] run at startup: ' + (s.enabled ? 'ON' : 'off'));
   console.log('  ' + where);
   if (s.enabled) console.log('  = ' + s.command);
-  console.log('  Change with:  pulse --startup ' + (s.enabled ? 'off' : 'on'));
+  console.log('  Change with:  burnglass --startup ' + (s.enabled ? 'off' : 'on'));
 }
 
 // ---------------------------------------------------------------------------
@@ -7155,7 +7847,7 @@ function startupCli(mode) {
 // and appends changes to the sidecar log that readModes() joins in. Reading
 // settings.json is model-independent, so it captures effort for Fable too.
 // It must never disturb a session: always exits 0, prints nothing, swallows
-// every error. Writes ONLY to ~/.pulse — reads ~/.claude but never writes there.
+// every error. Writes ONLY to ~/.burnglass — reads ~/.claude but never writes there.
 // ---------------------------------------------------------------------------
 
 // Read the configured reasoning effort (`effortLevel`) from Claude Code's
@@ -7250,14 +7942,15 @@ function effortSetup() {
   const snippet = { hooks: { SessionStart: hookEntry, UserPromptSubmit: hookEntry } };
 
   const settingsPath = path.join(claudeDir(), 'settings.json');
-  console.log('\nPulse — effort logging setup');
+  console.log('\nBurnglass — effort logging setup');
   console.log('─'.repeat(64));
-  console.log('Pulse already reads `/effort <level>` commands straight from your');
+  console.log('Burnglass already reads `/effort <level>` commands straight from your');
   console.log('session transcripts — that needs NO setup and works retroactively.');
   console.log('This optional hook covers the one remaining case: an effort level');
   console.log('persisted in settings.json (applied across sessions) rather than');
   console.log('set per-session with /effort.');
   console.log('');
+  printExistingIntegration('effort-hook', cmdValue);
   console.log(`1. Open:  ${settingsPath}`);
   console.log('   (create it if missing; if a "hooks" section exists, merge the');
   console.log('   two entries into it instead of replacing it)');
@@ -7267,8 +7960,8 @@ function effortSetup() {
   console.log('');
   console.log('3. Restart your Claude Code sessions. New sessions log their');
   console.log(`   effort level to ${modesFilePath()}`);
-  console.log('   and Pulse picks it up automatically (nothing is ever written');
-  console.log('   under ~/.claude by Pulse).');
+  console.log('   and Burnglass picks it up automatically (nothing is ever written');
+  console.log('   under ~/.claude by Burnglass).');
   console.log('');
   console.log('Note: /effort only stores a level when it differs from the model');
   console.log('default, so a session left at the default has no explicit level to');
@@ -7374,7 +8067,7 @@ function runStatusline() {
     slHttpGetJson('http://' + host + ':' + port + '/api/statusline', 700, (err, data) => {
       let line;
       try { line = formatStatusline(ctx, err ? null : data); }
-      catch (_) { line = (ctx.model && (ctx.model.display_name || ctx.model.id)) || 'Pulse'; }
+      catch (_) { line = (ctx.model && (ctx.model.display_name || ctx.model.id)) || BRAND; }
       // Exit from the write callback: process.exit() before stdout (a pipe)
       // flushes would truncate the line to nothing. A short backstop timer
       // guarantees we still exit if the callback never fires.
@@ -7395,7 +8088,7 @@ function runStatusline() {
 // ---------------------------------------------------------------------------
 // `--summary` — the dashboard's headline numbers in the terminal, no browser.
 // Same discovery + fail-open discipline as --statusline: ask the RUNNING server
-// (it already has everything parsed and cached) via ~/.pulse/server.json, and
+// (it already has everything parsed and cached) via ~/.burnglass/server.json, and
 // only fall back to an in-process build when nothing is listening. Always
 // exits 0 — a summary that fails to format must never break a shell script.
 // ---------------------------------------------------------------------------
@@ -7410,7 +8103,7 @@ function summaryLines(s) {
   const row = (label, value, tail) => out.push('  ' + dim(label.padEnd(10)) + value + (tail ? ' ' + dim(tail) : ''));
 
   out.push('');
-  out.push('  ' + accent('Pulse v' + (s.version || PULSE_VERSION)) + dim(' — usage summary'));
+  out.push('  ' + accent(BRAND + ' v' + (s.version || PULSE_VERSION)) + dim(' — usage summary'));
   out.push('');
 
   const p30 = (s.periods || []).find((p) => p.key === 'last30');
@@ -7470,7 +8163,7 @@ function runSummary() {
   const render = (s) => {
     let text;
     try { text = summaryLines(s); }
-    catch (_) { text = '\n  Pulse — summary unavailable (could not format the payload).\n'; }
+    catch (_) { text = '\n  Burnglass — summary unavailable (could not format the payload).\n'; }
     done(text);
   };
   const local = () => {
@@ -7484,7 +8177,7 @@ function runSummary() {
     let s = null, err = null;
     try { s = buildSummary(null, { background: true }); } catch (e) { err = e; }
     [console.log, console.warn, console.error] = saved;
-    if (err) return done('\n  Pulse — could not read your usage logs: ' + (err.message || err) + '\n');
+    if (err) return done('\n  Burnglass — could not read your usage logs: ' + (err.message || err) + '\n');
     render(s);
   };
   const rt = readRuntimeFile();
@@ -7496,6 +8189,97 @@ function runSummary() {
   }, 32e6);
 }
 
+// ---------------------------------------------------------------------------
+// CLAUDE CODE INTEGRATIONS — READ-ONLY health check
+// The status line and the effort hook live in Claude Code's settings.json as
+// an ABSOLUTE path to whichever exe printed the snippet (…\Programs\Pulse\
+// pulse.exe, ~/Downloads/pulse-linux, ~/pulse/server.js …). The rename keeps
+// those paths valid (in-place self-update, the installer's compat twin) —
+// they only break if the file is deleted. Burnglass may never write under
+// ~/.claude, so the fix is detection: parse the commands that carry
+// --statusline / --mode-hook, resolve their target, and say so (server log,
+// payload.integrations, the setup printers) when it no longer exists.
+// ---------------------------------------------------------------------------
+// First token of a command line ("quoted" or bare); for `node <script>` the
+// script. Returns '' when there is nothing path-like.
+function commandTarget(cmd) {
+  const toks = [];
+  const re = /"((?:[^"\\]|\\.)*)"|'([^']*)'|(\S+)/g;
+  let m;
+  while ((m = re.exec(String(cmd || ''))) && toks.length < 12) toks.push(m[1] != null ? m[1] : m[2] != null ? m[2] : m[3]);
+  // Skip a leading `env` and NAME=value assignments — a value there may be a
+  // secret, and it is never the program anyway.
+  while (toks.length && (toks[0] === 'env' || /^[A-Za-z_][A-Za-z0-9_]*=/.test(toks[0]))) toks.shift();
+  if (!toks.length) return '';
+  let t = toks[0];
+  if (/^node(\.exe)?$/i.test(path.basename(t)) && toks[1] && !toks[1].startsWith('-')) t = toks[1];
+  if (t === '~' || t.startsWith('~/') || t.startsWith('~\\')) t = path.join(os.homedir(), t.slice(1));
+  return t;
+}
+let integrationsMemo = { sig: '', list: [] };
+function claudeIntegrations() {
+  const f = path.join(claudeDir(), 'settings.json');
+  let st;
+  try { st = fs.statSync(f); } catch (_) { return []; }
+  const sig = f + ':' + st.mtimeMs + ':' + st.size;
+  if (integrationsMemo.sig === sig) return integrationsMemo.list;
+  const list = [];
+  let j = null;
+  try { j = JSON.parse(fs.readFileSync(f, 'utf8')); } catch (_) {}
+  const add = (kind, command, event) => {
+    if (typeof command !== 'string') return;
+    const flag = kind === 'statusline' ? '--statusline' : '--mode-hook';
+    if (!command.includes(flag)) return;
+    const target = commandTarget(command);
+    const abs = !!target && path.isAbsolute(target);
+    list.push({
+      kind, event: event || null, command, target: target || null,
+      exists: abs ? fs.existsSync(target) : null, // null = not a path we can check (on PATH, env var…)
+      legacyName: !!target && /^pulse([.-]|$)/i.test(path.basename(target)),
+    });
+  };
+  if (j && typeof j === 'object') {
+    if (j.statusLine && typeof j.statusLine === 'object') add('statusline', j.statusLine.command);
+    if (j.hooks && typeof j.hooks === 'object') {
+      for (const ev of Object.keys(j.hooks)) {
+        const arr = Array.isArray(j.hooks[ev]) ? j.hooks[ev] : [];
+        for (const g of arr) for (const h of (g && Array.isArray(g.hooks) ? g.hooks : [])) add('effort-hook', h && h.command, ev);
+      }
+    }
+  }
+  integrationsMemo = { sig, list };
+  return list;
+}
+let integrationsWarned = '';
+function warnBrokenIntegrations() {
+  let broken = [];
+  try { broken = claudeIntegrations().filter((i) => i.exists === false); } catch (_) {}
+  const key = broken.map((b) => b.kind + b.target).join('|');
+  if (!broken.length || key === integrationsWarned) return;
+  integrationsWarned = key;
+  const me = seaApi ? path.basename(process.execPath) : 'node server.js';
+  for (const b of broken) {
+    console.warn('[burnglass] Claude Code ' + (b.kind === 'statusline' ? 'status line' : 'effort hook (' + b.event + ')') +
+      ' points at a file that no longer exists: ' + b.target + ' — run `' + me + ' ' +
+      (b.kind === 'statusline' ? '--statusline-setup' : '--effort-setup') + '` for the command to paste (Burnglass never edits ~/.claude).');
+  }
+}
+// For the setup printers: what an existing entry of this kind needs.
+function printExistingIntegration(kind, cmdValue) {
+  let mine = [];
+  try { mine = claudeIntegrations().filter((i) => i.kind === kind); } catch (_) {}
+  const cur = mine.find((i) => i.command !== cmdValue);
+  if (!cur) return;
+  if (cur.exists === false) {
+    console.log('! Your settings.json currently runs ' + cur.target + ',');
+    console.log('  which no longer exists. Replace that command with the one below.');
+  } else {
+    console.log('Note: your settings.json already runs:  ' + cur.command);
+    console.log('  ' + (cur.legacyName ? 'That older Pulse name still works; to' : 'To') + ' use THIS copy instead, replace it with the command below.');
+  }
+  console.log('');
+}
+
 // `--statusline-setup` — print (never write) the settings.json snippet. As with
 // --effort-setup, Pulse never edits ~/.claude itself.
 function statuslineSetup() {
@@ -7504,14 +8288,15 @@ function statuslineSetup() {
     : `${q(process.execPath)} ${q(__filename)} --statusline`;
   const snippet = { statusLine: { type: 'command', command: cmdValue, padding: 0, refreshInterval: 30 } };
   const settingsPath = path.join(claudeDir(), 'settings.json');
-  console.log('\nPulse — status line setup');
+  console.log('\nBurnglass — status line setup');
   console.log('─'.repeat(64));
-  console.log('Adds a Claude Code status line fed by Pulse: your model + context');
+  console.log('Adds a Claude Code status line fed by Burnglass: your model + context');
   console.log('from Claude Code, plus today\'s cross-tool spend, the current 5-hour');
-  console.log('block, and official meter %s that Pulse already caches (so the status');
-  console.log('line never polls a provider endpoint itself).');
+  console.log('block, and official meter %s that Burnglass already caches (so the');
+  console.log('status line never polls a provider endpoint itself).');
   console.log('');
-  console.log(`1. Make sure Pulse is running (the status line reads it over loopback).`);
+  printExistingIntegration('statusline', cmdValue);
+  console.log(`1. Make sure Burnglass is running (the status line reads it over loopback).`);
   console.log('');
   console.log(`2. Open:  ${settingsPath}`);
   console.log('   (create it if missing; merge this key if the file already exists)');
@@ -7519,9 +8304,9 @@ function statuslineSetup() {
   console.log('3. Add:');
   console.log(JSON.stringify(snippet, null, 2));
   console.log('');
-  console.log('4. Start a new Claude Code session. Pulse never writes under ~/.claude;');
-  console.log('   if Pulse is stopped the line still shows model + context from Claude');
-  console.log('   Code alone. Set NO_COLOR=1 to disable the ANSI colors.');
+  console.log('4. Start a new Claude Code session. Burnglass never writes under ~/.claude;');
+  console.log('   if Burnglass is stopped the line still shows model + context from');
+  console.log('   Claude Code alone. Set NO_COLOR=1 to disable the ANSI colors.');
   console.log('');
 }
 
@@ -7563,7 +8348,7 @@ function parseArgs(argv) {
 }
 
 function updateCheckEnabled(args) {
-  if (args.noUpdateCheck || process.env.PULSE_NO_UPDATE_CHECK) return false;
+  if (args.noUpdateCheck || envv('NO_UPDATE_CHECK')) return false;
   return readConfig().updateCheck !== false;
 }
 
@@ -7594,7 +8379,7 @@ function resolveHost(args) {
 // handful of real records so accessors can be confirmed against real data.
 function inspectSchema() {
   const files = walkJsonl(projectsRoot());
-  console.log(`[pulse] --inspect-schema: found ${files.length} .jsonl file(s) under ${projectsRoot()}`);
+  console.log(`[burnglass] --inspect-schema: found ${files.length} .jsonl file(s) under ${projectsRoot()}`);
   const topKeys = {}, msgKeys = {}, usageKeys = {}, entrypoints = {}, models = {};
   let sampled = 0, assistantWithUsage = 0;
   const SAMPLE_FILES = 8, SAMPLE_RECS = 200;
@@ -7638,51 +8423,56 @@ function inspectSchema() {
 function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
-    console.log(`Pulse v${PULSE_VERSION} — local Claude Code usage dashboard\n`);
-    console.log('Usage: node server.js [--port N] [--host H] [--inspect-schema]');
+    const me = seaApi ? path.basename(process.execPath) : 'node server.js';
+    console.log(`Burnglass v${PULSE_VERSION} (formerly Pulse) — local usage dashboard for Claude Code, Codex and more\n`);
+    console.log('Usage: ' + me + ' [--port N] [--host H] [--inspect-schema]');
     console.log('  --port N          listen port (default 4747, or $PORT)');
     console.log('  --host H          bind address (default 127.0.0.1, or $HOST).');
     console.log('                    Use 0.0.0.0 to expose on the network — see the');
     console.log('                    warning it prints; prefer an SSH tunnel instead.');
     console.log('  --effort-setup    print the Claude Code hooks snippet that enables');
-    console.log('                    reasoning-effort logging (Pulse never edits ~/.claude)');
+    console.log('                    reasoning-effort logging (Burnglass never edits ~/.claude)');
     console.log('  --summary         print today / 7d / 30d spend, limit meters and top');
     console.log('                    models to the terminal and exit (no browser). Reads');
     console.log('                    the running server when there is one. NO_COLOR works.');
     console.log('  --statusline      run as a Claude Code status line (reads the JSON on');
-    console.log('                    stdin, prints a line enriched with Pulse\'s numbers)');
+    console.log('                    stdin, prints a line enriched with Burnglass\'s numbers)');
     console.log('  --statusline-setup  print the settings.json snippet to enable it');
     console.log('  --mode-hook       (internal) run as a Claude Code hook — records the');
     console.log('                    effort level to ' + modesFilePath());
     console.log('  --no-open         do not auto-open the browser (packaged exe only)');
-    console.log('  --stop            stop the running Pulse instance and exit');
-    console.log('  --tray               (Windows) notification-area icon: live spend/limit');
-  console.log('                       tooltip, open dashboard/mini, stop. Or {"tray": true}.');
-  console.log('  --install-shortcuts  (Windows) add "Pulse" and "Pulse - Stop"');
+    console.log('  --stop            stop the running Burnglass (or Pulse) instance and exit');
+    console.log('  --tray            (Windows) notification-area icon: live spend/limit');
+    console.log('                    tooltip, open dashboard/mini, stop. Or {"tray": true}.');
+    console.log('  --install-shortcuts  (Windows) add "Burnglass" and "Burnglass - Stop"');
     console.log('                    shortcuts to the Desktop');
-    console.log('  --startup on|off|status  (Windows) start Pulse silently when you sign');
-    console.log('                    in. The one thing Pulse writes outside ~/.pulse: a');
-    console.log('                    value under HKCU\\...\\CurrentVersion\\Run (no admin).');
-    console.log('  --install         (Windows exe) install to %LOCALAPPDATA%\\Programs\\Pulse');
+    console.log('  --startup on|off|status  (Windows) start Burnglass silently when you');
+    console.log('                    sign in. Written outside ' + homeLabel() + ': a value under');
+    console.log('                    HKCU\\...\\CurrentVersion\\Run (no admin).');
+    console.log('  --install         (Windows exe) install to %LOCALAPPDATA%\\Programs\\Burnglass');
+    console.log('                    (or the existing Programs\\Pulse folder when upgrading)');
     console.log('                    with Start Menu + Desktop shortcuts and an');
     console.log('                    Add/Remove Programs entry. The binaries are unsigned,');
     console.log('                    so SmartScreen may still warn.');
     console.log('  --uninstall       (Windows exe) undo --install and the startup entry.');
-    console.log('                    Your ~/.pulse config and history are kept.');
+    console.log('                    Your ' + homeLabel() + ' config and history are kept.');
     console.log('  --no-daemon       (Windows exe) keep running in this console window');
     console.log('                    instead of backgrounding');
     console.log('  --no-update-check disable the GitHub version check and community counters');
-    console.log('                    (Pulse\'s only default-on network calls; also:');
-    console.log('                    PULSE_NO_UPDATE_CHECK=1 or {"updateCheck":false} in');
-    console.log('                    ~/.pulse/config.json)');
+    console.log('                    (Burnglass\'s only default-on network calls; also:');
+    console.log('                    BURNGLASS_NO_UPDATE_CHECK=1 or {"updateCheck":false} in');
+    console.log('                    ' + homeLabel('config.json') + ')');
     console.log('  --version         print the version and exit');
     console.log('  --inspect-schema  print observed record schema and exit');
+    console.log('  env BURNGLASS_HOME  settings/history folder (default ~/.burnglass; a v1');
+    console.log('                    ~/.pulse is copied there once, and kept as a backup).');
+    console.log('                    Every BURNGLASS_* variable also answers to PULSE_*.');
     console.log('  env CLAUDE_DIR    override ~/.claude location');
     console.log('  env CODEX_DIR     override ~/.codex location (OpenAI Codex CLI logs,');
     console.log('                    ingested automatically when present)');
     return;
   }
-  if (args.version) { console.log('pulse v' + PULSE_VERSION); return; }
+  if (args.version) { console.log('burnglass v' + PULSE_VERSION); return; }
   if (args.modeHook) { runModeHook(); return; }
   if (args.summary) { runSummary(); return; }
   if (args.statusline) { runStatusline(); return; }
@@ -7699,8 +8489,14 @@ function main() {
   if (args.daemonChild) IS_DAEMON_CHILD = true;
   if (args.afterUpdate) IS_AFTER_UPDATE = true;
   // Detached processes (hidden daemon, post-update relaunch on any platform)
-  // have no console — their output must land in ~/.pulse/pulse.log.
-  if (args.daemonChild || args.afterUpdate) openLogFile();
+  // have no console — their output must land in <home>/burnglass.log. While
+  // the ~/.pulse → ~/.burnglass move is still pending the file is opened only
+  // after it (listen callback, with the lines so far backfilled), so the
+  // first v2 boot never litters the old folder with a log it abandons.
+  if (args.daemonChild || args.afterUpdate) {
+    if (homeMigrationPending()) logOpenDeferred = true;
+    else openLogFile();
+  }
   if (shouldDaemonize(args)) { daemonize(args, port, host); return; }
   startServer(port, host, serverOpts(args));
 }

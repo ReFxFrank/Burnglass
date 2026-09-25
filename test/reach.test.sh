@@ -24,7 +24,7 @@ const releases = [
 http.createServer((q, s) => {
   s.writeHead(200, { "Content-Type": "application/json" });
   if (q.url.indexOf("/releases") !== -1) return s.end(JSON.stringify(releases));
-  return s.end(JSON.stringify({ stargazers_count: 123, full_name: "ReFxFrank/Pulse-Usage-Monitor" }));
+  return s.end(JSON.stringify({ stargazers_count: 123, full_name: "ReFxFrank/Burnglass" }));
 }).listen(4885, "127.0.0.1", () => console.log("mock up"));
 ' >/dev/null 2>&1 &
 MOCK=$!
@@ -69,7 +69,7 @@ const on = require(TMP + "/on.json");
 ok(on.reach && on.reach.downloads === 66, "sums download_count across all releases+assets (got " + (on.reach && on.reach.downloads) + ", want 66)");
 ok(on.reach && on.reach.stars === 123, "reads repo stargazers_count (got " + (on.reach && on.reach.stars) + ")");
 ok(on.reach && typeof on.reach.fetchedAt === "number" && on.reach.fetchedAt > 0, "stamps fetchedAt");
-ok(on.reach && on.reach.repo === "ReFxFrank/Pulse-Usage-Monitor", "carries repo slug for the link (" + (on.reach && on.reach.repo) + ")");
+ok(on.reach && on.reach.repo === "ReFxFrank/Burnglass", "carries repo slug for the link (" + (on.reach && on.reach.repo) + ")");
 
 const offFlag = require(TMP + "/off_flag.json");
 ok(!offFlag.reach, "--no-update-check -> no reach fetch (reach absent)");

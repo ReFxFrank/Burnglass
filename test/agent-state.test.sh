@@ -270,7 +270,7 @@ ok(img("held") === "https://x.test/working.gif | Claude Code · working", "D: th
 ok(img("thinking") === "https://x.test/thinking.gif | Claude Code · thinking", "D: after the hold -> thinking art (" + img("thinking") + ")");
 ok(img("waiting") === "https://x.test/waiting.gif | Claude Code · waiting for you", "D: waiting switches immediately (" + img("waiting") + ")");
 ok(img("quiet-waiting") === "https://x.test/waiting.gif | Claude Code · waiting for you",
-   "D: a prompt pending for 20 quiet minutes still shows waiting, not Pulse idle (" + img("quiet-waiting") + ")");
+   "D: a prompt pending for 20 quiet minutes still shows waiting, not Burnglass idle (" + img("quiet-waiting") + ")");
 ok(img("recent-idle") === "https://x.test/claude.gif | Using Claude Code", "D: between turns -> the Claude Code image (" + img("recent-idle") + ")");
 ok(img("showstate-off") === "https://x.test/claude.gif | Using Claude Code", "D: discordShowState:false ignores live state (" + img("showstate-off") + ")");
 const hopImgs = [];

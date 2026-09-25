@@ -225,7 +225,7 @@ ok(cfgAnsi.planCost === 200, "the ANSI-label set still stored its amount (got " 
 // The route echoes the label to stdout, which the Windows daemon tees into
 // ~/.pulse/pulse.log — a replayed ESC fires again every time that log is read.
 const srvLog = fs.readFileSync(T + "/srv.log", "utf8");
-const planLines = srvLog.split("\n").filter((l) => /\[pulse\] plan /.test(l));
+const planLines = srvLog.split("\n").filter((l) => /\[burnglass\] plan /.test(l));
 ok(planLines.length > 0, "server logged the plan changes (" + planLines.length + " lines)");
 ok(planLines.every((l) => !CTRL.test(l.replace(/\r$/, ""))),
    "no control characters echoed to the server log (" + JSON.stringify(planLines.find((l) => CTRL.test(l.replace(/\r$/, "")))) + ")");

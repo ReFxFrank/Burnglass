@@ -146,8 +146,8 @@ if (m) {
   const paths = m[1].match(/"[^"]+"/g).map((s) => s.slice(1, -1));
   ok(paths.every((p) => path.isAbsolute(p) && fs.existsSync(p)),
      "every quoted path is absolute and exists (" + paths.join(" | ") + ")");
-  ok(paths[0] === process.execPath || /pulse(\.exe)?$/i.test(paths[0]),
-     "the launched binary is the Pulse exe (or, from source, this node) — not a relative or stale path");
+  ok(paths[0] === process.execPath || /(burnglass|pulse)(\.exe|-linux|-macos)?$/i.test(paths[0]),
+     "the launched binary is the Burnglass exe (or, from source, this node) — not a relative or stale path");
 }
 
 const en2 = J("en2.json");
