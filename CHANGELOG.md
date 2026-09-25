@@ -110,6 +110,38 @@ instead of the old fixed 60 / 85.
 - The dashboard never shows a hard-coded `~/.pulse`: paths come from the
   server's real home folder, and help copy uses the running exe's own name.
 
+**Hardened before release.** A review before release found these, now fixed:
+
+- If `~/.pulse` and `~/.burnglass` are the same folder (a symlink or
+  junction either way, or a linked `config.json`), Burnglass now treats them
+  as one. It no longer deletes your only copy of the Meshy API key at start
+  or right after you save it.
+- The copy keeps the old folder's permissions. A private `~/.pulse` (700,
+  files 600) stays private in `~/.burnglass`, and the old `config.json` stays
+  600 after the Meshy key is removed from it.
+- History that Pulse 1.x sealed into `~/.pulse/history` no longer brings back
+  a custom source you have since renamed, so those days are not counted
+  twice.
+- A `~/.pulse` that Pulse never wrote (PulseAudio uses the same name) is not
+  copied, written to or reported. The "your settings were copied" notice only
+  appears when something was copied.
+- The tray starts even when your user folder name contains a typographic
+  apostrophe (O’Neill).
+- On Windows, a status line or hook set up with a Git Bash path (`/c/Users/…`)
+  is checked as `C:\Users\…`. A path Burnglass can't check is no longer
+  reported as missing.
+- A missing status-line or hook file shows one warning, with a Dismiss
+  button, instead of repeated bars. Fix-it commands say `node server.js` when
+  you run from source and `./burnglass-linux` / `./burnglass-macos` on Linux
+  and macOS.
+- The version in the side rail and the mobile header is no longer cut off
+  (`v2.0.0-rc.1`).
+- The strip never deletes anything under `~/.pulse`. When it runs there, it
+  unpacks its popover to a temp folder, and it only ever removes files it
+  unpacked itself.
+- A failed strip or installer build no longer blocks a release. The
+  executables and their `pulse-*` copies still publish.
+
 ## v1.34.0
 
 - **Discord art that follows what Claude is doing.** Three new image fields
