@@ -1,9 +1,39 @@
 /* =============================================================================
-   sections/Kpis.css — styles for sections/Kpis.jsx ONLY.
-   OWNER: the Kpis section engineer. Scope EVERY selector under .sec-kpis (the
-   class <Section id="kpis"> puts on the root) — CSS is global and four people
-   edit sections in parallel. Floating content (Tip/Menu/Sheet) is portalled
-   to <body>: style it through its own prefixed class (kpis-…), not .sec-kpis.
-   Use the tokens + primitives in ../styles.css; never hard-code colours.
-   Mockup reference (design-command/src/styles.css): .kpis (l.283; ≤1360 l.599-600; ≤760 l.625-630) — .kpi/.kfacts/.kbar/.delta/.spark are shared primitives already
+   sections/Kpis.css — styles for sections/Kpis.jsx ONLY, scoped under .sec-kpis.
+   The tile anatomy (.kpi/.kpi-l/.kpi-v/.kpi-s/.kfacts/.kbar/.delta/.spark) is a
+   shared primitive in styles.css; this file only lays the strip out.
+   Mockup reference (design-command/src/styles.css): .kpis (l.283; ≤1360
+   l.599-600; ≤760 l.625-630).
    ============================================================================= */
+.sec-kpis .kpis {
+  grid-column: 1 / -1; display: grid; gap: var(--gap); min-width: 0;
+  grid-template-columns: minmax(0, 2.5fr) repeat(4, minmax(0, 1fr));
+}
+/* every tile is a size container so the 5-hour badge can shed its text */
+.sec-kpis .kpi { container-type: inline-size; }
+.sec-kpis .kpis-none { color: var(--text-3); }
+
+/* hero: a five-figure period total steps down one size instead of colliding
+   with the sparkline */
+.sec-kpis .kpis-hero.long .kpi-v { font-size: var(--fs-2xl); line-height: var(--lh-2xl); }
+.sec-kpis .kpis-hero .kpi-d .delta { margin-right: 2px; vertical-align: 1px; }
+
+/* 5-hour block: label row = name · ⓘ · badge. The badge keeps its icon and
+   drops the word when the tile is too narrow to hold it (still read aloud). */
+.sec-kpis .kpis-block .kpi-l .badge { margin-left: auto; }
+@container (max-width: 190px) {
+  .sec-kpis .kpis-bl {
+    position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden;
+    clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+  .sec-kpis .kpis-block .kpi-l .badge { padding: 0 3px; }
+}
+
+@media (max-width: 1360px) {
+  .sec-kpis .kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .sec-kpis .kpis-hero { grid-column: span 4; }
+}
+@media (max-width: 760px) {
+  .sec-kpis .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .sec-kpis .kpis-hero { grid-column: span 2; }
+}
