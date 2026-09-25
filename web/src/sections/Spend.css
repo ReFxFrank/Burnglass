@@ -96,11 +96,15 @@
 .sec-spend .spend-single { margin-bottom: var(--sp-2); }
 .sec-spend .spend-single b { color: var(--text); }
 
-/* wide By-source (≤1360 it spans the row): table left, all-time right */
-@container spendsrc (min-width: 640px) {
-  .sec-spend .spend-src-body { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); column-gap: var(--sp-6); align-items: start; }
-  .sec-spend .spend-src-main { margin-bottom: 0; }
-  .sec-spend .spend-alltime { margin-top: 0; padding-top: 0; padding-left: var(--sp-6); border-top: 0; border-left: 1px solid var(--line); align-self: stretch; }
+/* wide By-source (≤1360 it spans the row): table left, all-time right. Only
+   there — on wide screens the c-4 panel itself can pass 640 px, and beside
+   the chart it must keep the stacked layout (table, all-time at the foot). */
+@media (max-width: 1360px) {
+  @container spendsrc (min-width: 640px) {
+    .sec-spend .spend-src-body { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); column-gap: var(--sp-6); align-items: start; }
+    .sec-spend .spend-src-main { margin-bottom: 0; }
+    .sec-spend .spend-alltime { margin-top: 0; padding-top: 0; padding-left: var(--sp-6); border-top: 0; border-left: 1px solid var(--line); align-self: stretch; }
+  }
 }
 /* narrow By-source: drop the tokens column rather than squeeze the names */
 @container spendsrc (max-width: 330px) {

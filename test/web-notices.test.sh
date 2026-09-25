@@ -11,7 +11,10 @@
 #     missing file with the source command, Dismiss persists across a reload
 #     under a pulse-* localStorage key while a different issue still shows,
 #     System lists each integration once, and the rail / mobile sub-line shows
-#     a pre-release version (v2.0.0-rc.1) whole at 360–1920 px.
+#     a pre-release version (v2.0.0-rc.1) whole at 360–1920 px. Wide screens
+#     (1440–3440 px): the content column is centred past its cap and the top
+#     bar lines up with it; the rail's source rows fit "Claude Desktop" beside
+#     a four-figure amount while a long label still ellipsizes.
 # Part 2 checks web/dist, so run `npm run build` (web/) after changing web/src.
 # Env: WEB_TEST_SERVER=<server.js> tests another copy (e.g. a scratch build);
 #      WEB_TEST_PORT (default 4923); PLAYWRIGHT_MODULE / PW_CHROMIUM overrides.
@@ -255,6 +258,57 @@ async function versionCheck(width, where, extra) {
 }
 for (const w of [1025, 1280, 1920]) await versionCheck(w, ".rail .brand-sub");
 await versionCheck(360, ".mhead .brand-sub", (j) => { j.update = Object.assign({}, j.update, { status: "available", latest: "2.0.0-rc.2" }); });
+
+// Wide screens: past the --content-max cap the content column is CENTRED in the
+// main area (it used to hug the left, leaving a dark band on the right), and the
+// top bar keeps its contents on the content edges at every width.
+const CAP = 2000;
+for (const w of [1440, 1920, 2560, 3440]) {
+  const { ctx, page } = await open(w);
+  const r = await page.evaluate(() => {
+    const main = document.querySelector(".main").getBoundingClientRect();
+    const c = document.querySelector(".content"), cs = getComputedStyle(c), cr = c.getBoundingClientRect();
+    const inner = { l: cr.left + parseFloat(cs.paddingLeft), r: cr.right - parseFloat(cs.paddingRight) };
+    const kids = [...document.querySelector(".topbar").children].filter((k) => k.getBoundingClientRect().width > 0);
+    const tb = { l: kids[0].getBoundingClientRect().left, r: kids[kids.length - 1].getBoundingClientRect().right };
+    return { main: { l: main.left, r: main.right, w: main.width }, box: { l: cr.left, r: cr.right, w: cr.width }, inner, tb,
+             hscroll: document.documentElement.scrollWidth > document.documentElement.clientWidth };
+  });
+  const near = (a, b) => Math.abs(a - b) <= 1;
+  ok(near(r.tb.l, r.inner.l) && near(r.tb.r, r.inner.r), w + "px: top bar contents line up with the content edges (" + JSON.stringify({ tb: r.tb, content: r.inner }) + ")");
+  if (r.main.w > CAP) {
+    ok(near(r.box.w, CAP) && near(r.box.l - r.main.l, r.main.r - r.box.r), w + "px: the capped column is centred in the main area (" + JSON.stringify(r.box) + " in " + JSON.stringify(r.main) + ")");
+  } else {
+    ok(near(r.box.w, r.main.w), w + "px: below the cap the column fills the main area");
+  }
+  ok(!r.hscroll, w + "px: no horizontal page scroll");
+  await ctx.close();
+}
+
+// Rail source rows (240 px rail): "Claude Desktop" beside a four-figure amount
+// is shown whole (it was cut to "Claude Desk…"); a long custom label still
+// ellipsizes, and the amount beside it is never clipped.
+{
+  const { ctx, page } = await open(1440, (j) => {
+    j.allSources = ["claude-desktop", "cli", "foreman"];
+    j.sourceMeta = Object.assign({}, j.sourceMeta, { foreman: { label: "Foreman nightly builds" } });
+    for (const p of j.periods || []) {
+      p.bySource = { "claude-desktop": { cost: 2178.09, tokens: 1, messages: 1 }, cli: { cost: 3.45, tokens: 1, messages: 1 }, foreman: { cost: 1234.5, tokens: 1, messages: 1 } };
+    }
+  });
+  const rows = await page.$$eval(".rail .srcrow .opt", (els) => els.map((o) => {
+    const l = o.querySelector(".lbl"), a = o.querySelector(".amt");
+    const or = o.getBoundingClientRect(), ar = a.getBoundingClientRect();
+    return { label: l.textContent, amt: a.textContent, cut: l.scrollWidth > l.clientWidth, ellipsis: getComputedStyle(l).textOverflow,
+             amtInside: ar.left >= or.left && ar.right <= or.right - 4, amtWhole: a.scrollWidth <= a.clientWidth };
+  }));
+  const desk = rows.find((x) => x.label === "Claude Desktop");
+  const long = rows.find((x) => x.label === "Foreman nightly builds");
+  ok(desk && desk.amt === "$2,178.09" && !desk.cut, "rail: \"Claude Desktop\" fits beside $2,178.09 (" + JSON.stringify(desk) + ")");
+  ok(long && long.cut && long.ellipsis === "ellipsis", "rail: a long source label still ellipsizes (" + JSON.stringify(long) + ")");
+  ok(rows.length === 3 && rows.every((x) => x.amtInside && x.amtWhole), "rail: every amount is shown whole inside its row");
+  await ctx.close();
+}
 await browser.close();
 process.exit(fail);
 ' "$PWMOD" "$CHROME" "$PORT" || FAIL=1
