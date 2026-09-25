@@ -45,9 +45,9 @@
 
   /* ---- layout -------------------------------------------------------------------- */
   --rail-w: 240px; --topbar-h: 56px; --gutter: 24px; --gap: 12px;
-  /* content column cap (incl. its gutters); past it the column is CENTRED in
-     the main area and the top bar's edges follow it (see .topbar/.content) */
-  --content-max: 2000px;
+  /* no content cap: the column is fluid and fills the main area at every width
+     (a 4K screen at 120-150% scaling is 2560-3200 CSS px — a capped column left
+     a dead band beside it). Sections span the 12-col grid, so they scale with it. */
   --sticky-h: var(--topbar-h);   /* what sticks at the top (anchor offset) */
 
   /* ---- motion (hover/focus only; nothing loops) -------------------------------- */
@@ -305,10 +305,8 @@ code, .code {
 /* ---- top bar (≥1024) ---- */
 .topbar {
   position: sticky; top: 0; z-index: 20; height: var(--topbar-h); display: flex; align-items: center; gap: var(--sp-3);
-  /* the bar spans the main area (sticky background), but its contents line up
-     with .content's edges: past --content-max the column is centred, so both
-     sides get half the spare width on top of the gutter */
-  padding: 0 max(var(--gutter), calc((100% - var(--content-max)) / 2 + var(--gutter)));
+  /* same gutters as .content, so the bar's contents line up with the column */
+  padding: 0 var(--gutter);
   background: var(--bg); border-bottom: 1px solid var(--line); min-width: 0;
 }
 .tb-title { display: flex; align-items: baseline; gap: var(--sp-2); min-width: 0; flex: 0 1 auto; overflow: hidden; }
@@ -362,7 +360,7 @@ code, .code {
    ============================================================================= */
 .content {
   padding: var(--sp-4) var(--gutter) var(--sp-10); display: flex; flex-direction: column; gap: var(--gap);
-  width: 100%; max-width: var(--content-max); min-width: 0; margin-inline: auto; /* centred past the cap */
+  width: 100%; min-width: 0;
 }
 .sec {
   display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: var(--gap); min-width: 0;

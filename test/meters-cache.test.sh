@@ -364,6 +364,20 @@ ok "$(jv "$TMP/l2.json" '!s.alerts.some((a) => typeof a.label !== "string") ? 1 
 mode "m=ok"
 stop
 
+# ---- M: the 429 message counts down (rendered from nextAttemptAt on every build) ---------------
+start
+mode "m=429&retry=35"
+recheck "$TMP/m1.json"
+ok "$(jv "$TMP/m1.json" 's.meters.status === "rate-limited" && /retrying in ~1m\./.test(s.meters.error) ? 1 : 0')" \
+  "M: a 35 s Retry-After reads \"retrying in ~1m\" ($(jv "$TMP/m1.json" '(s.meters.error || "").slice(0, 70)'))"
+M_NEXT=$(jv "$CACHE" 's.nextAttemptAt')
+sleep_until $((M_NEXT - 28000))
+summary "$TMP/m2.json"
+ok "$(jv "$TMP/m2.json" 's.meters.status === "rate-limited" && /retrying now\./.test(s.meters.error) ? 1 : 0')" \
+  "M: ~28 s before the retry the same backoff reads \"retrying now\" — not the wait computed when the 429 arrived ($(jv "$TMP/m2.json" '(s.meters.error || "").slice(0, 70)'))"
+mode "m=ok"
+stop
+
 # ---- secrets ------------------------------------------------------------------------------------
 if grep -l "sk-test-oauth-token\|sk-test-EXPIRED-token" "$TMP"/srv-*.log "$TMP"/snap-*.json "$CACHE" 2>/dev/null | grep -q .; then LEAK=0; else LEAK=1; fi
 ok "$LEAK" "the fake OAuth token never appears in a cache file or a server log"

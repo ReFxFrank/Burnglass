@@ -12,8 +12,8 @@
 #     under a pulse-* localStorage key while a different issue still shows,
 #     System lists each integration once, and the rail / mobile sub-line shows
 #     a pre-release version (v2.0.0-rc.1) whole at 360–1920 px. Wide screens
-#     (1440–3440 px): the content column is centred past its cap and the top
-#     bar lines up with it; the rail's source rows fit "Claude Desktop" beside
+#     (1440–3840 px, 4K at 100–150% scaling): the content column fills the
+#     whole main area — no cap, no dead band — and the top bar lines up with it; the rail's source rows fit "Claude Desktop" beside
 #     a four-figure amount while a long label still ellipsizes — also when the
 #     rail SCROLLS with a classic scrollbar (a second Chromium without
 #     --hide-scrollbars, short window). Meter rows keyed __proto__ /
@@ -264,11 +264,11 @@ async function versionCheck(width, where, extra) {
 for (const w of [1025, 1280, 1920]) await versionCheck(w, ".rail .brand-sub");
 await versionCheck(360, ".mhead .brand-sub", (j) => { j.update = Object.assign({}, j.update, { status: "available", latest: "2.0.0-rc.2" }); });
 
-// Wide screens: past the --content-max cap the content column is CENTRED in the
-// main area (it used to hug the left, leaving a dark band on the right), and the
-// top bar keeps its contents on the content edges at every width.
-const CAP = 2000;
-for (const w of [1440, 1920, 2560, 3440]) {
+// Wide screens: the content column FILLS the main area at every width (a 1600 px
+// cap used to hug the left and leave a dark band on the right of a 4K screen —
+// the user runs 4K, i.e. 2560–3840 CSS px), and the top bar keeps its contents
+// on the content edges.
+for (const w of [1440, 1920, 2560, 3072, 3200, 3840]) {
   const { ctx, page } = await open(w);
   const r = await page.evaluate(() => {
     const main = document.querySelector(".main").getBoundingClientRect();
@@ -281,11 +281,7 @@ for (const w of [1440, 1920, 2560, 3440]) {
   });
   const near = (a, b) => Math.abs(a - b) <= 1;
   ok(near(r.tb.l, r.inner.l) && near(r.tb.r, r.inner.r), w + "px: top bar contents line up with the content edges (" + JSON.stringify({ tb: r.tb, content: r.inner }) + ")");
-  if (r.main.w > CAP) {
-    ok(near(r.box.w, CAP) && near(r.box.l - r.main.l, r.main.r - r.box.r), w + "px: the capped column is centred in the main area (" + JSON.stringify(r.box) + " in " + JSON.stringify(r.main) + ")");
-  } else {
-    ok(near(r.box.w, r.main.w), w + "px: below the cap the column fills the main area");
-  }
+  ok(near(r.box.l, r.main.l) && near(r.box.r, r.main.r), w + "px: the column fills the main area edge to edge (" + JSON.stringify(r.box) + " in " + JSON.stringify(r.main) + ")");
   ok(!r.hscroll, w + "px: no horizontal page scroll");
   await ctx.close();
 }

@@ -79,11 +79,11 @@ know when you update from Pulse 1.x:
   reduced motion stay calm.
 - **Mini view** shows each limit as % used on the same meter bars as the
   dashboard.
-- **Wide screens:** the content column now grows to 2000 px (it stopped at
-  1600) and past that it is centred instead of hugging the left edge, with
-  the top bar lined up to it. The By-source table stays under the chart there, and
-  heatmap cells grow a little taller instead of stretching into slivers. The
-  rail's source list fits "Claude Desktop" next to a four-figure amount.
+- **Wide screens and 4K:** the dashboard now fills the whole window at any
+  width. It used to stop at 1600 px and hug the left edge, leaving an empty
+  band on the right of a 4K screen. The top bar lines up with the content,
+  heatmap cells grow a little taller instead of stretching into slivers, and
+  the rail's source list fits "Claude Desktop" next to a four-figure amount.
 - The frontend dropped framer-motion and Radix; the server still has zero
   runtime dependencies.
 
@@ -134,6 +134,20 @@ instead of the old fixed 60 / 85.
   shown. **Recheck now** still checks at once, and turning the meters off
   deletes the file. This starts working from the first restart after the
   update to 2.0.0: Pulse 1.x never saved the reading.
+  A saved window whose reset time passes while no fresh reading arrives is
+  marked stale everywhere (dimmed on the dashboard, no alert, left out of the
+  status line, tray and strip) instead of looking current.
+- **The "rate-limited — retrying in ~Nm" note counts down** (Claude limits
+  and Codex account tokens). It used to repeat the wait from the moment the
+  429 arrived, so it could say "~51m" long after most of that had passed.
+- **A strip update that fails is retried**: at the next start and, while the
+  server keeps running, after 30 minutes (doubling, at most five attempts per
+  version). System shows the failure and when it will try again, then a link
+  to the release page. Turning the strip off while it is being restarted now
+  keeps it off.
+- On Windows, the built-in tools Burnglass runs (tasklist, taskkill, reg,
+  PowerShell) are started from `System32` by full path, so a file with the
+  same name in the current folder can never be run instead.
 
 - A second copy started at sign-in with `--no-open` no longer opens a
   browser window when another instance is already running.

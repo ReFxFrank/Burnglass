@@ -51,7 +51,7 @@ const crypto = require('crypto');
 
 // Version — keep in sync with package.json (build/make-exe.mjs enforces this).
 // The constant keeps its v1 NAME: make-exe's drift check greps for it.
-const PULSE_VERSION = '2.0.0-rc.1';
+const PULSE_VERSION = '2.0.0-rc.2';
 const BRAND = 'Burnglass';
 
 // BURNGLASS_<NAME> wins; PULSE_<NAME> (the v1 spelling) stays a permanent,
@@ -4693,10 +4693,19 @@ function dropRolledMeterBuckets() {
   if (!kept.length) metersState.lastGoodAt = null;
 }
 
+// "in ~Nm" / "now" for a 429 retry. The payload builders re-render the
+// rate-limit message from nextAttemptAt on every build, so the dashboard counts
+// down instead of repeating the wait computed when the 429 arrived.
+function retryInText(waitMs) {
+  return waitMs > 30000 ? 'in ~' + Math.max(1, Math.round(waitMs / 60000)) + 'm' : 'now';
+}
 function metersRateLimitMessage(waitMs) {
-  return 'Anthropic rate-limited the usage check (HTTP 429) — retrying in ~' +
-    Math.max(1, Math.round(waitMs / 60000)) + 'm. If this persists, something else on this machine ' +
+  return 'Anthropic rate-limited the usage check (HTTP 429) — retrying ' + retryInText(waitMs) +
+    '. If this persists, something else on this machine ' +
     '(e.g. a statusline script) may be polling the usage endpoint heavily.';
+}
+function codexUsageRateLimitMessage(waitMs) {
+  return 'ChatGPT rate-limited the usage check (HTTP 429) — retrying ' + retryInText(waitMs) + '.';
 }
 
 // ---- Last good reading across restarts ---------------------------------------
@@ -5031,8 +5040,7 @@ function refreshCodexUsage(done) {
         waitMs = Math.max(5000, Math.min(waitMs, CODEX_USAGE_429_MAX_MS));
         schedule(waitMs);
         codexUsageState.status = 'rate-limited';
-        codexUsageState.error = 'ChatGPT rate-limited the usage check (HTTP 429) — retrying in ~' +
-          Math.max(1, Math.round(waitMs / 60000)) + 'm.';
+        codexUsageState.error = codexUsageRateLimitMessage(waitMs);
         console.warn('[burnglass] codex account usage: ' + codexUsageState.error);
         return done && done(codexUsageState);
       }
@@ -5081,7 +5089,9 @@ function codexUsageForPayload(background) {
     stats: codexUsageState.stats,
     fetchedAt: codexUsageState.fetchedAt,
     lastGoodAt: codexUsageState.lastGoodAt,
-    error: codexUsageState.error,
+    error: codexUsageState.status === 'rate-limited'
+      ? codexUsageRateLimitMessage((codexUsageState.nextAttemptAt || 0) - Date.now())
+      : codexUsageState.error,
   };
 }
 
@@ -6362,7 +6372,9 @@ function metersForPayload(background) {
     })),
     fetchedAt: metersState.fetchedAt,
     lastGoodAt: metersState.lastGoodAt,
-    error: metersState.error,
+    error: metersState.status === 'rate-limited'
+      ? metersRateLimitMessage((metersState.nextAttemptAt || 0) - now)
+      : metersState.error,
   };
 }
 
