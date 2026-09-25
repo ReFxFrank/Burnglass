@@ -1,7 +1,7 @@
 {
   "name": "pulse-usage-dashboard",
   "version": "1.34.0",
-  "description": "A local Claude Code usage dashboard. The server reads ~/.claude read-only and has zero runtime dependencies; the React frontend (web/) is built to static files it serves. Runs on http://localhost:4747.",
+  "description": "A local, zero-dependency usage dashboard for Claude Code, OpenAI Codex and other coding agents. The server only reads the agents' local logs and has zero runtime dependencies; the React frontend (web/) is built to static files it serves. Runs on http://localhost:4747.",
   "license": "MIT",
   "engines": {
     "node": ">=18"

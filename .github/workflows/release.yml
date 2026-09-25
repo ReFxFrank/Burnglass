@@ -139,7 +139,10 @@ jobs:
             dist/pulse-strip.exe
           generate_release_notes: true
           body: |
-            **Pulse** — a local Claude Code usage dashboard.
+            **Pulse** — a local, zero-dependency usage dashboard for Claude Code, OpenAI Codex, Gemini
+            CLI, Continue, Cline and Roo Code (plus your own JSONL usage logs). Spend by model, source,
+            effort and project, official account limits, alerts, budgets, a Claude Code status line,
+            and optional Discord presence — all from the logs already on your machine.
 
             ### Download
             - **Windows (easiest):** `PulseSetup.exe` — a normal installer. It installs for the
@@ -167,11 +170,21 @@ jobs:
             The installer does not change that; every asset is built in the open by the workflow in
             this repo, and the sha256 of each is shown in the asset list.
 
-            From v1.1.0 Pulse can update itself: when a new release is out, the header shows an
-            update pill and the Server panel installs it in one click (sha256-verified).
-            Double-clicking a newer `pulse.exe` over a running old one takes over automatically.
+            Pulse updates itself: when a new release is out, the header shows an update pill and the
+            Server panel installs it in one click (sha256-verified). Double-clicking a newer
+            `pulse.exe` over a running old one takes over automatically.
 
-            Everything runs locally: Pulse reads `~/.claude` read-only; its only network call is
-            the GitHub version check (`--no-update-check` disables it).
-            Reasoning-effort chips work out of the box (`/effort` commands are read from your
-            transcripts); `pulse.exe --effort-setup` adds optional settings-level logging.
+            ### Local and private
+            Pulse binds to `127.0.0.1` and reads your agents' logs (`~/.claude`, `~/.codex`, and Gemini
+            CLI / Continue / Cline / Roo Code when present) strictly read-only. Its own files live in
+            `~/.pulse`; the only things it writes elsewhere are ones you ask for (the installer, the
+            "start with Windows" entry, Desktop shortcuts, and a self-update replacing its own
+            executable). Usage data never leaves your machine.
+            Network calls: the GitHub version check and public download/star counters (on by default;
+            `--no-update-check` disables both) and, only if you turn them on, the account meters
+            (`api.anthropic.com`, `chatgpt.com`) and Meshy credits (`api.meshy.ai`). Discord presence
+            (opt-in) talks only to the Discord desktop app's local socket.
+
+            See the [README](https://github.com/ReFxFrank/Pulse-Usage-Monitor#readme) for every feature
+            and the [CHANGELOG](https://github.com/ReFxFrank/Pulse-Usage-Monitor/blob/main/CHANGELOG.md)
+            for what changed.

@@ -321,7 +321,7 @@ function Dashboard({ data, colorMaps, periodKey, setPeriodKey, srcFilter, onStop
             <div className="h2row">
               <h2 style={{ marginBottom: 0 }}>
                 Spend&nbsp;
-                <InfoTip text="Estimated at Claude API list prices. On a Pro/Max plan this reflects relative usage, not a bill. Pick a month to see fixed calendar-month totals.">
+                <InfoTip text="Estimated at each provider's API list prices (or the cost an agent recorded itself). On a Pro/Max or ChatGPT plan this reflects relative usage, not a bill. Pick a month to see fixed calendar-month totals.">
                   <span style={{ color: 'var(--text-3)', cursor: 'help' }}>ⓘ</span>
                 </InfoTip>
               </h2>
@@ -446,10 +446,12 @@ function Shell({ children, header, footer, version, codex }) {
       {footer && (
         <footer>
           <div className="disc">
-            Costs are <b>estimates</b> at Claude API list prices — on a Pro/Max subscription they express
-            relative usage, not a bill. Pulse runs entirely on your machine and reads <code>~/.claude</code> read-only.
-            Its only network call is a GitHub version check — usage data never leaves this machine
-            (disable with <code>--no-update-check</code>).
+            Costs are <b>estimates</b> at each provider’s API list prices — on a subscription they express
+            relative usage, not a bill. Pulse runs entirely on your machine and only ever reads your agents’ logs
+            (<code>~/.claude</code>, <code>~/.codex</code>, …).
+            Usage data never leaves this machine. By default Pulse only checks GitHub for updates (disable
+            with <code>--no-update-check</code>); account meters, Codex usage and Meshy are opt-in calls to those
+            providers, and Discord presence talks to the local Discord app.
           </div>
           <div className="reading">
             reading: {footer.claudeDir} · {num((footer.fileCount || 0) - (footer.codexFileCount || 0))} session file{(footer.fileCount || 0) - (footer.codexFileCount || 0) === 1 ? '' : 's'}

@@ -503,7 +503,7 @@ export function CacheSavings({ cache, period }) {
         less {money2(cache.writePremium)} paid to write the cache
       </span>
       {cov && <span className="cscov">{cov}</span>}
-      <InfoTip text="Cache reads bill at a fraction of the input rate; cache writes bill above it (25% extra for the 5-minute TTL, 100% for the 1-hour TTL). Net is the read saving minus that write premium, priced per entry at each model’s own rate — so it can be negative when a window writes more cache than it reuses. Cache-write surcharges are an Anthropic pricing feature: entries from other providers (OpenAI, Google) carry no write premium and contribute only their read saving. Covers the sessions still in your logs — the long-window archive keeps day/model totals, not per-entry token types.">
+      <InfoTip text="Cache reads bill at a fraction of the input rate; cache writes bill above it (25% extra for the 5-minute TTL, 100% for the 1-hour TTL). Net is the read saving minus that write premium, priced per entry at each model’s own rate — so it can be negative when a window writes more cache than it reuses. Anthropic bills cache writes above input; OpenAI does too on models with a published cache-write price (GPT-6, 5.6 family, at 1.25×); Google bills none — each entry uses its own provider’s rule. Covers the sessions still in your logs — the long-window archive keeps day/model totals, not per-entry token types.">
         <span style={{ color: 'var(--text-3)', cursor: 'help' }}>ⓘ</span>
       </InfoTip>
     </div>

@@ -3488,7 +3488,9 @@ function seaAsset(key) {
 
 // ---------------------------------------------------------------------------
 // UPDATES
-// The ONLY network calls Pulse ever makes, and only when enabled (default on;
+// Pulse's only DEFAULT-ON network calls (the opt-in ones — account meters,
+// Codex usage, Meshy — live in their own sections; see CLAUDE.md), and only
+// when enabled (default on;
 // --no-update-check / PULSE_NO_UPDATE_CHECK / {"updateCheck":false} in
 // ~/.pulse/config.json disable it):
 //   - check: GET the GitHub Releases API for the latest version tag
@@ -7596,9 +7598,10 @@ function main() {
     console.log('                    Your ~/.pulse config and history are kept.');
     console.log('  --no-daemon       (Windows exe) keep running in this console window');
     console.log('                    instead of backgrounding');
-    console.log('  --no-update-check disable the GitHub version check (the only network');
-    console.log('                    call Pulse makes; also: PULSE_NO_UPDATE_CHECK=1 or');
-    console.log('                    {"updateCheck":false} in ~/.pulse/config.json)');
+    console.log('  --no-update-check disable the GitHub version check and community counters');
+    console.log('                    (Pulse\'s only default-on network calls; also:');
+    console.log('                    PULSE_NO_UPDATE_CHECK=1 or {"updateCheck":false} in');
+    console.log('                    ~/.pulse/config.json)');
     console.log('  --version         print the version and exit');
     console.log('  --inspect-schema  print observed record schema and exit');
     console.log('  env CLAUDE_DIR    override ~/.claude location');
