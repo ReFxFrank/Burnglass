@@ -68,6 +68,9 @@
 .sec-system .tg-x .sys-kf { flex: 1 1 100%; }
 .sec-system .tg-x .sys-strip-refresh { color: var(--warn); overflow-wrap: anywhere; min-width: 0; }
 .sec-system .tg-x .sys-strip-refresh b { color: var(--warn); }
+/* Tray icon diagnosis: why the icon is not there (message + where the logs are). */
+.sec-system .tg-x .sys-tray-err { flex: 1 1 16em; color: var(--warn); overflow-wrap: anywhere; min-width: 0; }
+.sec-system .tg-x .sys-tray-err b { color: var(--warn); }
 .sec-system .tg-note { grid-column: 1 / -1; margin: 2px 0 0; font-size: var(--fs-xs); line-height: var(--lh-xs); color: var(--text-2); overflow-wrap: anywhere; }
 .sec-system .tg-note:empty { display: none; }
 .sec-system .tg-note.good { color: var(--good); }
