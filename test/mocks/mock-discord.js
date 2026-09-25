@@ -36,6 +36,17 @@ net.createServer((sock) => {
           sock.write(frame(1, { cmd: 'DISPATCH', evt: 'ERROR', data: { code: 4000, message: 'bad client id' } }));
           sock.end();
         }
+      } else if (op === 1 && payload.cmd === 'SET_ACTIVITY') {
+        // Answer like Discord: an ERROR event for a rejected activity (any
+        // large_image containing "reject-me"), else the accepted-command echo.
+        const act = payload.args && payload.args.activity;
+        const img = act && act.assets && act.assets.large_image;
+        if (typeof img === 'string' && img.includes('reject-me')) {
+          sock.write(frame(1, { cmd: 'SET_ACTIVITY', evt: 'ERROR', nonce: payload.nonce,
+            data: { code: 4000, message: 'Invalid asset: large_image' } }));
+        } else {
+          sock.write(frame(1, { cmd: 'SET_ACTIVITY', evt: null, nonce: payload.nonce, data: act }));
+        }
       }
     }
   });

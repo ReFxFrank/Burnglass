@@ -382,6 +382,16 @@ Pulse logo when idle. Upload the images once under your Discord application's
 `discordLargeImage` in config). A missing key simply shows no image, so it
 degrades cleanly if you only upload some.
 
+**Animated images:** Discord only plays animation from a **link**, never from
+an uploaded Art Asset (those are PNG/JPEG/WebP stills). Host an animated GIF
+or WebP at a public **https** address and put the address itself in the
+setting, e.g. `{"discordClaudeImage": "https://example.com/mascot.gif"}`.
+Discord's own image proxy fetches it (Pulse still makes no network call), it
+can take a few seconds to appear the first time, and anyone who can see your
+presence can see where the image is hosted. Avoid Discord attachment links —
+they expire. If Discord rejects the image, the Server panel shows the error
+until the next accepted update.
+
 How it works / privacy: Pulse speaks the Discord **desktop client's local IPC
 socket** directly (named pipe on Windows) — the same mechanism as every
 rich-presence tool, but with no SDK and no network traffic from Pulse; the

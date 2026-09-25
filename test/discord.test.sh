@@ -4,6 +4,9 @@
 # B: disable endpoint clears the activity (activity: null).
 # C: no client id configured -> shipped default works out of the box.
 # D: discord not running -> status discord-not-found, server unaffected.
+# E: an https image URL reaches large_image verbatim (animated-GIF route); an
+#    activity Discord rejects shows status error, and the next accepted one
+#    clears it WITHOUT a reconnect.
 # Second line (state): "<model> · <effort> · N sessions" from the newest MAIN-
 # conversation entry (a newer subagent line must not flip it) + live sessions;
 # config discordShowModel:false removes it (checked in phase C).
@@ -52,7 +55,7 @@ sleep 0.5
 PORT=4886
 start_pulse() {
   CLAUDE_DIR=$CL PULSE_HOME=$PH CODEX_DIR=$TMP/no-codex \
-  PULSE_DISCORD_IPC="$1" PULSE_DISCORD_TICK_MS=400 PULSE_DISCORD_ROTATE_MS=900 \
+  PULSE_DISCORD_IPC="$1" PULSE_DISCORD_TICK_MS=400 PULSE_DISCORD_ROTATE_MS=900 PULSE_SUMMARY_MEMO_MS=0 \
   node "$ROOT/server.js" --port $PORT --no-update-check >"$TMP/srv.log" 2>&1 &
   SRV=$!
   sleep 2.5
@@ -77,6 +80,16 @@ kill $SRV 2>/dev/null; wait $SRV 2>/dev/null
 echo '{"discordPresence": true, "discordClientId": "123456789012345678"}' > "$PH/config.json"
 start_pulse "$NOIPC"
 curl -s "http://127.0.0.1:$PORT/api/summary" > "$TMP/d.json"
+kill $SRV 2>/dev/null; wait $SRV 2>/dev/null
+
+# --- E: rejected image -> error; fixed image -> ok again on the same socket
+echo '{"discordPresence": true, "discordClientId": "123456789012345678", "discordClaudeImage": "https://example.com/reject-me.gif"}' > "$PH/config.json"
+start_pulse "$IPC"
+curl -s "http://127.0.0.1:$PORT/api/summary" > "$TMP/e1.json"
+echo '{"discordPresence": true, "discordClientId": "123456789012345678", "discordClaudeImage": "https://example.com/clawd.gif"}' > "$PH/config.json"
+sleep 1.5
+curl -s "http://127.0.0.1:$PORT/api/summary" > "$TMP/e2.json"
+ECONN=$(grep -c 'discord presence connected' "$TMP/srv.log")
 kill $SRV 2>/dev/null; wait $SRV 2>/dev/null
 kill $MOCK 2>/dev/null
 
@@ -124,7 +137,9 @@ const C = require(SP + "/c.json").discord;
 ok(C && C.status === "ok", "C: NO config id -> shipped default works out of the box (" + (C && C.status) + ")");
 const defaultHs = frames.filter((f) => f.op === 0).find((f) => f.payload.client_id === "1527236432375189535");
 ok(!!defaultHs, "C: handshake used the shipped default application ID");
-const cActs = frames.slice(frames.indexOf(defaultHs)).filter((f) => f.op === 1 && f.payload.cmd === "SET_ACTIVITY" && f.payload.args.activity);
+const cStart = frames.indexOf(defaultHs);
+const cEnd = frames.findIndex((f, i) => i > cStart && f.op === 0); // the next phase handshake
+const cActs = frames.slice(cStart, cEnd < 0 ? undefined : cEnd).filter((f) => f.op === 1 && f.payload.cmd === "SET_ACTIVITY" && f.payload.args.activity);
 ok(cActs.length >= 1 && cActs.every((f) => f.payload.args.activity.state === undefined),
    "C: discordShowModel:false -> no second line (" + cActs.length + " frame(s))");
 
@@ -132,8 +147,17 @@ const D = require(SP + "/d.json").discord;
 ok(D && (D.status === "discord-not-found" || D.status === "connecting"), "D: no Discord -> " + (D && D.status));
 const dlog = fs.readFileSync(SP + "/srv.log", "utf8");
 ok(/listening: http/.test(dlog), "D: server unaffected by missing Discord");
+
+const E1 = require(SP + "/e1.json").discord, E2 = require(SP + "/e2.json").discord;
+ok(E1 && E1.status === "error" && /Invalid asset/.test(E1.error || ""),
+   "E: rejected activity -> status error (" + (E1 && E1.status) + ", " + (E1 && E1.error) + ")");
+ok(E2 && E2.status === "ok" && !E2.error, "E: next accepted activity clears the error (" + (E2 && E2.status) + ")");
+ok(process.argv[2] === "1", "E: cleared on the SAME connection, no reconnect (connects=" + process.argv[2] + ")");
+const urlAct = frames.find((f) => f.op === 1 && f.payload.cmd === "SET_ACTIVITY" && f.payload.args.activity &&
+  f.payload.args.activity.assets.large_image === "https://example.com/clawd.gif");
+ok(!!urlAct, "E: https image URL reaches large_image verbatim");
 process.exit(fail);
-' "$TMP"
+' "$TMP" "$ECONN"
 RES=$?
 echo "---- exit $RES"
 exit $RES

@@ -4777,10 +4777,17 @@ function discordConnect() {
           sock.setTimeout(0);
           discordTick(); // publish immediately
         } else if (msg.evt === 'ERROR') {
-          // e.g. invalid client id — surface it, don't hammer
+          // e.g. invalid client id, or an activity Discord rejected (a bad
+          // image URL) — surface it, don't hammer (the same activity is never
+          // re-sent; the next real change is)
           discordState.status = 'error';
           discordState.error = 'Discord: ' + ((msg.data && msg.data.message) || 'unknown error');
           console.warn('[pulse] discord presence: ' + discordState.error);
+        } else if (settled && msg.cmd === 'SET_ACTIVITY' && !msg.evt && discordState.status === 'error') {
+          // A later activity was accepted — the error is over. Without this
+          // the panel showed "error" until the next reconnect.
+          discordState.status = 'ok';
+          discordState.error = null;
         }
       }
     });
@@ -4893,7 +4900,7 @@ function buildDiscordActivity() {
   try { s = buildSummary(null, { background: true }); } catch (_) { return null; }
   if (!s) return null;
   // One period per page — Today / Past 7 days / All-time — alternating on
-  // the shared clock. Single line: tokens + spend, nothing else.
+  // the shared clock. First line: tokens + spend, nothing else.
   const pages = [
     { label: 'Today', tokens: s.today.tokens, cost: s.today.cost },
     { label: 'Past 7 days', tokens: s.week.tokens, cost: s.week.cost },

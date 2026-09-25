@@ -12,6 +12,15 @@
   activity is one line again. Friends can see presence, so
   `{"discordShowModel": false}` turns the line off. New `payload.activeNow`
   = `{provider, model, effort, ultracode, sessions}`.
+- **Animated presence images.** Discord animates a GIF / animated WebP only
+  when it's given as an https **link** (uploaded Art Assets are always
+  stills). `discordClaudeImage` / `discordCodexImage` / `discordLargeImage`
+  already pass straight through, so a link works with no other change — now
+  documented in the README, and covered by a test.
+- **Fix: Discord status stuck on "error".** If Discord rejected one activity
+  (e.g. a bad image link), the Server panel kept showing the error until
+  Pulse reconnected, even after later updates went through. An accepted
+  update now clears it on the same connection.
 
 ## v1.31.0
 
