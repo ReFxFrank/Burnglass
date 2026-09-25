@@ -395,6 +395,15 @@ presence on, the **Server panel** has an image field for each slot (Claude
 Code / Codex / idle) — paste a link or an art-asset key, or clear it to go
 back to the built-in art.
 
+**Images that follow what Claude is doing:** three more fields — *Claude —
+working*, *thinking*, *waiting on you* — switch the image while Claude runs
+a tool, while the model thinks, and while a permission prompt or question is
+waiting for you (empty = the Claude Code image). Pulse reads Claude Code's
+own live status file (`~/.claude/sessions/`, read-only) plus the transcript;
+working ↔ thinking changes are held for 45 s so the image doesn't flicker.
+Codex gets working / thinking / idle. Turn it off with
+`{"discordShowState": false}`.
+
 How it works / privacy: Pulse speaks the Discord **desktop client's local IPC
 socket** directly (named pipe on Windows) — the same mechanism as every
 rich-presence tool, but with no SDK and no network traffic from Pulse; the

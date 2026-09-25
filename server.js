@@ -34,7 +34,7 @@ const url = require('url');
 const crypto = require('crypto');
 
 // Version — keep in sync with package.json (build/make-exe.mjs enforces this).
-const PULSE_VERSION = '1.33.0';
+const PULSE_VERSION = '1.34.0';
 const SERVER_START = Date.now();
 let IS_DAEMON_CHILD = false; // set when running as the hidden background child
 let IS_AFTER_UPDATE = false; // set on the relaunch right after a self-update
@@ -966,6 +966,45 @@ function userText(rec) {
   return '';
 }
 
+// LIVE CONVERSATION STATE (for the Discord state art). parseFile/parseCodexFile
+// record, in the pass they already make, where each conversation's MAIN
+// thread stopped: the kind of its last meaningful line and any tool calls
+// still waiting for a result. computeAgentState() turns that — plus Claude
+// Code's own live status file — into working / thinking / waiting / idle.
+// Tools whose open call means Claude is waiting on YOU, not working.
+const WAITING_TOOLS = new Set(['AskUserQuestion', 'ExitPlanMode']);
+// Classify one main-thread transcript record, updating `open` (tool_use id →
+// tool name) as calls start and resolve. Returns the step kind or null.
+function claudeConvStep(rec, open) {
+  if (rec.type === 'system') return rec.subtype === 'compact_boundary' ? 'prompt' : null; // compaction ends → model resumes
+  const content = rec.message && rec.message.content;
+  if (rec.type === 'user') {
+    if (rec.isMeta) return null;
+    if (Array.isArray(content)) {
+      let results = 0;
+      for (const b of content) if (b && b.type === 'tool_result') { open.delete(b.tool_use_id); results++; }
+      if (results) return 'tool_result';
+    }
+    const txt = userText(rec).trim();
+    if (!txt) return null;
+    if (/^\[Request interrupted by user/.test(txt)) { open.clear(); return 'interrupt'; }
+    if (parseLocalCommand(txt)) return 'command';
+    open.clear(); // a new prompt: anything still "open" was abandoned
+    return 'prompt';
+  }
+  if (rec.type === 'assistant') {
+    if (rec.isApiErrorMessage) return 'error';
+    let tools = 0;
+    if (Array.isArray(content)) {
+      for (const b of content) {
+        if (b && b.type === 'tool_use' && typeof b.id === 'string') { open.set(b.id, String(b.name || '')); tools++; }
+      }
+    }
+    return tools ? 'tool_use' : 'reply';
+  }
+  return null;
+}
+
 // Reasoning-effort level names Claude Code accepts for `/effort` (ultracode is
 // handled separately — it is xhigh plus workflow orchestration, shown as ULTRA).
 const EFFORT_LEVELS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
@@ -1175,6 +1214,9 @@ function parseFile(filePath) {
   const sessionMeta = {};       // sessionId -> { firstUserText, project }
   const ultracodeSessions = []; // sessions whose prompts invoked ultracode
   const effortEvents = [];      // time-stamped /effort changes parsed from the transcript
+  // Where the MAIN thread stopped (see claudeConvStep) + newest subagent line.
+  const openTools = new Map();
+  let convKind = null, convTs = 0, convSid = '', sideTs = 0;
 
   for (const line of lines) {
     if (!line) continue;
@@ -1185,6 +1227,22 @@ function parseFile(filePath) {
       continue; // partial/truncated line — skip
     }
     if (!rec || typeof rec !== 'object') continue;
+
+    if (rec.type === 'user' || rec.type === 'assistant' || rec.type === 'system') {
+      const t = Date.parse(rec.timestamp);
+      if (isFinite(t)) {
+        if (rec.isSidechain === true) {
+          if (t > sideTs) sideTs = t;
+          if (!convSid && typeof rec.sessionId === 'string') convSid = rec.sessionId;
+        } else {
+          const k = claudeConvStep(rec, openTools);
+          if (k) {
+            convKind = k; convTs = t;
+            if (typeof rec.sessionId === 'string' && rec.sessionId) convSid = rec.sessionId;
+          }
+        }
+      }
+    }
 
     // Each user record is either a real prompt or a local-command invocation
     // (`/effort`, `/model`, …, plus their <local-command-stdout> echoes).
@@ -1284,7 +1342,10 @@ function parseFile(filePath) {
       for (const a of advisorEntries(e, marks[i])) expanded.push(a);
     });
   }
-  return { entries: expanded, sessionMeta, ultracodeSessions, effortEvents };
+  const conv = convSid && (convKind || sideTs)
+    ? { provider: 'claude', sessionId: convSid, kind: convKind, ts: convTs, open: Array.from(openTools.values()), sideTs }
+    : null;
+  return { entries: expanded, sessionMeta, ultracodeSessions, effortEvents, conv };
 }
 
 // ---------------------------------------------------------------------------
@@ -1321,6 +1382,10 @@ function parseCodexFile(filePath) {
   let sid = '';
   let groupSid = ''; // session the rollout's usage belongs to (see session_meta)
   let isSub = false; // a subagent rollout (spawned agent, auto-reviewer, /review)
+  // Where the turn stopped (live state for the Discord art): turn start/end
+  // events and tool calls still waiting for their output.
+  const openCalls = new Map();
+  let convKind = null, convTs = 0;
   let project = '';
   let model = 'gpt-unknown';
   let effort = null;
@@ -1341,6 +1406,12 @@ function parseCodexFile(filePath) {
     try { rec = JSON.parse(line); } catch (_) { continue; } // partial trailing write
     if (!rec || typeof rec !== 'object') continue;
     const p = rec.payload || {};
+
+    if (rec.type === 'event_msg' || rec.type === 'response_item') {
+      const k = codexConvStep(rec.type, p, openCalls);
+      const t = k ? Date.parse(rec.timestamp) : NaN;
+      if (k && isFinite(t)) { convKind = k; convTs = t; }
+    }
 
     if (rec.type === 'session_meta') {
       sid = p.session_id || p.id || sid;
@@ -1441,7 +1512,36 @@ function parseCodexFile(filePath) {
       continue;
     }
   }
-  return { entries, sessionMeta, ultracodeSessions: [], effortEvents: [], codexRateSnapshot: rateSnapshot };
+  const convSid = groupSid || sid || path.basename(filePath, '.jsonl');
+  // A subagent rollout only ever signals "the session's helpers are busy".
+  const conv = convKind
+    ? (isSub ? { provider: 'codex', sessionId: convSid, kind: null, ts: 0, open: [], sideTs: convTs }
+      : { provider: 'codex', sessionId: convSid, kind: convKind, ts: convTs, open: Array.from(openCalls.values()), sideTs: 0 })
+    : null;
+  return { entries, sessionMeta, ultracodeSessions: [], effortEvents: [], codexRateSnapshot: rateSnapshot, conv };
+}
+
+// Codex counterpart of claudeConvStep: turn_started/task_started open a turn
+// (model thinking), a function/custom/shell call without its output yet is a
+// running tool, task_complete / turn_aborted end the turn. Codex never
+// persists approval requests, so it has no "waiting on you" state.
+function codexConvStep(type, p, open) {
+  const t = p && p.type;
+  if (type === 'event_msg') {
+    if (t === 'task_started' || t === 'turn_started' || t === 'user_message') return 'prompt';
+    if (t === 'task_complete' || t === 'turn_complete' || t === 'turn_aborted') { open.clear(); return 'reply'; }
+    return null;
+  }
+  if (t === 'function_call' || t === 'custom_tool_call' || t === 'local_shell_call') {
+    const id = p.call_id || p.id;
+    if (typeof id === 'string') open.set(id, String(p.name || t));
+    return 'tool_use';
+  }
+  if (t === 'function_call_output' || t === 'custom_tool_call_output' || t === 'local_shell_call_output') {
+    if (typeof p.call_id === 'string') open.delete(p.call_id);
+    return 'tool_result';
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1836,6 +1936,7 @@ function parseAll() {
       ultracodeSessions: result.ultracodeSessions || [],
       effortEvents: result.effortEvents || [],
       codexRateSnapshot: result.codexRateSnapshot || null,
+      conv: result.conv || null,
     });
     parsed++;
   }
@@ -1856,7 +1957,15 @@ function parseAll() {
   const ultracodeSessions = new Set();
   const effortEvents = [];
   let codexRateSnapshot = null;
-  for (const { entries, sessionMeta: sm, ultracodeSessions: us, effortEvents: ev, codexRateSnapshot: rs } of fileCache.values()) {
+  // Live conversation state per session: the newest main-thread end state
+  // across that session's files, and the newest subagent activity.
+  const conv = Object.create(null);
+  for (const { entries, sessionMeta: sm, ultracodeSessions: us, effortEvents: ev, codexRateSnapshot: rs, conv: c } of fileCache.values()) {
+    if (c && c.sessionId) {
+      const cur = conv[c.sessionId] || (conv[c.sessionId] = { provider: c.provider, kind: null, ts: 0, open: [], sideTs: 0 });
+      if (c.kind && c.ts >= cur.ts) { cur.kind = c.kind; cur.ts = c.ts; cur.open = c.open; cur.provider = c.provider; }
+      if (c.sideTs > cur.sideTs) cur.sideTs = c.sideTs;
+    }
     for (const e of entries) {
       const prevIdx = globalSeen.get(e.key);
       if (prevIdx !== undefined) {
@@ -1892,7 +2001,7 @@ function parseAll() {
   return {
     entries: merged, sessionMeta, ultracodeSessions, effortEvents,
     fileCount: files.length, codexFileCount: codexFiles.length,
-    codexRateSnapshot,
+    codexRateSnapshot, conv,
   };
 }
 
@@ -3005,7 +3114,7 @@ function buildSummary(sourceFilter, opts) {
     return summaryMemo.payload;
   }
   const buildT0 = Date.now();
-  const { entries, sessionMeta, ultracodeSessions, effortEvents, fileCount, codexFileCount, codexRateSnapshot } = parseAll();
+  const { entries, sessionMeta, ultracodeSessions, effortEvents, fileCount, codexFileCount, codexRateSnapshot, conv } = parseAll();
   const desktopTitles = readDesktopTitles();
   const now = Date.now();
   const history = readHistory();
@@ -3037,6 +3146,8 @@ function buildSummary(sourceFilter, opts) {
     payload.planValue = computePlanValue(planPeriods(entries, history, now), now);
   }
   payload.sourceFilter = appliedFilter;
+  // What the agent is doing right now (not source-scoped: it's live state).
+  payload.agentState = computeAgentState(conv, now);
   // Surface what Pulse is actually reading, so a wrong-directory setup (e.g.
   // Claude Code under WSL while Pulse runs in native Windows) is diagnosable.
   payload.claudeDir = claudeDir();
@@ -4843,6 +4954,91 @@ function fmtTok(v) {
   if (v >= 1e3) return (v / 1e3).toFixed(0) + 'K';
   return String(Math.round(v));
 }
+// ---------------------------------------------------------------------------
+// LIVE AGENT STATE — working / thinking / waiting / idle, for the Discord
+// state art. Two read-only sources:
+//  1. Claude Code's own live-session registry (≥ 2.1.119):
+//     ~/.claude/sessions/<pid>.json = {pid, sessionId, status, …} with status
+//     busy | shell | waiting | idle, rewritten on every state change and
+//     deleted on a clean exit. Undocumented — only `status` is read, anything
+//     else is tolerated, nothing is ever written. `waiting` is the one signal
+//     transcripts cannot give (a pending permission prompt is never logged).
+//  2. Where each transcript/rollout's main thread stopped (the `conv` state
+//     parseAll merges) — decides working vs thinking, and is the whole story
+//     for Codex and for Claude Code builds that don't write the registry.
+const LIVE_STATE_RANK = { waiting: 4, working: 3, thinking: 2, idle: 1 };
+const SIDE_ACTIVE_MS = 30 * 1000;       // a subagent line this recent = the session is working
+const LIVE_STATE_MAX_AGE_MS = 15 * 60 * 1000; // transcript-only states expire (crashed sessions)
+function liveStateMemoMs() {
+  const v = Number(process.env.PULSE_LIVE_STATE_MEMO_MS);
+  return Number.isFinite(v) && v >= 0 ? v : 3000;
+}
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch (e) { return !!e && e.code === 'EPERM'; }
+}
+let claudeRegistryMemo = { at: 0, list: [] };
+function claudeLiveRegistry(now) {
+  if (now - claudeRegistryMemo.at < liveStateMemoMs()) return claudeRegistryMemo.list;
+  const list = [];
+  const dir = path.join(claudeDir(), 'sessions');
+  let names = [];
+  try { names = fs.readdirSync(dir); } catch (_) {}
+  for (const n of names.slice(0, 256)) {
+    if (!/^\d{1,10}\.json$/.test(n)) continue;
+    let j = null;
+    try { j = JSON.parse(fs.readFileSync(path.join(dir, n), 'utf8')); } catch (_) { continue; }
+    if (!j || typeof j !== 'object' || typeof j.status !== 'string') continue;
+    const pid = Number.isInteger(j.pid) ? j.pid : parseInt(n, 10);
+    if (!pidAlive(pid)) continue; // a crash leaves the file behind
+    list.push({ sessionId: typeof j.sessionId === 'string' ? j.sessionId : '', status: j.status });
+  }
+  claudeRegistryMemo = { at: now, list };
+  return list;
+}
+
+// One session's state from its transcript alone (null = not live).
+function convState(c, now) {
+  if (!c || !c.kind || now - c.ts > LIVE_STATE_MAX_AGE_MS) return null;
+  if (c.kind === 'tool_use' && c.open.length) return c.open.some((n) => WAITING_TOOLS.has(n)) ? 'waiting' : 'working';
+  if (c.kind === 'prompt' || c.kind === 'tool_result' || c.kind === 'tool_use') return 'thinking';
+  return c.sideTs && now - c.sideTs <= SIDE_ACTIVE_MS ? 'working' : 'idle';
+}
+
+// → { provider, state, sessions, source } for the most urgent live session,
+// or null. Ranking: waiting > working > thinking > idle.
+function computeAgentState(conv, now) {
+  conv = conv || {};
+  const states = [];
+  const reg = claudeLiveRegistry(now);
+  for (const r of reg) {
+    const c = conv[r.sessionId];
+    let state = null;
+    if (r.status === 'waiting') state = 'waiting';
+    else if (r.status === 'busy' || r.status === 'shell') {
+      const open = c && c.kind === 'tool_use' ? c.open : [];
+      state = open.some((n) => WAITING_TOOLS.has(n)) ? 'waiting'
+        : open.length || r.status === 'shell' ? 'working' : 'thinking';
+    } else if (r.status === 'idle') {
+      state = c && c.sideTs && now - c.sideTs <= SIDE_ACTIVE_MS ? 'working' : 'idle';
+    }
+    if (state) states.push({ provider: 'claude', state, source: 'claude-status' });
+  }
+  // The registry is authoritative for Claude whenever it lists any live
+  // session: a session missing from it has exited. Otherwise (older Claude
+  // Code, or a build that doesn't write it) fall back to the transcripts.
+  for (const sid in conv) {
+    const c = conv[sid];
+    if (c.provider === 'claude' && reg.length) continue;
+    const state = convState(c, now);
+    if (state) states.push({ provider: c.provider, state, source: 'transcript' });
+  }
+  if (!states.length) return null;
+  let best = states[0];
+  for (const s of states) if (LIVE_STATE_RANK[s.state] > LIVE_STATE_RANK[best.state]) best = s;
+  return { provider: best.provider, state: best.state, sessions: states.length, source: best.source };
+}
+
 // Human model name for the presence line: claude-opus-5-5 → "Opus 5.5",
 // claude-3-5-sonnet-20241022 → "Sonnet 3.5", gpt-6-sol → "GPT-6 Sol",
 // gpt-5.3-codex → "GPT-5.3 Codex", glm-5.1 → "GLM-5.1". Partner-cloud forms
@@ -4927,6 +5123,27 @@ function discordPresenceStart() {
   return discordStart;
 }
 
+// Per-state Claude art (Server panel → Discord images); an empty slot falls
+// back to the Claude Code image.
+const DISCORD_STATE_SLOTS = { working: 'discordClaudeWorkingImage', thinking: 'discordClaudeThinkingImage', waiting: 'discordClaudeWaitingImage' };
+const DISCORD_STATE_TEXT = { working: 'working', thinking: 'thinking', waiting: 'waiting for you' };
+// Working ↔ thinking flip every few seconds — faster than a 15 s tick can
+// show honestly, and every image swap makes viewers reload a GIF. Once one of
+// the two is on screen, the other must persist for the hold before taking
+// over. Waiting and idle switch at once: those you want to see immediately.
+let discordShownState = { state: null, since: 0 };
+function discordStateHoldMs() {
+  const v = Number(process.env.PULSE_DISCORD_STATE_HOLD_MS);
+  return Number.isFinite(v) && v >= 0 ? v : 45 * 1000;
+}
+function heldAgentState(next, now) {
+  const cur = discordShownState;
+  const busy = (st) => st === 'working' || st === 'thinking';
+  if (busy(next) && busy(cur.state) && next !== cur.state && now - cur.since < discordStateHoldMs()) return cur.state;
+  if (next !== cur.state) discordShownState = { state: next, since: now };
+  return next;
+}
+
 function buildDiscordActivity() {
   let s = null;
   try { s = buildSummary(null, { background: true }); } catch (_) { return null; }
@@ -4946,12 +5163,20 @@ function buildDiscordActivity() {
   // an unknown key just renders no image, so this degrades cleanly. Each key is
   // overridable in config (discordClaudeImage / discordCodexImage / discordLargeImage).
   const cfg = readConfig();
-  const prov = s.activeProvider;
+  // Live state (working / thinking / waiting / idle — see computeAgentState).
+  // A session that is working or waiting on you keeps its provider's art
+  // even after 15 quiet minutes: a pending permission prompt writes nothing.
+  const ag = cfg.discordShowState === false ? null : s.agentState;
+  let prov = s.activeProvider;
+  if (ag && ag.state !== 'idle') prov = ag.provider;
+  const live = heldAgentState(ag && ag.provider === prov ? ag.state : null, Date.now());
+  const claudeArt = (live && DISCORD_STATE_SLOTS[live] && cfg[DISCORD_STATE_SLOTS[live]]) || cfg.discordClaudeImage || 'claude';
   const asset = prov === 'codex' ? (cfg.discordCodexImage || 'codex')
-    : prov === 'claude' ? (cfg.discordClaudeImage || 'claude')
+    : prov === 'claude' ? claudeArt
     : (cfg.discordLargeImage || 'pulse');
-  const assetText = prov === 'codex' ? 'Using OpenAI Codex'
-    : prov === 'claude' ? 'Using Claude Code'
+  const verb = live && DISCORD_STATE_TEXT[live];
+  const assetText = prov === 'codex' ? (verb ? 'OpenAI Codex · ' + verb : 'Using OpenAI Codex')
+    : prov === 'claude' ? (verb ? 'Claude Code · ' + verb : 'Using Claude Code')
     : 'Pulse — idle';
   // Second line while active: "Opus 5.5 · Extra High · 3 sessions" — the
   // model + effort you're running and how many sessions are live. Absent when
@@ -4959,7 +5184,7 @@ function buildDiscordActivity() {
   // so it can be turned off with config `discordShowModel: false`.
   let state;
   const an = s.activeNow;
-  if (an && cfg.discordShowModel !== false) {
+  if (an && an.provider === prov && cfg.discordShowModel !== false) {
     const parts = [prettyModelName(an.model), an.ultracode ? 'Ultracode' : effortLabel(an.effort)];
     if (an.sessions > 0) parts.push(an.sessions + (an.sessions === 1 ? ' session' : ' sessions'));
     const line = parts.filter(Boolean).join(' · ').slice(0, 128);
@@ -5018,7 +5243,10 @@ function startDiscordLoop() {
 // The three large-image slots and their config keys. A slot holds a
 // Developer-Portal Art Asset key, an https link (the ONLY way Discord
 // animates a GIF / animated WebP), or nothing (= the built-in key).
-const DISCORD_IMAGE_SLOTS = { claude: 'discordClaudeImage', codex: 'discordCodexImage', idle: 'discordLargeImage' };
+const DISCORD_IMAGE_SLOTS = {
+  claude: 'discordClaudeImage', claudeWorking: 'discordClaudeWorkingImage', claudeThinking: 'discordClaudeThinkingImage',
+  claudeWaiting: 'discordClaudeWaitingImage', codex: 'discordCodexImage', idle: 'discordLargeImage',
+};
 const DISCORD_IMAGE_MAX = 256; // Discord's external-asset URL limit
 
 // Validate one slot value from the dashboard → { value } (null clears the
@@ -6042,7 +6270,8 @@ function startServer(port, host, opts) {
       }
       if (route === '/api/discord/images') {
         if (!allowMutation(req, res)) return;
-        // JSON body {claude?, codex?, idle?}: only the slots present change;
+        // JSON body {claude?, claudeWorking?, claudeThinking?, claudeWaiting?,
+        // codex?, idle?}: only the slots present change;
         // an empty value restores the built-in art key. All-or-nothing — one
         // bad value rejects the whole request and nothing is written.
         readJsonBody(req, 4096, (bodyErr, body) => {
@@ -6058,7 +6287,7 @@ function startServer(port, host, opts) {
             if (r.error) return fail(slot + ' image ' + r.error);
             patch[key] = r.value;
           }
-          if (!Object.keys(patch).length) return fail('no image slots given (claude, codex, idle)');
+          if (!Object.keys(patch).length) return fail('no image slots given (' + Object.keys(DISCORD_IMAGE_SLOTS).join(', ') + ')');
           writeConfig(patch);
           console.log('[pulse] discord images updated from the dashboard (' +
             Object.keys(patch).map((k) => k + '=' + (patch[k] ? 'set' : 'default')).join(', ') + ')');

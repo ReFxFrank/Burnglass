@@ -661,7 +661,7 @@ html.lite .mtrack i, html.lite .hbar .track i { transition: none; }
 
 /* Discord image slots (Server panel) */
 .dimg-form { display: grid; gap: 6px; margin: 8px 0 2px; max-width: 640px; }
-.dimg-row { display: grid; grid-template-columns: 170px minmax(0, 1fr); align-items: center; gap: 10px; }
+.dimg-row { display: grid; grid-template-columns: 190px minmax(0, 1fr); align-items: center; gap: 10px; }
 .dimg-row span { font-size: 12px; color: var(--text-3); }
 .dimg-row input {
   width: 100%; min-width: 0; box-sizing: border-box; background: rgba(255, 255, 255, 0.04);

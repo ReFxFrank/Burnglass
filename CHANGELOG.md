@@ -1,5 +1,30 @@
 # Changelog
 
+## v1.34.0
+
+- **Discord art that follows what Claude is doing.** Three new image fields
+  in the Server panel — *Claude — working*, *thinking* and *waiting on you*
+  — so the presence can show a different (animated) image while Claude runs
+  a tool, while the model is thinking, and while a permission prompt or a
+  question is waiting for you. An empty field falls back to the Claude Code
+  image; the tooltip reads e.g. "Claude Code · working". Pulse reads the
+  live status from **Claude Code's own session file**
+  (`~/.claude/sessions/<pid>.json`, busy / waiting / idle — read-only, only
+  the `status` field, and only while that Claude Code process is alive),
+  and tells working from thinking by whether the transcript has a tool call
+  still waiting for its result. Waiting on you is something transcripts
+  alone never show (a pending permission prompt isn't logged), and it now
+  keeps the Claude art up even after 15 quiet minutes. Running subagents
+  count as working. Older Claude Code builds without that file fall back to
+  the transcript (prompt / tool call / reply; an open `AskUserQuestion` or
+  `ExitPlanMode` = waiting). Codex gets working / thinking / idle from its
+  rollouts (Codex never records approval prompts, so it has no "waiting").
+  Working ↔ thinking flip every few seconds, so once one is showing the
+  other must last 45 s before the image changes (waiting and idle switch at
+  once) — fewer GIF reloads for your viewers. `{"discordShowState": false}`
+  turns it off. New `payload.agentState` = `{provider, state, sessions,
+  source}`; the panel shows what it currently detects.
+
 ## v1.33.0
 
 - **Set the Discord images from the dashboard.** With Discord presence on,

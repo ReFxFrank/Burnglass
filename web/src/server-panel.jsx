@@ -40,13 +40,16 @@ export function StopButton({ onStopped, compact = false, disabled = false }) {
 // Pulse makes no network calls beyond its documented list (Discord's own
 // image proxy is what fetches it for the presence).
 const DISCORD_IMAGE_ROWS = [
-  ['claude', 'While using Claude Code', 'claude'],
-  ['codex', 'While using Codex', 'codex'],
-  ['idle', 'When idle', 'pulse'],
+  ['claude', 'Claude Code', 'claude (uploaded art)'],
+  ['claudeWorking', 'Claude — working', 'same as Claude Code'],
+  ['claudeThinking', 'Claude — thinking', 'same as Claude Code'],
+  ['claudeWaiting', 'Claude — waiting on you', 'same as Claude Code'],
+  ['codex', 'Codex', 'codex (uploaded art)'],
+  ['idle', 'Idle', 'pulse (uploaded art)'],
 ];
+const rowValues = (src) => Object.fromEntries(DISCORD_IMAGE_ROWS.map(([k]) => [k, (src && src[k]) || '']));
 function DiscordImagesForm({ images }) {
-  const server = images || {};
-  const fromServer = { claude: server.claude || '', codex: server.codex || '', idle: server.idle || '' };
+  const fromServer = rowValues(images);
   const sig = DISCORD_IMAGE_ROWS.map(([k]) => fromServer[k]).join('\n');
   // The dashboard polls every ~10 s, so right after a save the props are
   // stale. The save's own reply is the baseline until a NEWER poll arrives
@@ -72,7 +75,7 @@ function DiscordImagesForm({ images }) {
     try {
       const r = await postJson('/api/discord/images', body);
       const got = (r.discord && r.discord.images) || {};
-      setSaved({ images: { claude: got.claude || '', codex: got.codex || '', idle: got.idle || '' }, sig });
+      setSaved({ images: rowValues(got), sig });
       setEdits({});
       setMsg({ bad: false, text: 'Saved — Discord shows it on the next update (a new link can take a few seconds the first time).' });
     } catch (e) { setMsg({ bad: true, text: 'Couldn’t save: ' + e.message }); }
@@ -87,7 +90,7 @@ function DiscordImagesForm({ images }) {
             type="text"
             spellCheck={false}
             autoComplete="off"
-            placeholder={def + ' (uploaded art)'}
+            placeholder={def}
             value={shown[k]}
             disabled={busy}
             onChange={(e) => edit(k, e.target.value)}
@@ -413,7 +416,15 @@ export function ServerPanel({ data, onStopped, gfx, delay = 0.36 }) {
               <b style={{ color: 'var(--text-2)' }}>Images:</b> paste an <code>https://</code> link to a GIF or
               animated WebP to animate it (uploaded art assets can’t animate), an art-asset key, or leave a
               field empty for the built-in art. Discord fetches the link, not Pulse, and anyone who can see
-              your presence can see where it’s hosted. Avoid Discord attachment links — they expire.
+              your presence can see where it’s hosted. Avoid Discord attachment links — they expire. The
+              Claude state images follow what Claude Code is doing (read from its own status file);
+              <code>{'{"discordShowState": false}'}</code> turns that off.
+              {data.agentState && (
+                <span> Right now: <b style={{ color: 'var(--text-2)' }}>
+                  {(data.agentState.provider === 'codex' ? 'Codex' : 'Claude') + ' is ' +
+                    (data.agentState.state === 'waiting' ? 'waiting on you' : data.agentState.state)}
+                </b>.</span>
+              )}
             </div>
             <DiscordImagesForm images={data.discord.images} />
           </>
