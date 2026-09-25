@@ -18,8 +18,11 @@
 .sec-activity .hm-top { display: flex; align-items: flex-end; gap: 3px; height: 36px; margin-bottom: 4px; min-width: 0; }
 .sec-activity .hm-top i { flex: 1 1 0; min-width: 0; min-height: 1px; background: var(--q4); border-radius: 2px 2px 0 0; }
 .sec-activity .hm-top i.on { background: var(--q6); }
-.sec-activity .hm-row { display: grid; grid-template-columns: repeat(24, minmax(0, 1fr)); gap: 3px; min-width: 0; }
-.sec-activity .hm-row i { display: block; height: 26px; border-radius: 3px; background: var(--panel-2); cursor: default; }
+/* each row is a size container so a cell can grow a little taller as the page
+   widens (half its width, 26 → 36 px) instead of stretching into slivers on
+   wide screens; at a 1440 px window it is still 26 px */
+.sec-activity .hm-row { display: grid; grid-template-columns: repeat(24, minmax(0, 1fr)); gap: 3px; min-width: 0; container-type: inline-size; }
+.sec-activity .hm-row i { display: block; height: clamp(26px, calc((100cqi - 69px) / 48), 36px); border-radius: 3px; background: var(--panel-2); cursor: default; }
 .sec-activity .hm-row i.hl { position: relative; box-shadow: 0 0 0 2px var(--panel), 0 0 0 3.5px var(--text); }
 .sec-activity .hm-row i.on { position: relative; box-shadow: 0 0 0 2px var(--panel), 0 0 0 3.5px var(--accent); }
 .sec-activity .hm-d { font-size: var(--fs-2xs); line-height: var(--lh-2xs); color: var(--text-3); white-space: nowrap; }

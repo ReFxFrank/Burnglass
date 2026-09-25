@@ -45,7 +45,9 @@
 
   /* ---- layout -------------------------------------------------------------------- */
   --rail-w: 240px; --topbar-h: 56px; --gutter: 24px; --gap: 12px;
-  --content-max: 1600px;
+  /* content column cap (incl. its gutters); past it the column is CENTRED in
+     the main area and the top bar's edges follow it (see .topbar/.content) */
+  --content-max: 2000px;
   --sticky-h: var(--topbar-h);   /* what sticks at the top (anchor offset) */
 
   /* ---- motion (hover/focus only; nothing loops) -------------------------------- */
@@ -203,13 +205,21 @@ code, .code {
 
 /* ---- rail ---- */
 .rail { background: var(--rail); border-right: 1px solid var(--line); min-width: 0; }
+/* 8 px side padding + 8 px item padding: every rail row's content (nav icons,
+   radios, checkboxes) starts 16 px in, level with the brand mark, and the
+   source rows keep room for a label like "Claude Desktop" beside a
+   four-figure amount. The rail's own scrollbar (short windows with classic
+   scrollbars) is the thin one so it takes less of that room. The -webkit-
+   rules are only a fallback: engines with scrollbar-width/-color ignore them. */
 .rail-in {
-  position: sticky; top: 0; max-height: 100vh; overflow-y: auto; overscroll-behavior: contain;
-  padding: var(--sp-4) var(--sp-3); display: flex; flex-direction: column; gap: var(--sp-5); min-height: 100vh;
+  position: sticky; top: 0; max-height: 100vh; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin;
+  padding: var(--sp-4) var(--sp-2); display: flex; flex-direction: column; gap: var(--sp-5); min-height: 100vh;
 }
+.rail-in::-webkit-scrollbar { width: 6px; }
+.rail-in::-webkit-scrollbar-thumb { border-width: 1px; }
 /* ---- brand lockup (rail + mobile header): 30 px mark · wordmark over a sub-line.
    Lockup ratios (BRAND.md): gap = 17/64 of the mark (8 px), cap = 26/64 (12.19 px). */
-.brand { display: flex; align-items: center; gap: 8px; padding: 0 var(--sp-1); min-width: 0; }
+.brand { display: flex; align-items: center; gap: 8px; padding: 0 var(--sp-2); min-width: 0; }
 .bmark { display: block; flex: none; user-select: none; }
 .wm { display: block; flex: none; overflow: visible; }
 .wm .wm-i { fill: var(--text); }
@@ -269,6 +279,7 @@ code, .code {
 .cbox { width: 14px; height: 14px; border-radius: 4px; border: 1.5px solid var(--line-2); flex: none; display: grid; place-items: center; color: transparent; }
 .cbox.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 .srcrow { position: relative; }
+.srcrow .opt { gap: var(--sp-1h); } /* checkbox · swatch · label · amount: 6 px leaves the label room */
 .srcrow .only {
   position: absolute; right: 6px; top: 50%; transform: translateY(-50%); height: 20px; padding: 0 6px;
   border: 1px solid var(--line-2); border-radius: var(--r-xs); background: var(--panel-3); color: var(--text-2);
@@ -292,8 +303,10 @@ code, .code {
 /* ---- top bar (≥1024) ---- */
 .topbar {
   position: sticky; top: 0; z-index: 20; height: var(--topbar-h); display: flex; align-items: center; gap: var(--sp-3);
-  /* right edge lines up with .content's max-width on very wide screens */
-  padding: 0 max(var(--gutter), calc(100% - var(--content-max) + var(--gutter))) 0 var(--gutter);
+  /* the bar spans the main area (sticky background), but its contents line up
+     with .content's edges: past --content-max the column is centred, so both
+     sides get half the spare width on top of the gutter */
+  padding: 0 max(var(--gutter), calc((100% - var(--content-max)) / 2 + var(--gutter)));
   background: var(--bg); border-bottom: 1px solid var(--line); min-width: 0;
 }
 .tb-title { display: flex; align-items: baseline; gap: var(--sp-2); min-width: 0; flex: 0 1 auto; overflow: hidden; }
@@ -347,7 +360,7 @@ code, .code {
    ============================================================================= */
 .content {
   padding: var(--sp-4) var(--gutter) var(--sp-10); display: flex; flex-direction: column; gap: var(--gap);
-  width: 100%; max-width: var(--content-max); min-width: 0;
+  width: 100%; max-width: var(--content-max); min-width: 0; margin-inline: auto; /* centred past the cap */
 }
 .sec {
   display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: var(--gap); min-width: 0;
