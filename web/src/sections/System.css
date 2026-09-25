@@ -1,9 +1,143 @@
 /* =============================================================================
-   sections/System.css — styles for sections/System.jsx ONLY.
-   OWNER: the System section engineer. Scope EVERY selector under .sec-system (the
-   class <Section id="system"> puts on the root) — CSS is global and four people
-   edit sections in parallel. Floating content (Tip/Menu/Sheet) is portalled
-   to <body>: style it through its own prefixed class (system-…), not .sec-system.
-   Use the tokens + primitives in ../styles.css; never hard-code colours.
-   Mockup reference (design-command/src/styles.css): .sys .kv .acts .toggles .tg* .stat-on/.stat-off .sys-row2 .imgs .formacts .disc-* .setting* .logs (l.524-555), .imgs l.597; ≤760 l.683-700, ≤420 l.716 — .kv/.switch/.seg/.field/.input are shared
+   sections/System.css — styles for sections/System.jsx ONLY, scoped .sec-system.
+   Tokens + primitives from ../styles.css; no hard-coded colours.
+   Mockup: .sys .kv .acts .toggles .tg* .stat-* .sys-row2 .imgs .disc-* .setting*
+   .logs (design-command/src/styles.css).
    ============================================================================= */
+
+/* ---- two columns: Server | Integrations ---- */
+.sec-system .sys {
+  display: grid; grid-template-columns: minmax(0, 4fr) minmax(0, 8fr);
+  margin-top: var(--sp-2); border-top: 1px solid var(--line);
+}
+.sec-system .sys-col { padding: var(--sp-4); min-width: 0; }
+.sec-system .sys-col + .sys-col { border-left: 1px solid var(--line); }
+.sec-system .sys h3 {
+  margin: 0 0 var(--sp-3); font-size: var(--fs-xs); line-height: var(--lh-xs); font-weight: var(--fw-semi);
+  letter-spacing: var(--track-caps); text-transform: uppercase; color: var(--text-3);
+  display: flex; align-items: center; gap: 8px;
+}
+.sec-system .h3-wrap { flex-wrap: wrap; }
+.sec-system .h3-note { text-transform: none; letter-spacing: 0; font-weight: var(--fw-reg); color: var(--text-3); }
+
+/* ---- server facts ---- */
+.sec-system .kv dd { color: var(--text); }
+.sec-system .kv dd.muted, .sec-system .kv .muted { color: var(--text-3); }
+.sec-system .kv .mono { font-family: var(--font-mono); font-size: var(--fs-xs); }
+.sec-system .kv .sys-upd { margin-left: 6px; }
+.sec-system .kv dd.sys-err { color: var(--crit); }
+.sec-system .kv .sys-hist { display: flex; align-items: center; justify-content: flex-end; gap: 4px; }
+.sec-system .acts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: var(--sp-4); }
+.sec-system .sys-note { margin: 8px 0 0; font-size: var(--fs-xs); line-height: var(--lh-xs); color: var(--text-2); overflow-wrap: anywhere; }
+.sec-system .sys-note:empty { margin: 0; }
+.sec-system .sys-note.good { color: var(--good); }
+.sec-system .sys-note.warn { color: var(--warn); }
+.sec-system .sys-note.crit { color: var(--crit); }
+.sec-system .sys-restart { margin: 10px 0 0; }
+
+/* ---- appearance ---- */
+.sec-system .appearance h3 { margin-top: var(--sp-5); }
+.sec-system .setting { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-bottom: var(--sp-4); min-width: 0; }
+.sec-system .setting:last-child { margin-bottom: 0; }
+.sec-system .setting-l { font-size: var(--fs-xs); color: var(--text-2); font-weight: var(--fw-med); }
+.sec-system .setting .seg { width: 100%; }
+.sec-system .setting .seg button { flex: 0 0 auto; }
+
+/* ---- integrations: hairline grid of toggle rows ---- */
+.sec-system .toggles {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px;
+  background: var(--line); border: 1px solid var(--line); border-radius: var(--r-sm); overflow: hidden;
+}
+.sec-system .tg {
+  background: var(--panel); padding: 12px 14px; min-width: 0;
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; align-items: start; align-content: start;
+}
+.sec-system .tg:last-child:nth-child(odd) { grid-column: 1 / -1; }
+.sec-system .tg-t { font-weight: var(--fw-semi); color: var(--text); display: flex; align-items: center; gap: 4px 8px; flex-wrap: wrap; min-width: 0; min-height: 20px; }
+.sec-system .tg-n { min-width: 0; overflow-wrap: anywhere; }
+.sec-system .tg.off .tg-t .tg-n { color: var(--text-2); }
+.sec-system .tg .switch { margin-top: 1px; }
+.sec-system .tg-d { grid-column: 1 / -1; font-size: var(--fs-xs); line-height: 17px; color: var(--text-3); overflow-wrap: anywhere; min-width: 0; }
+.sec-system .tg-d code { font-size: 11px; }
+.sec-system .tg-x { grid-column: 1 / -1; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 4px; min-width: 0; }
+.sec-system .tg-x .hint b { color: var(--text-2); }
+.sec-system .tg-x .sys-kf { flex: 1 1 100%; }
+.sec-system .tg-note { grid-column: 1 / -1; margin: 2px 0 0; font-size: var(--fs-xs); line-height: var(--lh-xs); color: var(--text-2); overflow-wrap: anywhere; }
+.sec-system .tg-note:empty { display: none; }
+.sec-system .tg-note.good { color: var(--good); }
+.sec-system .tg-note.warn { color: var(--warn); }
+.sec-system .tg-note.crit { color: var(--crit); }
+
+/* status word (dot + text); off = no dot */
+.sec-system .stat { font-size: var(--fs-2xs); line-height: var(--lh-2xs); font-weight: var(--fw-semi); color: var(--text-3); display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.sec-system .stat::before { content: none; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+.sec-system .stat.good { color: var(--good); }
+.sec-system .stat.warn { color: var(--warn); }
+.sec-system .stat.crit { color: var(--crit); }
+.sec-system .stat.good::before, .sec-system .stat.warn::before, .sec-system .stat.crit::before, .sec-system .stat.idle::before { content: ""; }
+.sec-system .stat.idle::before { background: var(--text-4); }
+
+/* ---- row 2: Discord images ---- */
+.sec-system .sys-row2 { border-top: 1px solid var(--line); }
+.sec-system .sys-imgs { padding: var(--sp-4); min-width: 0; }
+.sec-system .disc-head { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; min-width: 0; }
+.sec-system .disc-head h3 { margin: 0; font-size: var(--fs-md); line-height: var(--lh-md); font-weight: var(--fw-semi); color: var(--text); }
+.sec-system .disc-head .sp { flex: 1; }
+.sec-system .disc-state { display: flex; align-items: center; gap: 8px; font-size: var(--fs-sm); color: var(--text); min-width: 0; overflow-wrap: anywhere; }
+.sec-system .disc-body > .hint { margin: 6px 0 0; }
+.sec-system .imgs { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px 12px; margin-top: 12px; }
+.sec-system .imgs .field > label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sec-system .imgs .input { width: 100%; min-width: 0; }
+.sec-system .disc-msg { min-width: 0; overflow-wrap: anywhere; }
+.sec-system .disc-msg.ok { color: var(--good); }
+.sec-system .disc-msg.bad { color: var(--crit); }
+
+/* ---- log: one-line tail + expandable box ---- */
+.sec-system .logs {
+  border-top: 1px solid var(--line); padding: 10px var(--sp-4); display: flex; align-items: center; gap: var(--sp-3);
+  font-size: var(--fs-xs); color: var(--text-3); min-width: 0;
+}
+.sec-system .logs > .ic-sm { flex: none; }
+.sec-system .logs .last {
+  font-family: var(--font-mono); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  min-width: 0; flex: 1; color: var(--text-2);
+}
+.sec-system .logs .last .lt { color: var(--text-3); }
+.sec-system .logs .last.warn { color: var(--warn); }
+.sec-system .logs .last.error { color: var(--crit); }
+.sec-system .logs .btn { flex: none; }
+.sec-system .logbox {
+  border-top: 1px solid var(--line); background: var(--panel-2); max-height: 280px; overflow: auto;
+  padding: 8px var(--sp-4); font-family: var(--font-mono); font-size: 11.5px; line-height: 18px; color: var(--text-2);
+  border-radius: 0 0 var(--r-md) var(--r-md); overscroll-behavior: contain;
+}
+.sec-system .logbox .ll { white-space: pre-wrap; overflow-wrap: anywhere; }
+.sec-system .logbox .ll .lt { color: var(--text-3); margin-right: 8px; }
+.sec-system .logbox .ll.warn { color: var(--warn); }
+.sec-system .logbox .ll.error { color: var(--crit); }
+
+/* ---- responsive ---- */
+@media (max-width: 1320px) {
+  .sec-system .imgs { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 1240px) and (min-width: 1025px) {
+  .sec-system .toggles { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 900px) {
+  .sec-system .sys { grid-template-columns: minmax(0, 1fr); }
+  .sec-system .sys-col + .sys-col { border-left: 0; border-top: 1px solid var(--line); }
+}
+@media (max-width: 760px) {
+  .sec-system .sys { grid-template-columns: minmax(0, 1fr); }
+  .sec-system .sys-col + .sys-col { border-left: 0; border-top: 1px solid var(--line); }
+  .sec-system .sys-col, .sec-system .sys-imgs { padding: 12px; }
+  .sec-system .toggles { grid-template-columns: minmax(0, 1fr); }
+  .sec-system .imgs { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .sec-system .h3-note { flex-basis: 100%; }
+  .sec-system .disc-head .disc-state { order: 3; flex-basis: 100%; font-size: var(--fs-xs); color: var(--text-2); }
+  .sec-system .logs { padding: 10px 12px; }
+  .sec-system .logbox { padding: 8px 12px; }
+}
+@media (max-width: 420px) {
+  .sec-system .imgs { grid-template-columns: minmax(0, 1fr); }
+}
