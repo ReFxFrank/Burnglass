@@ -1,6 +1,6 @@
 {
   "name": "burnglass",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "A local, zero-dependency usage dashboard for Claude Code, OpenAI Codex and other coding agents. The server only reads the agents' local logs and has zero runtime dependencies; the React frontend (web/) is built to static files it serves. Runs on http://localhost:4747.",
   "license": "MIT",
   "engines": {

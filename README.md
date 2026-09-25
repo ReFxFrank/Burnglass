@@ -225,7 +225,7 @@ Details: [Windows guide](docs/windows.md#tray-icon).
 Show your usage as a Discord activity that rotates through **Today**, **Past 7 days** and
 **All-time** (tokens and spend), with a second line such as *Opus 5.5 · Extra High ·
 3 sessions* while you work. The large image follows what Claude Code is doing, and it can
-be an **animated GIF**. Here's a ready-made set of Clawd GIFs, one per state:
+be an **animated GIF**. Out of the box it's an animated Clawd, one per state:
 
 | Working | Thinking | Waiting on you | Idle |
 | :-: | :-: | :-: | :-: |
@@ -237,7 +237,7 @@ be an **animated GIF**. Here's a ready-made set of Clawd GIFs, one per state:
 | Working | Claude is running a tool, or its subagents are | Claude — working | `discordClaudeWorkingImage` |
 | Thinking | The model is generating | Claude — thinking | `discordClaudeThinkingImage` |
 | Waiting on you | A permission prompt or a question is open | Claude — waiting on you | `discordClaudeWaitingImage` |
-| Idle | Claude Code is your active tool but not mid-turn; also fills any state slot you leave empty | Claude Code | `discordClaudeImage` |
+| Idle | Claude Code is your active tool but not mid-turn (a Claude Code image you set also fills any state slot you leave empty) | Claude Code | `discordClaudeImage` |
 
 <img src=".github/assets/discord/clawd-pixel.gif" alt="A hand-drawn pixel Clawd that blinks, shuffles and throws both claws up" width="160" height="160" align="right" />
 
@@ -246,12 +246,13 @@ slot (`discordLargeImage`) is shown once neither Claude Code nor Codex has been 
 for 15 minutes; the hand-drawn **pixel Clawd** made for Burnglass (right) suits it, or
 any other slot.
 
-**Use them:** Discord animates an image only when it's an `https://` link (uploaded art
-assets are always stills). Host the 512 px GIFs anywhere public, such as a free
-[Cloudflare Pages](https://pages.cloudflare.com) site, then paste each link into
-**System → Discord images** and click **Save images**. Presence is opt-in and needs the
-Discord desktop app; Burnglass talks to it over its local socket. Step-by-step:
-[Discord guide](docs/discord.md).
+**Built in since v2.0.1:** turn on presence and these animate with no setup. Discord
+animates an image only when it's an `https://` link (uploaded art assets are always
+stills), so Discord loads them straight from this repository, pinned to the v2.0.0 release
+so the links never change. **Use your own** by pasting an `https://` link into any slot
+in **System → Discord images** and clicking **Save images**; an empty slot goes back to the
+built-in. Presence is opt-in and needs the Discord desktop app; Burnglass talks to it over
+its local socket. Step-by-step: [Discord guide](docs/discord.md).
 
 <sub>The four state GIFs are rendered from [clawd-tank](https://github.com/marciogranzotto/clawd-tank)
 by marciogranzotto (MIT, [licence](.github/assets/discord/LICENSE-clawd-tank.txt)). Clawd is

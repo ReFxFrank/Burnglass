@@ -596,11 +596,14 @@ function Integrations({ data, notify, thresholds, ovr }) {
 // Discord large-image slots: an https link (the only way Discord animates a
 // GIF) or an uploaded Art Asset key; empty = the built-in art. No preview on
 // purpose — rendering the link here would make the dashboard fetch it.
+// Empty Claude slots show the built-in ANIMATED Clawd (server
+// DISCORD_DEFAULT_CLAUDE_ART, links pinned to the v2.0.0 tag); a state slot
+// left empty uses the Claude Code image first when one is set.
 const DISCORD_IMAGE_ROWS = [
-  ['claude', 'Claude Code', 'claude (uploaded art)'],
-  ['claudeWorking', 'Claude — working', 'same as Claude Code'],
-  ['claudeThinking', 'Claude — thinking', 'same as Claude Code'],
-  ['claudeWaiting', 'Claude — waiting on you', 'same as Claude Code'],
+  ['claude', 'Claude Code', 'built-in: Clawd asleep (animated)'],
+  ['claudeWorking', 'Claude — working', 'built-in: Clawd hammering (animated)'],
+  ['claudeThinking', 'Claude — thinking', 'built-in: Clawd typing (animated)'],
+  ['claudeWaiting', 'Claude — waiting on you', 'built-in: Clawd with a “!” (animated)'],
   ['codex', 'Codex', 'codex (uploaded art)'],
   ['idle', 'Idle', 'pulse (uploaded art)'],
 ];
@@ -699,8 +702,9 @@ function DiscordImages({ discord, configPath }) {
         <div className="disc-body" id={bodyId}>
           <p className="hint">
             Paste an <code>https://</code> link to a GIF or animated WebP, an art-asset key, or leave a slot empty for the
-            built-in art. Discord fetches the link, not {BRAND}, and anyone who can see your presence can see where it’s
-            hosted. Avoid Discord attachment links, which expire.
+            built-in art — for Claude Code that’s an animated Clawd for each state (a state slot left empty uses your
+            Claude Code image first, if you set one). Discord fetches the link, not {BRAND}, and anyone who can see your
+            presence can see where it’s hosted. Avoid Discord attachment links, which expire.
           </p>
           <DiscordImagesForm images={discord.images} idPrefix={bodyId + '-'} configPath={configPath} />
         </div>

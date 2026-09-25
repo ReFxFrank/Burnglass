@@ -46,9 +46,19 @@ Codex, and Burnglass art when you're idle. For Claude it also follows the live s
 | **Working** | Claude is running a tool, or its subagents are | Claude — working | `discordClaudeWorkingImage` |
 | **Thinking** | The model is generating | Claude — thinking | `discordClaudeThinkingImage` |
 | **Waiting on you** | A permission prompt or a question is open | Claude — waiting on you | `discordClaudeWaitingImage` |
-| **Claude Code** | Claude Code is your active tool but not mid-turn; also the fallback for any empty state slot | Claude Code | `discordClaudeImage` |
+| **Claude Code** | Claude Code is your active tool but not mid-turn; an image you set here also fills any state slot you leave empty | Claude Code | `discordClaudeImage` |
 | **Codex** | Codex is your active tool | Codex | `discordCodexImage` |
 | **Idle** | Neither Claude Code nor Codex has been active for 15 minutes | Idle | `discordLargeImage` |
+
+**Built-in art (since v2.0.1):** with nothing set, the four Claude slots show the
+animated Clawd below (hammering, typing, "!", asleep); Codex shows the OpenAI mark and
+Idle the Burnglass mark. The Clawd GIFs are `https://` links to the 512 px files in this
+repository, pinned to the `v2.0.0` tag so they never change
+(`https://raw.githubusercontent.com/ReFxFrank/Burnglass/v2.0.0/.github/assets/discord/<state>-512.gif`).
+Discord's media proxy loads them; Burnglass itself makes no request. For a Claude state,
+the order is: that state's own slot, then your **Claude Code** image, then the built-in
+Clawd. `"discordShowState": false` turns live state off and shows the static `claude`
+art instead.
 
 With presence on, **System → Discord images** has a field for each slot. Each field takes
 an **art-asset key** or an **`https://` link**; an empty field falls back to the built-in
@@ -89,9 +99,11 @@ All the GIFs are transparent and loop forever. Use the **512 px** files for Disc
 160 px copies above are previews. More about how they were made:
 [`.github/assets/discord/README.md`](../.github/assets/discord/README.md).
 
-### Host them and set the links
+### Use your own copies (optional)
 
-Discord's image proxy has to fetch each GIF from a public `https://` address.
+You don't need this for the Clawd set: it's built in. Host your own copies (or any other
+art) when you want full control over the files. Discord's image proxy has to fetch each
+GIF from a public `https://` address.
 
 1. **Download** the 512 px GIFs you want (the links in the table; on GitHub, use the
    download button on each file's page) into one folder, for example `clawd/`.
@@ -156,7 +168,7 @@ links in the slots. A key that doesn't exist just shows no image.
 | `discordRotateSecs` | `45` | Seconds per page, 15 to 300. |
 | `discordShowModel` | on | `false` hides the model · effort · sessions line. |
 | `discordShowState` | on | `false` turns off the state-following images and hover text. |
-| `discordClaudeImage` · `discordClaudeWorkingImage` · `discordClaudeThinkingImage` · `discordClaudeWaitingImage` · `discordCodexImage` · `discordLargeImage` | built-in art | One art-asset key or `https://` link per slot (see the table above). |
+| `discordClaudeImage` · `discordClaudeWorkingImage` · `discordClaudeThinkingImage` · `discordClaudeWaitingImage` · `discordCodexImage` · `discordLargeImage` | built-in art (Claude slots: the animated Clawd) | One art-asset key or `https://` link per slot (see the table above). |
 
 The dashboard's **Save images** button uses `POST /api/discord/images`; see the
 [HTTP API](api.md).

@@ -1,5 +1,18 @@
 # Changelog
 
+## v2.0.1 — Animated Clawd built in
+
+- **Discord Rich Presence now shows an animated Clawd out of the box.** While you use
+  Claude Code, the large image follows what it's doing: Clawd hammering while it works,
+  typing while it thinks, jumping with a "!" when it's waiting on you, and asleep between
+  turns. Nothing to host or paste: Discord loads the GIFs straight from the Burnglass
+  repository, pinned to the v2.0.0 release so the links never change (Burnglass itself
+  makes no request).
+- Your own images still win. A link in a state slot is used for that state, and a Claude
+  Code image you set also covers any state you leave empty, as before. Clear a slot to
+  get the built-in back. `"discordShowState": false` shows the static Claude art.
+- System → Discord images now says what each empty Claude slot shows.
+
 ## v2.0.0 — Pulse is now Burnglass
 
 **Pulse is now Burnglass**, with a redesigned dashboard and a new look. Your

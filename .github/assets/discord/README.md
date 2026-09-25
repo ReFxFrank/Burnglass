@@ -2,9 +2,17 @@
 
 Animated art for Burnglass's Discord Rich Presence, one GIF per live Claude Code
 state. Discord only animates a large image that is an `https://` link (uploaded
-Art Assets are stills), so host the file you want somewhere public and paste its
-link into the matching slot: **System → Discord images** in the dashboard, or the
-config key in `~/.burnglass/config.json`.
+Art Assets are stills). **Since v2.0.1 these are the built-in defaults:** an empty
+Claude slot links to the `-512.gif` files here through
+`https://raw.githubusercontent.com/ReFxFrank/Burnglass/v2.0.0/.github/assets/discord/`,
+pinned to the `v2.0.0` tag so the links never change. To use your own copies, host them
+anywhere public and paste each link into the matching slot: **System → Discord images**
+in the dashboard, or the config key in `~/.burnglass/config.json`.
+
+> Maintainers: the built-in links point at the **v2.0.0 tag**, never at `main`, so
+> moving or re-rendering files here can't break anyone's presence. Never delete or move
+> the `v2.0.0` tag. A new art set ships under a new pinned base in `server.js`
+> (`DISCORD_DEFAULT_ART_BASE`).
 
 | State | README size (160 px) | Full size (512 px) | Dashboard slot | Config key |
 |---|---|---|---|---|

@@ -213,7 +213,7 @@ const A = require(SP + "/a.json").discord;
 ok(A && A.enabled && A.status === "ok", "A: payload.discord.status ok (" + (A && A.status) + ")");
 // provider logo: recent Claude activity -> claude art + "Using Claude Code"
 ok(require(SP + "/a.json").activeProvider === "claude", "A: activeProvider = claude (recent Claude entry)");
-ok(act && act.assets && act.assets.large_image === "claude" && act.assets.large_text === "Using Claude Code",
+ok(act && act.assets && act.assets.large_image === "https://raw.githubusercontent.com/ReFxFrank/Burnglass/v2.0.0/.github/assets/discord/idle-512.gif" && act.assets.large_text === "Using Claude Code",
    "A: large logo tracks provider (img=" + (act && act.assets && act.assets.large_image) + ", text=" + (act && act.assets && act.assets.large_text) + ")");
 
 const clear = acts.find((f) => f.payload.args.activity === null);
@@ -281,11 +281,32 @@ const hImgs = require(SP + "/h-sum.json").discord.images;
 ok(hImgs && hImgs.claude === "https://i.imgur.com/6XNR72Z.gif" && hImgs.codex === null && hImgs.idle === "pulse_anim",
    "H: payload.discord.images mirrors config (" + JSON.stringify(hImgs) + ")");
 const hActs = (conns[conns.length - 1] || []).filter((f) => f.payload.cmd === "SET_ACTIVITY" && f.payload.args.activity);
-ok(hActs.length >= 2 && hActs[0].payload.args.activity.assets.large_image === "claude" &&
+ok(hActs.length >= 2 && hActs[0].payload.args.activity.assets.large_image === "https://raw.githubusercontent.com/ReFxFrank/Burnglass/v2.0.0/.github/assets/discord/idle-512.gif" &&
    hActs.some((f) => f.payload.args.activity.assets.large_image === "https://i.imgur.com/6XNR72Z.gif"),
    "H: saved link re-published immediately with 60 s ticks (" + hActs.map((f) => f.payload.args.activity.assets.large_image).join(" -> ") + ")");
+
+// ---- I: built-in ANIMATED Clawd (v2.0.1) — the art choice, every combination
+{
+  const { discordClaudeArt: art, DISCORD_DEFAULT_CLAUDE_ART: D } = require(process.argv[3] + "/server.js");
+  const BASE = "https://raw.githubusercontent.com/ReFxFrank/Burnglass/v2.0.0/.github/assets/discord/";
+  ok(D.working === BASE + "working-512.gif" && D.thinking === BASE + "thinking-512.gif" && D.waiting === BASE + "waiting-512.gif" && D.idle === BASE + "idle-512.gif",
+     "I: the defaults are the committed 512 px GIFs, pinned to the v2.0.0 tag (never main)");
+  ok(art({}, "working") === D.working && art({}, "thinking") === D.thinking && art({}, "waiting") === D.waiting,
+     "I: no config -> each state gets its animated Clawd");
+  ok(art({}, "idle") === D.idle && art({}, null) === D.idle, "I: idle between turns / unknown state -> Clawd asleep");
+  const mine = { discordClaudeWorkingImage: "https://x.test/w.gif", discordClaudeImage: "https://x.test/c.gif" };
+  ok(art(mine, "working") === "https://x.test/w.gif", "I: a state link set by the user wins");
+  ok(art(mine, "thinking") === "https://x.test/c.gif" && art(mine, "idle") === "https://x.test/c.gif",
+     "I: an empty state slot uses the Claude Code image set by the user before the built-in (as it always did)");
+  ok(art({ discordShowState: false }, "working") === "claude" && art({ discordShowState: false, discordClaudeImage: "k" }, null) === "k",
+     "I: discordShowState:false -> static art, no built-in GIF");
+  for (const [k, u] of Object.entries(D)) ok(u.length <= 256 && /^https:\/\/[^/\\?#@]/.test(u), "I: " + k + " default passes the presence URL rules (" + u.length + " chars)");
+  const dflt = require(SP + "/h-sum.json").discord.images.defaults || {};
+  ok(dflt.claudeWorking === D.working && dflt.claude === D.idle && dflt.codex === "codex" && dflt.idle === "pulse",
+     "I: payload.discord.images.defaults says what an empty slot shows (additive)");
+}
 process.exit(fail);
-' "$TMP" "$ECONN"
+' "$TMP" "$ECONN" "$ROOT"
 RES=$?
 echo "---- exit $RES"
 exit $RES

@@ -51,7 +51,7 @@ const crypto = require('crypto');
 
 // Version — keep in sync with package.json (build/make-exe.mjs enforces this).
 // The constant keeps its v1 NAME: make-exe's drift check greps for it.
-const PULSE_VERSION = '2.0.0';
+const PULSE_VERSION = '2.0.1';
 const BRAND = 'Burnglass';
 
 // BURNGLASS_<NAME> wins; PULSE_<NAME> (the v1 spelling) stays a permanent,
@@ -6050,6 +6050,31 @@ function discordPresenceStart() {
 // back to the Claude Code image.
 const DISCORD_STATE_SLOTS = { working: 'discordClaudeWorkingImage', thinking: 'discordClaudeThinkingImage', waiting: 'discordClaudeWaitingImage' };
 const DISCORD_STATE_TEXT = { working: 'working', thinking: 'thinking', waiting: 'waiting for you' };
+// Built-in ANIMATED Claude Code art (v2.0.1): the Clawd state GIFs committed in
+// .github/assets/discord/. Discord animates ONLY external https images (Art
+// Assets are stills), so these are links — raw.githubusercontent.com PINNED to
+// the v2.0.0 tag, which never moves, so a later docs reshuffle on main can't
+// break anyone's presence (FROZEN: never delete/move those files at that tag;
+// a new art set gets a new pinned base). Discord's media proxy fetches them —
+// never Burnglass (no network call from here). Precedence per state: the
+// user's own state link > their Claude Code image (discordClaudeImage, which
+// has always covered every state) > this default. discordShowState:false =
+// static art (discordClaudeImage || 'claude'), as before.
+const DISCORD_DEFAULT_ART_BASE = 'https://raw.githubusercontent.com/ReFxFrank/Burnglass/v2.0.0/.github/assets/discord/';
+// The Claude Code large image for a live state (working|thinking|waiting|idle|
+// null): the user's state link > their Claude Code image > the built-in
+// animated Clawd (idle/unknown → asleep); state art off → static art.
+function discordClaudeArt(cfg, live) {
+  const slot = live && DISCORD_STATE_SLOTS[live];
+  return (slot && cfg[slot]) || cfg.discordClaudeImage ||
+    (cfg.discordShowState === false ? 'claude' : DISCORD_DEFAULT_CLAUDE_ART[slot ? live : 'idle']);
+}
+const DISCORD_DEFAULT_CLAUDE_ART = {
+  working: DISCORD_DEFAULT_ART_BASE + 'working-512.gif',   // hammering
+  thinking: DISCORD_DEFAULT_ART_BASE + 'thinking-512.gif', // typing
+  waiting: DISCORD_DEFAULT_ART_BASE + 'waiting-512.gif',   // "!" — waiting on you
+  idle: DISCORD_DEFAULT_ART_BASE + 'idle-512.gif',         // asleep between turns
+};
 // Working ↔ thinking flip every few seconds — faster than a 15 s tick can
 // show honestly, and every image swap makes viewers reload a GIF. Once one of
 // the two is on screen, the other must persist for the hold before taking
@@ -6105,7 +6130,7 @@ function buildDiscordActivity() {
   let prov = s.activeProvider;
   if (shown.prov && shown.state && shown.state !== 'idle') prov = shown.prov;
   const live = shown.prov === prov ? shown.state : null;
-  const claudeArt = (live && DISCORD_STATE_SLOTS[live] && cfg[DISCORD_STATE_SLOTS[live]]) || cfg.discordClaudeImage || 'claude';
+  const claudeArt = discordClaudeArt(cfg, live);
   const asset = prov === 'codex' ? (cfg.discordCodexImage || 'codex')
     : prov === 'claude' ? claudeArt
     : (cfg.discordLargeImage || 'pulse');
@@ -6221,8 +6246,15 @@ function discordImagesForPayload() {
   return out;
 }
 
+// Additive: what an EMPTY Claude slot shows (the dashboard's placeholders).
+const DISCORD_IMAGE_DEFAULTS = {
+  claude: DISCORD_DEFAULT_CLAUDE_ART.idle, claudeWorking: DISCORD_DEFAULT_CLAUDE_ART.working,
+  claudeThinking: DISCORD_DEFAULT_CLAUDE_ART.thinking, claudeWaiting: DISCORD_DEFAULT_CLAUDE_ART.waiting,
+  codex: 'codex', idle: 'pulse',
+};
 function discordForPayload() {
   const images = discordImagesForPayload();
+  images.defaults = DISCORD_IMAGE_DEFAULTS;
   if (!discordEnabled()) return { enabled: false, status: 'off', images };
   return { enabled: true, status: discordState.status === 'off' ? 'connecting' : discordState.status, error: discordState.error, images };
 }
@@ -9876,5 +9908,5 @@ if (require.main === module) main();
 module.exports = {
   PRICING, priceFor, costForEntry, normalize, dedupKey,
   computeBlocks, floorToHour, aggregate, parseAll, tokensOf, localDateStr,
-  psQuote, trayScript, summarizeTrayOutput, integrationTargetExists, sameEntry,
+  psQuote, trayScript, summarizeTrayOutput, integrationTargetExists, sameEntry, discordClaudeArt, DISCORD_DEFAULT_CLAUDE_ART,
 };
