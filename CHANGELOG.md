@@ -79,6 +79,11 @@ know when you update from Pulse 1.x:
   reduced motion stay calm.
 - **Mini view** shows each limit as % used on the same meter bars as the
   dashboard.
+- **Wide screens:** the content column now grows to 2000 px (it stopped at
+  1600) and past that it is centred instead of hugging the left edge, with
+  the top bar lined up to it. The By-source table stays under the chart there, and
+  heatmap cells grow a little taller instead of stretching into slivers. The
+  rail's source list fits "Claude Desktop" next to a four-figure amount.
 - The frontend dropped framer-motion and Radix; the server still has zero
   runtime dependencies.
 
@@ -91,7 +96,44 @@ at rest, then a green dot, a yellow ring or a red "no entry" disc for your
 5-hour usage. They follow your `alertThresholds` (80 / 95 by default)
 instead of the old fixed 60 / 85.
 
+**Burnglass Strip matches the dashboard, and updates with it.**
+
+- **The taskbar numbers now show % used**, the same number as the
+  dashboard, so they count **up** where Pulse 1.x counted down (% left).
+  They turn amber at your first alert threshold and red at the last (80 / 95
+  by default, your `alertThresholds`). Prices are unchanged.
+- The popover's limits use the dashboard's meter bars: "N% used", a tick for
+  each alert threshold, amber and red at those thresholds, the projection at
+  reset ("→ N% at reset") and the reset countdown.
+- The spend donut and its legend are by **source**, in the dashboard's source
+  colors and labels (your custom-source labels too). With more than six
+  sources it shows the top five plus "Other". Daily trend bars are neutral,
+  with today in the accent.
+- **A one-click update now updates the strip too.** Until now only the
+  server exe was replaced, so the strip stayed on its old version. The first
+  start after the update checks `burnglass-strip.exe` / `pulse-strip.exe` next
+  to the server exe and in `~/.burnglass/bin` against the same release. A
+  file that differs is replaced from one download of the release's strip,
+  checked for size and sha256 (no published checksum, no replacement), under
+  its own name, with the old file kept as `.old` until the next start. If
+  Burnglass starts the strip for you (`"strip": true`), the old strip is
+  closed and the new one started once. A strip that exists only in
+  `~/.pulse/bin` is not touched: a current copy goes into `~/.burnglass/bin`
+  and is used from then on. Nothing happens with `--no-update-check` /
+  `"updateCheck": false` or when `stripPath` points at your own strip.
+
 **Fixes and smaller changes**
+
+- **Account limits no longer go blank after a restart or an update.** The
+  last good Claude reading and any active HTTP 429 backoff are kept in
+  `~/.burnglass/meters-cache.json` (percentages and reset times, never your
+  login token) and shown right away with their real age ("as of 4m ago").
+  The new process waits for the normal refresh interval, or for the saved
+  backoff (at most an hour), instead of asking Anthropic again at once.
+  Readings older than 12 hours, and windows that have reset since, are not
+  shown. **Recheck now** still checks at once, and turning the meters off
+  deletes the file. This starts working from the first restart after the
+  update to 2.0.0: Pulse 1.x never saved the reading.
 
 - A second copy started at sign-in with `--no-open` no longer opens a
   browser window when another instance is already running.

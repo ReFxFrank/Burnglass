@@ -382,8 +382,9 @@ Everything else is automatic: the source gets a filter chip, a stable color, a
 By-source bar, sessions rows, a CSV export column, and archive retention. Custom
 usage never touches the **Current 5h block** (that's Claude Code's own limit
 concept) and never skews spend totals unless your records carry real costs.
-As with every source, Burnglass only ever **reads** the log. Known limitation: Burnglass Strip
-currently folds custom sources into its Claude card.
+As with every source, Burnglass only ever **reads** the log. Known limitation: Burnglass
+Strip's popover lists each custom source under its own label in its spend donut, but its
+per-provider cards and its taskbar Claude price still count custom sources as Claude.
 
 ## 📡 Account meters — regular chats included (opt-in)
 
@@ -406,8 +407,12 @@ Claude Code (`/usage`), and Burnglass can read the same gauge:
   Anthropic's own endpoint. That's the same endpoint Claude Code polls, so Burnglass is polite:
   about every 2 minutes while the dashboard is open, and at most every 15 minutes (5 with
   the tray on) when only the status line, Discord or tray is reading. It backs off on
-  HTTP 429 and keeps the last good numbers. Meters are off by default and one click
-  turns them off again (`{"accountMeters": false}`).
+  HTTP 429 and keeps the last good numbers. Those numbers (percentages and reset times,
+  never the token) and any active backoff are kept in `~/.burnglass/meters-cache.json`, so
+  after a restart or an update the card shows them at once, with their age, instead of
+  going blank. Readings older than 12 hours and windows that have reset since are not
+  shown. Meters are off by default and one click turns them off again
+  (`{"accountMeters": false}`), which also deletes that file.
 - **Not logged in?** The card shows a **Connect your Claude account** panel. Log in from
   any Claude Code surface and hit **Recheck now**, with no restart.
 - **Limits of the feature:** it's an aggregate gauge, not per-chat line items. No
@@ -562,13 +567,23 @@ script.
   mini and Stop. Windows hides new tray icons behind the `^` chevron, so drag Burnglass out
   once to pin it. If the icon goes missing, the System section's log says why.
 - **Burnglass Strip** (opt-in): your usage right on the taskbar. It's a slim transparent strip
-  with each provider's **% left** (rotating with today's spend), and clicking it opens a
-  **popover** with meter bars, reset countdowns, a per-source spend donut, spend rows and
-  daily trends. It's fed by your local Burnglass server, so its values match the dashboard.
+  with each provider's **% used** (rotating with today's spend), turning amber at your first
+  alert threshold and red at the last (80% / 95% by default). Clicking it opens a
+  **popover** in the dashboard's look: "% used" meter bars with threshold ticks, the
+  projection at reset and reset countdowns, a spend donut by source in the dashboard's
+  source colors and labels (custom labels included), spend rows and daily trend bars with
+  today highlighted. It's fed by your local Burnglass server, so its values match the
+  dashboard. A one-click update of Burnglass updates the strip too (see below).
   Get `burnglass-strip.exe` from the release (or tick it in the installer), put it next to
   `burnglass.exe` (or in `~/.burnglass/bin`; an older `pulse-strip.exe` there or in
   `~/.pulse/bin` is found too), and flip **Burnglass Strip** on in the System section
-  (`{"strip": true}`; `stripPath` overrides the location). Its "Last 7 Days" covers 7
+  (`{"strip": true}`; `stripPath` overrides the location). After a one-click update, the
+  first start of the new Windows exe checks the strip next to it and in `~/.burnglass/bin`
+  against the same release, and swaps in the release's sha256-verified strip under the
+  file's own name (the old file is kept as `.old` until the next start). If Burnglass
+  starts the strip for you, it restarts it once. A strip found only in `~/.pulse/bin` is
+  left alone; a current copy goes into `~/.burnglass/bin` and is used from then on. This is
+  skipped with `stripPath` set or the update check off. Its "Last 7 Days" covers 7
   calendar days, while the dashboard uses a rolling 168 hours. It's ported from
   [openusage-windows](https://github.com/CheesyPoofs346/openusage-windows) (MIT).
   Credit where due: their strip design is excellent.
@@ -700,7 +715,8 @@ unless their records carry a cost. Check current list prices with each provider
   explicitly ask for: the Start-with-Windows entry, the installer / `--install` footprint
   (program folder, shortcuts, Add/Remove Programs entry), `--install-shortcuts`, and a
   self-update replacing Burnglass's own executable (and its `pulse.exe` twin, when the
-  installer kept one). Uninstalling never deletes `~/.burnglass` or `~/.pulse`.
+  installer kept one) and the Burnglass Strip executable next to it. Uninstalling never
+  deletes `~/.burnglass` or `~/.pulse`.
 - **The old `~/.pulse` folder** is read once to copy your settings, and kept as a backup.
   Nothing in it is ever moved or deleted. Afterwards Burnglass writes there only to keep
   companions from Pulse 1.x working (a mirrored `server.json`, a refreshed `tray.ps1`) and
@@ -709,7 +725,9 @@ unless their records carry a cost. Check current list prices with each provider
   1. **GitHub**: the version check and community-reach counters. They're on by default;
      `--no-update-check` / `{"updateCheck": false}` disables both. They read **public**
      data (latest version, release download totals, star count) and send **nothing about
-     you**. Clicking *Update* also downloads the sha256-verified release asset.
+     you**. Clicking *Update* also downloads the sha256-verified release asset, and the
+     first start after that update downloads the same release's strip when an older
+     Burnglass Strip is installed.
   2. **Account meters (opt-in):** `api.anthropic.com` and `chatgpt.com`. Each provider's
      token is read read-only from its own login, never logged, never included in a
      payload, and sent only to that provider.
