@@ -270,7 +270,10 @@ sealed class AppHost : IDisposable
 ///   3. ~/.pulse when THAT exists — a Pulse 1.x server, or one that has not migrated yet. Creating
 ///      ~/.burnglass here instead would make the server skip its one-time copy of the user's data;
 ///   4. ~/.burnglass on a machine that has neither.
-/// Nothing under ~/.pulse is ever deleted by the strip.
+/// Nothing under ~/.pulse is ever deleted by the strip: the folders it cleans (the extracted popover
+/// UI) or hands to WebView2 (which deletes and rotates files in its profile at will) go through
+/// ScratchPathOf, which keeps them out of ~/.pulse whenever the home IS ~/.pulse — including a home
+/// PINNED there (the server passes BURNGLASS_HOME=~/.pulse after a failed migration).
 static class AppPaths
 {
     public static readonly string LegacyHome;
@@ -294,12 +297,25 @@ static class AppPaths
         else if (Directory.Exists(NewHome)) Home = NewHome;
         else if (Directory.Exists(LegacyHome)) Home = LegacyHome;
         else Home = NewHome;
+        HomeIsLegacyLazy = new(() => SameDir(Home, LegacyHome));
     }
 
-    public static bool HomeIsLegacy => !Pinned && SamePath(Home, LegacyHome);
+    private static readonly Lazy<bool> HomeIsLegacyLazy;
+
+    /// The home IS the Pulse-era ~/.pulse: picked because only ~/.pulse exists, OR pinned there by
+    /// BURNGLASS_HOME / PULSE_HOME (the server does exactly that after a failed migration, and a user
+    /// may pin PULSE_HOME to it). Decided by the folder itself, links followed: being pinned says
+    /// nothing about WHICH folder the home is.
+    public static bool HomeIsLegacy => HomeIsLegacyLazy.Value;
 
     /// Where a state file is written.
     public static string PathOf(string name) => Path.Combine(Home, name);
+
+    /// Where a folder the strip regenerates and cleans, or lets WebView2 churn, lives: in the home,
+    /// except when the home is ~/.pulse, where nothing may ever be deleted. Then it goes to a folder
+    /// in the user's temp directory instead, and ~/.pulse is not touched for it at all.
+    public static string ScratchPathOf(string name) =>
+        HomeIsLegacy ? Path.Combine(Path.GetTempPath(), "burnglass-strip", name) : PathOf(name);
 
     /// Where a small state file is read from: the home's own copy, else — until the strip has written
     /// one there — the Pulse-era copy in ~/.pulse (read only; never modified from here).
@@ -336,6 +352,25 @@ static class AppPaths
                 StringComparison.OrdinalIgnoreCase);
         }
         catch { return string.Equals(a, b, StringComparison.OrdinalIgnoreCase); }
+    }
+
+    /// SamePath, or one of the two folders is a symbolic link / junction that resolves to the other
+    /// (a user who moved ~/.pulse elsewhere and linked it back, or linked ~/.burnglass to ~/.pulse).
+    public static bool SameDir(string a, string b)
+    {
+        if (SamePath(a, b)) return true;
+        string? la = LinkTarget(a), lb = LinkTarget(b);
+        return (la != null || lb != null) && SamePath(la ?? a, lb ?? b);
+    }
+
+    private static string? LinkTarget(string dir)
+    {
+        try
+        {
+            string full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(dir));
+            return Directory.ResolveLinkTarget(full, returnFinalTarget: true)?.FullName;
+        }
+        catch { return null; }
     }
 }
 
@@ -744,7 +779,9 @@ sealed class PopoverForm : Form
 
     private async Task InitWebAsync()
     {
-        var userData = AppPaths.PathOf("webview-strip");
+        // WebView2 deletes and rotates files inside its profile, so the profile must never be a
+        // folder under ~/.pulse: ScratchPathOf moves it out when the home is ~/.pulse.
+        var userData = AppPaths.ScratchPathOf("webview-strip");
         Directory.CreateDirectory(userData);
         var env = await CoreWebView2Environment.CreateAsync(null, userData);
         await _web.EnsureCoreWebView2Async(env);
@@ -1111,41 +1148,116 @@ static class WebAssets
     public static readonly string Dir = Resolve();
     public static string IconsDir => Path.Combine(Dir, "icons");
 
+    /// Left in every folder the strip extracts into: a magic first line, then each file the strip
+    /// wrote there ('/'-separated, relative). Removing what an older build shipped deletes ONLY
+    /// paths listed here, one file at a time: never a folder, never a file the strip did not write.
+    /// A folder without this manifest (a Pulse-era or pre-manifest strip-web, anything a user put
+    /// beside the UI) is only ever written into.
+    internal const string ManifestName = ".burnglass-strip-web";
+    private const string ManifestMagic = "BURNGLASS-STRIP-WEB 1";
+
     // Dev layout (web/ beside the exe) wins; the shipped single-file exe extracts its embedded
-    // web/** resources to <home>/strip-web on every launch (tiny — overwrite keeps it current
-    // across updates without a version dance).
+    // web/** resources on every launch (tiny — overwrite keeps it current across updates without
+    // a version dance) to <home>/strip-web, or, when the home is ~/.pulse, to the temp folder
+    // ScratchPathOf picks, so nothing under ~/.pulse is rewritten or deleted for it.
     private static string Resolve()
     {
         var local = Path.Combine(AppContext.BaseDirectory, "web");
         try { if (File.Exists(Path.Combine(local, "index.html"))) return local; } catch { }
-        var target = AppPaths.PathOf("strip-web");
+        var target = AppPaths.ScratchPathOf("strip-web");
         try
         {
-            // Clean slate: a stale file from an older build would otherwise linger
-            // beside the new ones and be served over the virtual host. Not in the
-            // Pulse-era home, where nothing is ever deleted — there the files are
-            // just overwritten in place (index.html only references what ships).
-            if (!AppPaths.HomeIsLegacy)
-                try { if (Directory.Exists(target)) Directory.Delete(target, recursive: true); } catch { }
             var asm = System.Reflection.Assembly.GetExecutingAssembly();
+            var shipped = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             foreach (var name in asm.GetManifestResourceNames())
             {
-                if (!name.StartsWith("web/")) continue;
-                var rel = name.Substring(4).Replace('/', Path.DirectorySeparatorChar);
-                var dest = Path.Combine(target, rel);
-                // Per-file try: one unwritable file (locked, read-only) must not
-                // abort the extraction and leave the rest of the UI missing.
-                try
-                {
-                    Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
-                    using var src = asm.GetManifestResourceStream(name)!;
-                    using var dst = File.Create(dest);
-                    src.CopyTo(dst);
-                }
-                catch { /* keep going — a partial UI beats no UI */ }
+                if (!name.StartsWith("web/", StringComparison.Ordinal)) continue;
+                // %(RecursiveDir) in the csproj uses the BUILD machine's separator: accept both.
+                shipped[name.Substring(4).Replace('\\', '/')] = name;
             }
+            Extract(target, shipped.Keys.ToList(), rel => asm.GetManifestResourceStream(shipped[rel])!);
         }
         catch { /* fall through — a previous extraction may still exist */ }
         return target;
+    }
+
+    /// Writes every shipped file into target, then removes the files an earlier launch listed in
+    /// target's manifest that this build no longer ships (they would otherwise linger beside the new
+    /// ones and be served over the virtual host), and rewrites the manifest.
+    internal static void Extract(string target, IReadOnlyList<string> shipped, Func<string, Stream> open)
+    {
+        Directory.CreateDirectory(target);
+        string manifest = Path.Combine(target, ManifestName);
+        List<string>? listed = ReadManifest(manifest); // null: not a folder this strip marked
+        var ship = new HashSet<string>(shipped, StringComparer.OrdinalIgnoreCase);
+        var own = new List<string>();                  // what the new manifest lists
+        foreach (var rel in shipped)
+        {
+            // Per-file try: one unwritable file (locked, read-only) must not
+            // abort the extraction and leave the rest of the UI missing.
+            try
+            {
+                string? dest = FileUnder(target, rel);
+                if (dest is null) continue;
+                Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+                using (var src = open(rel))
+                using (var dst = File.Create(dest))
+                    src.CopyTo(dst);
+                own.Add(rel);
+            }
+            catch
+            {
+                // Not rewritten this time, but still ours if an earlier launch wrote it.
+                if (listed != null && listed.Contains(rel, StringComparer.OrdinalIgnoreCase)) own.Add(rel);
+            }
+        }
+        if (listed != null)
+            foreach (var rel in listed)
+                if (!ship.Contains(rel) && !DeleteOwnFile(target, rel)) own.Add(rel); // retry next launch
+        try { File.WriteAllText(manifest, ManifestMagic + "\n" + string.Join("\n", own) + "\n"); } catch { }
+    }
+
+    private static List<string>? ReadManifest(string file)
+    {
+        try
+        {
+            var info = new FileInfo(file);
+            if (!info.Exists || info.Length > 256 * 1024) return null;
+            var lines = File.ReadAllLines(file);
+            if (lines.Length == 0 || lines[0].Trim() != ManifestMagic) return null;
+            return lines.Skip(1).Select(l => l.Trim().Replace('\\', '/')).Where(l => l.Length > 0)
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        }
+        catch { return null; }
+    }
+
+    // target/rel when rel is a plain relative path that stays inside target, else null (a listed
+    // "..\x", a rooted path, a drive or stream colon is never a file the strip wrote).
+    private static string? FileUnder(string target, string rel)
+    {
+        if (string.IsNullOrWhiteSpace(rel) || rel.IndexOf('\0') >= 0 || Path.IsPathRooted(rel)) return null;
+        var parts = rel.Split('/', '\\');
+        if (parts.Any(p => p.Length == 0 || p == "." || p == ".." || p.Contains(':'))) return null;
+        string root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(target));
+        string full = Path.GetFullPath(Path.Combine(root, Path.Combine(parts)));
+        return full.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ? full : null;
+    }
+
+    // Deletes the listed FILE target/rel, never following a link or junction below target. True
+    // when there is nothing left to track (deleted, already gone, or not a plain file of ours).
+    private static bool DeleteOwnFile(string target, string rel)
+    {
+        string? full = FileUnder(target, rel);
+        if (full is null) return true;
+        try
+        {
+            string root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(target));
+            for (var dir = Path.GetDirectoryName(full); dir != null && dir.Length > root.Length; dir = Path.GetDirectoryName(dir))
+                if (Directory.Exists(dir) && File.GetAttributes(dir).HasFlag(FileAttributes.ReparsePoint)) return true;
+            if (Directory.Exists(full)) return true;
+            if (File.Exists(full)) File.Delete(full);
+            return !File.Exists(full);
+        }
+        catch { return false; }
     }
 }
