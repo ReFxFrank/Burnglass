@@ -1,9 +1,37 @@
 /* =============================================================================
    sections/Alerts.css — styles for sections/Alerts.jsx ONLY.
-   OWNER: the Alerts section engineer. Scope EVERY selector under .sec-alerts (the
-   class <Section id="alerts"> puts on the root) — CSS is global and four people
-   edit sections in parallel. Floating content (Tip/Menu/Sheet) is portalled
-   to <body>: style it through its own prefixed class (alerts-…), not .sec-alerts.
-   Use the tokens + primitives in ../styles.css; never hard-code colours.
-   Mockup reference (design-command/src/styles.css): .alert (l.272-278; ≤760 l.631-633)
+   Scoped under .sec-alerts; the "+N more" tooltip body (portalled to <body>)
+   uses its own .alerts-more-list class. Tokens only, no motion.
+   Mockup reference (design-command/src/styles.css): .alert l.272-278; ≤760 l.631-633.
    ============================================================================= */
+.sec-alerts .alert {
+  display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap;
+  min-height: 44px; padding: 8px 8px 8px 14px; min-width: 0;
+  border-radius: var(--r-md); border: 1px solid var(--warn-line); background: var(--warn-soft); color: var(--text);
+  font-size: var(--fs-sm); line-height: var(--lh-sm);
+}
+.sec-alerts .alert > .ic { color: var(--warn); flex: none; }
+.sec-alerts .a-t { font-weight: var(--fw-semi); color: var(--warn); white-space: nowrap; }
+.sec-alerts .a-body { flex: 1 1 320px; min-width: 0; color: var(--text); overflow-wrap: anywhere; }
+.sec-alerts .a-body b { font-weight: var(--fw-semi); }
+.sec-alerts .a-body .muted { color: var(--text-2); }
+.sec-alerts .a-act { display: flex; gap: 6px; margin-left: auto; flex: none; }
+
+/* an alert past the top threshold: red, like its meter */
+.sec-alerts .alert.crit { border-color: var(--crit-line); background: var(--crit-soft); }
+.sec-alerts .alert.crit > .ic, .sec-alerts .alert.crit .a-t { color: var(--crit); }
+
+.sec-alerts .a-more {
+  display: inline; padding: 0 2px; margin: 0; border: 0; background: transparent; cursor: pointer;
+  font: inherit; font-weight: var(--fw-semi); color: var(--text); text-decoration: underline dotted; text-underline-offset: 3px;
+  border-radius: var(--r-xs); white-space: nowrap;
+}
+.sec-alerts .a-more:hover { color: var(--accent-hi); }
+
+.alerts-more-list { margin: 0; padding: 0 0 0 14px; display: grid; gap: 2px; }
+
+@media (max-width: 760px) {
+  .sec-alerts .alert { padding: 10px 12px; }
+  .sec-alerts .a-act { width: 100%; margin-left: 0; }
+  .sec-alerts .a-act .btn { flex: 1; height: 32px; }
+}
