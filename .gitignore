@@ -16,3 +16,6 @@ strip/bin/
 strip/obj/
 strip/dist-strip/
 strip/shots/
+
+# Claude Code session tooling (isolated agent worktrees) — never commit
+.claude/worktrees/
