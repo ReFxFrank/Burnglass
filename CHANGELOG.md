@@ -27,13 +27,20 @@
   Hardened before release (review): parallel or back-to-back tool calls stay
   *working* until the LAST one returns; a long Agent/Task run whose main
   thread has been quiet for 15+ minutes stays working while its subagents
-  write; `!` shell-mode and `#` memory lines are not prompts; a status file
-  left behind by a crash, kill or reboot is ignored even when the OS has
-  reused its process id (written before this boot, or — on Linux — before
-  that process started, or busy for 6 h / waiting for 24 h with no sign of
-  life), and it never switches off the transcript fallback; with Claude and
-  Codex both mid-turn the art no longer hops between them every update, and
-  the 45 s hold never carries a state from one provider to the other.
+  write; a `!` shell command counts as a prompt (Claude answers its output
+  by default since Claude Code 2.1.186) unless Claude Code marked it
+  context-only, and `#` memory lines are not prompts; a status file left
+  behind by a crash, a closed terminal or a reboot is ignored even when the
+  OS has reused its process id — on Linux by the process's real start time,
+  on Windows and macOS by checking that the pid still runs Claude Code
+  (`tasklist` / `ps`, both built in, cached), plus an age cap (busy 6 h,
+  waiting 24 h without a sign of life) — and a crashed record can't stay
+  alive by borrowing a resumed session's activity; clock steps (NTP, a VM
+  waking from sleep) no longer make live sessions look like leftovers; a
+  Codex call orphaned by a killed turn is dropped when the next turn starts;
+  with Claude and Codex both mid-turn the art no longer hops between them
+  every update, and the 45 s hold never carries a state from one provider
+  to the other.
 
 ## v1.33.0
 

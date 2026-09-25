@@ -975,11 +975,19 @@ function userText(rec) {
 const WAITING_TOOLS = new Set(['AskUserQuestion', 'ExitPlanMode']);
 // Classify one main-thread transcript record, updating `open` (tool_use id →
 // tool name) as calls start and resolve. Returns the step kind or null.
-function claudeConvStep(rec, open) {
+function claudeConvStep(rec, open, st) {
+  // st.caveat: the previous main-thread line was Claude Code's isMeta
+  // <local-command-caveat> ("DO NOT respond…"), written before local
+  // commands and before `!` shell lines that Claude will NOT answer.
+  const cav = st.caveat;
+  st.caveat = false;
   if (rec.type === 'system') return rec.subtype === 'compact_boundary' ? 'prompt' : null; // compaction ends → model resumes
   const content = rec.message && rec.message.content;
   if (rec.type === 'user') {
-    if (rec.isMeta) return null;
+    if (rec.isMeta) {
+      if (/<local-command-caveat>/.test(userText(rec))) st.caveat = true;
+      return null;
+    }
     if (Array.isArray(content)) {
       let results = 0;
       for (const b of content) if (b && b.type === 'tool_result') { open.delete(b.tool_use_id); results++; }
@@ -991,9 +999,11 @@ function claudeConvStep(rec, open) {
     if (!txt) return null;
     if (/^\[Request interrupted by user/.test(txt)) { open.clear(); return 'interrupt'; }
     if (parseLocalCommand(txt)) return 'command';
-    // `!` shell mode and `#` memory lines are the user's own actions, not a
-    // prompt the model is answering.
-    if (/^<(?:bash-input|bash-stdout|bash-stderr|user-memory-input)>/.test(txt)) return 'command';
+    if (/^<user-memory-input>/.test(txt)) return 'command'; // `#` memory line
+    // `!` shell mode: since Claude Code 2.1.186 Claude ANSWERS the output by
+    // default (respondToBashCommands) — a prompt. Only with the caveat line
+    // before it (respondToBashCommands:false) is it context-only.
+    if (/^<(?:bash-input|bash-stdout|bash-stderr)>/.test(txt) && cav) { st.caveat = true; return 'command'; }
     open.clear(); // a new prompt: anything still "open" was abandoned
     return 'prompt';
   }
@@ -1221,6 +1231,7 @@ function parseFile(filePath) {
   const effortEvents = [];      // time-stamped /effort changes parsed from the transcript
   // Where the MAIN thread stopped (see claudeConvStep) + newest subagent line.
   const openTools = new Map();
+  const convSt = { caveat: false };
   let convKind = null, convTs = 0, convSid = '', sideTs = 0;
 
   for (const line of lines) {
@@ -1240,7 +1251,7 @@ function parseFile(filePath) {
           if (t > sideTs) sideTs = t;
           if (!convSid && typeof rec.sessionId === 'string') convSid = rec.sessionId;
         } else {
-          const k = claudeConvStep(rec, openTools);
+          const k = claudeConvStep(rec, openTools, convSt);
           if (k) {
             convKind = k; convTs = t;
             if (typeof rec.sessionId === 'string' && rec.sessionId) convSid = rec.sessionId;
@@ -1533,7 +1544,10 @@ function parseCodexFile(filePath) {
 function codexConvStep(type, p, open) {
   const t = p && p.type;
   if (type === 'event_msg') {
-    if (t === 'task_started' || t === 'turn_started' || t === 'user_message') return 'prompt';
+    // A new turn: calls left open by a killed turn (no turn_aborted) are dead.
+    // A mid-turn user_message is injected into the running turn — keep them.
+    if (t === 'task_started' || t === 'turn_started') { open.clear(); return 'prompt'; }
+    if (t === 'user_message') return 'prompt';
     if (t === 'task_complete' || t === 'turn_complete' || t === 'turn_aborted') { open.clear(); return 'reply'; }
     return null;
   }
@@ -4989,24 +5003,71 @@ function pidAlive(pid) {
 // when its file was written during THIS boot and (on Linux, where /proc gives
 // the start time for free) after its process started; computeAgentState
 // additionally caps how old a busy/waiting record may be.
-function bootTimeMs() { return Date.now() - os.uptime() * 1000; }
-// Linux: a process's real start time = boot (btime in /proc/stat) + field 22
+// Boot time, fixed when Pulse starts: recomputing Date.now() − uptime on
+// every scan moves with wall-clock steps (NTP, a VM resumed after host
+// sleep) and would reject files written earlier in THIS boot. Only used
+// where no process start time exists (not Linux); on Windows with Fast
+// Startup it can be weeks old — the image-name check below is the real
+// guard there.
+const BOOT_AT_START = Date.now() - os.uptime() * 1000;
+// Linux: a process's real start time = boot (btime in /proc/stat, re-read
+// each scan because the kernel recomputes it after clock steps) + field 22
 // of /proc/<pid>/stat in clock ticks (USER_HZ, 100). NOT the /proc/<pid>
 // directory's ctime — procfs stamps that when the inode is first looked up.
-let procBtime = null;
-function pidStartedAfter(pid, ms) {
-  if (process.platform !== 'linux') return false;
+// This alone rejects every leftover from a previous boot or a dead process.
+function procBtime() {
+  try { return Number((fs.readFileSync('/proc/stat', 'utf8').match(/^btime (\d+)/m) || [])[1]) || 0; } catch (_) { return 0; }
+}
+function pidStartedAfter(pid, ms, btime) {
+  if (process.platform !== 'linux' || !btime) return false;
   try {
-    if (procBtime === null) procBtime = Number((fs.readFileSync('/proc/stat', 'utf8').match(/^btime (\d+)/m) || [])[1]) || 0;
-    if (!procBtime) return false;
     const st = fs.readFileSync('/proc/' + pid + '/stat', 'utf8');
     const ticks = Number(st.slice(st.lastIndexOf(')') + 2).split(' ')[19]); // comm may contain spaces/parens
-    return Number.isFinite(ticks) && (procBtime + ticks / 100) * 1000 > ms + 2000;
+    return Number.isFinite(ticks) && (btime + ticks / 100) * 1000 > ms + 2000;
   } catch (_) { return false; }
+}
+// Windows / macOS have no cheap start time, and PIDs are reused quickly (a
+// terminal closed at a permission prompt leaves its file behind). Check what
+// the pid IS: tasklist / ps (OS builtins, argv arrays) run asynchronously and
+// are cached per pid; a record whose pid now runs something other than
+// Claude Code is ignored. Unknown or pending = trusted for that scan.
+const PID_IMAGE_TTL_MS = 10 * 60 * 1000;
+const CLAUDE_IMAGE_RE = /^(claude|node|bun)\b/i;
+const pidImages = new Map(); // pid -> { name, at, pending }
+function pidImageMode() {
+  const v = process.env.PULSE_IMAGE_CHECK; // test/dev hook: ps | tasklist | off
+  if (v === 'ps' || v === 'tasklist' || v === 'off') return v;
+  return process.platform === 'win32' ? 'tasklist' : process.platform === 'darwin' ? 'ps' : 'off';
+}
+function pidLooksLikeClaude(pid, now) {
+  const mode = pidImageMode();
+  if (mode === 'off') return true;
+  const hit = pidImages.get(pid);
+  const fresh = hit && !hit.pending && now >= hit.at && now - hit.at < PID_IMAGE_TTL_MS;
+  if (!fresh && !(hit && hit.pending)) {
+    if (pidImages.size > 512) pidImages.clear();
+    pidImages.set(pid, { name: hit ? hit.name : null, at: hit ? hit.at : 0, pending: true });
+    const done = (name) => pidImages.set(pid, { name, at: Date.now(), pending: false });
+    try {
+      const args = mode === 'tasklist' ? ['/FI', 'PID eq ' + pid, '/FO', 'CSV', '/NH'] : ['-o', 'comm=', '-p', String(pid)];
+      require('child_process').execFile(mode === 'tasklist' ? 'tasklist' : 'ps', args, { windowsHide: true, timeout: 5000 }, (err, out) => {
+        let name = null;
+        if (!err && typeof out === 'string') {
+          const s = out.trim();
+          if (mode === 'tasklist') {
+            const m = s.match(/^"([^"]+)","(\d+)"/); // "claude.exe","1234",…
+            if (m && Number(m[2]) === pid) name = m[1];
+          } else if (s) name = path.basename(s.split('\n')[0].trim());
+        }
+        done(name);
+      });
+    } catch (_) { done(null); }
+  }
+  return !hit || !hit.name || CLAUDE_IMAGE_RE.test(hit.name);
 }
 let claudeRegistryMemo = { at: 0, list: [] };
 function claudeLiveRegistry(now) {
-  if (now - claudeRegistryMemo.at < liveStateMemoMs()) return claudeRegistryMemo.list;
+  if (now >= claudeRegistryMemo.at && now - claudeRegistryMemo.at < liveStateMemoMs()) return claudeRegistryMemo.list;
   const list = [];
   const dir = path.join(claudeDir(), 'sessions');
   let names = [];
@@ -5015,14 +5076,17 @@ function claudeLiveRegistry(now) {
   // after its own pid) BEFORE capping: the directory also holds a
   // <pid>.<hash>.key peer-token file per session (never read) and leftovers.
   const live = names.filter((n) => /^\d{1,10}\.json$/.test(n) && pidAlive(parseInt(n, 10))).slice(0, 256);
-  const boot = bootTimeMs() - 60 * 1000;
+  const linux = process.platform === 'linux';
+  const btime = linux ? procBtime() : 0;
   for (const n of live) {
     const f = path.join(dir, n);
     let st, j = null;
     try { st = fs.statSync(f); } catch (_) { continue; }
-    if (!st.isFile() || st.size > 64 * 1024 || st.mtimeMs < boot) continue; // written before this boot → leftover
+    if (!st.isFile() || st.size > 64 * 1024) continue;
     const pid = parseInt(n, 10);
-    if (pidStartedAfter(pid, st.mtimeMs)) continue; // pid reused by a newer process
+    if (linux ? pidStartedAfter(pid, st.mtimeMs, btime) // pid reused by a newer process
+      : st.mtimeMs < BOOT_AT_START - 60 * 1000) continue; // written before this boot
+    if (!pidLooksLikeClaude(pid, now)) continue; // Windows/macOS: the pid now runs something else
     try { j = JSON.parse(fs.readFileSync(f, 'utf8')); } catch (_) { continue; }
     if (!j || typeof j !== 'object' || typeof j.status !== 'string') continue;
     list.push({ sessionId: typeof j.sessionId === 'string' ? j.sessionId : '', status: j.status, writtenAt: st.mtimeMs });
@@ -5043,7 +5107,7 @@ function convState(c, now) {
 }
 // How long a registry record may go without any sign of life before it is
 // treated as a leftover (Windows/macOS have no cheap process start time).
-const REG_BUSY_MAX_MS = 6 * 60 * 60 * 1000;
+const REG_BUSY_MAX_MS = Number(process.env.PULSE_REG_BUSY_MAX_MS) || 6 * 60 * 60 * 1000; // env: test hook
 const REG_IDLE_MAX_MS = 24 * 60 * 60 * 1000;
 
 // → { provider, state, sessions, source } for the most urgent live session,
@@ -5053,10 +5117,16 @@ function computeAgentState(conv, now) {
   const states = [];
   const reg = claudeLiveRegistry(now);
   let trusted = 0;
+  // `claude --resume` keeps the sessionId, so a crashed process's record and
+  // the resumed one can share it: only the newest may borrow the transcript
+  // as its sign of life, or the leftover would never age out.
+  const newestBySid = new Map();
+  for (const r of reg) if (!(newestBySid.get(r.sessionId) >= r.writtenAt)) newestBySid.set(r.sessionId, r.writtenAt);
   for (const r of reg) {
     const c = conv[r.sessionId];
     const sideLive = !!(c && c.sideTs) && now - c.sideTs <= SIDE_ACTIVE_MS;
-    const lastSign = Math.max(r.writtenAt, c ? c.ts : 0, c ? c.sideTs : 0);
+    const lastSign = r.writtenAt >= newestBySid.get(r.sessionId)
+      ? Math.max(r.writtenAt, c ? c.ts : 0, c ? c.sideTs : 0) : r.writtenAt;
     let state = null;
     if (r.status === 'waiting') {
       if (now - r.writtenAt <= REG_IDLE_MAX_MS) state = 'waiting';
