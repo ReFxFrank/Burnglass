@@ -456,14 +456,81 @@ static class ServerApi
     }
 }
 
+/// Usage-meter scale shared by SummaryTransform (the summary's alertThresholds → the UI payload's
+/// "thresholds"), StripForm (tints the taskbar numbers) and — in JS — the popover page. All three
+/// mirror the dashboard's web/src/lib.js alertThresholds + meterTone, so a window turns amber / red
+/// at the same numbers in the dashboard, the popover and on the taskbar.
+static class MeterScale
+{
+    public static readonly double[] DefaultThresholds = { 80, 95 };
+
+    /// Finite numbers in (0, 100], ascending (the dashboard's filter); anything else, or none left,
+    /// → the default 80 / 95. Accepts any element (a missing property is ValueKind.Undefined).
+    public static List<double> Sanitize(JsonElement arr)
+    {
+        var list = new List<double>();
+        if (arr.ValueKind == JsonValueKind.Array)
+            foreach (var t in arr.EnumerateArray())
+                if (t.ValueKind == JsonValueKind.Number && t.TryGetDouble(out var v) && double.IsFinite(v) && v > 0 && v <= 100)
+                    list.Add(v);
+        if (list.Count == 0) list.AddRange(DefaultThresholds);
+        list.Sort();
+        return list;
+    }
+
+    /// 0 = plain, 1 = warn (at/above the lowest threshold), 2 = crit (at/above the highest, when
+    /// there are two or more) — lib.js meterTone.
+    public static int Tone(double pctUsed, IReadOnlyList<double> thresholds)
+    {
+        if (!double.IsFinite(pctUsed) || thresholds.Count == 0) return 0;
+        if (thresholds.Count > 1 && pctUsed >= thresholds[^1]) return 2;
+        return pctUsed >= thresholds[0] ? 1 : 0;
+    }
+
+    /// The whole-number "% used" the popover and the strip print for a progress line (JS
+    /// Math.round semantics: halves round up, not to even).
+    public static int UsedPct(double used, double limit)
+    {
+        double pct = limit > 0 && double.IsFinite(used) ? used * 100 / limit : 0;
+        return (int)Math.Round(Math.Clamp(pct, 0, 100), MidpointRounding.AwayFromZero);
+    }
+}
+
 /// Transforms the server's /api/summary JSON into the providers[] schema the ported popover page and
 /// StripForm consume (ui-schema.md). Sources are classified: 'codex' → Codex; gemini/cline/roo/
 /// continue → their own providers; everything else (cli, claude-desktop, unknown, …) → Claude.
+/// Additive top-level keys beside providers/errors:
+///   "sources"    — one row per SOURCE for the popover's spend donut, coloured and labelled exactly
+///                  like the dashboard (see Sources below);
+///   "thresholds" — the summary's alertThresholds (MeterScale.Sanitize), for meter ticks + tones.
 /// Never throws — any parse trouble yields an empty wrapper.
 static class SummaryTransform
 {
     private static readonly string[] AgentSources = { "gemini", "cline", "roo", "continue" };
     private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
+
+    /// The dashboard's categorical source series, DARK values (web/src/styles.css --s1…--s6; the
+    /// popover is dark-only). Assigned by position in the server's allSources, like lib.js
+    /// makeColorMap, so every source wears the same colour here as on the dashboard.
+    internal static readonly string[] SourceSeries = { "#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300" };
+
+    /// The dashboard's built-in source labels (web/src/lib.js SOURCE_LABELS). A custom source's own
+    /// label (payload.sourceMeta) wins; an unknown key shows raw — lib.js srcLabel.
+    private static readonly Dictionary<string, string> SourceLabels = new(StringComparer.Ordinal)
+    {
+        ["cli"] = "Claude CLI",
+        ["claude-vscode"] = "Claude VS Code",
+        ["claude-desktop"] = "Claude Desktop",
+        ["claude-jetbrains"] = "Claude JetBrains",
+        ["sdk-cli"] = "Claude SDK",
+        ["sdk-ts"] = "Claude SDK (TS)",
+        ["sdk-py"] = "Claude SDK (Python)",
+        ["codex"] = "Codex",
+        ["gemini"] = "Gemini CLI",
+        ["continue"] = "Continue",
+        ["cline"] = "Cline",
+        ["roo"] = "Roo Code",
+    };
 
     public static string ToUi(string summaryJson)
     {
@@ -485,26 +552,34 @@ static class SummaryTransform
 
         var cost30 = new Dictionary<string, double>();
         var tokens30 = new Dictionary<string, double>();
+        var srcCost30 = new Dictionary<string, double>(StringComparer.Ordinal); // per SOURCE, for "sources"
         if (hasLast30 && last30.TryGetProperty("bySource", out var bys) && bys.ValueKind == JsonValueKind.Object)
             foreach (var prop in bys.EnumerateObject())
             {
                 string cls = Classify(prop.Name);
                 Bump(cost30, cls, Num(prop.Value, "cost"));
                 Bump(tokens30, cls, Num(prop.Value, "tokens"));
+                Bump(srcCost30, prop.Name, Num(prop.Value, "cost"));
             }
 
         // daily[] buckets: {date:'YYYY-MM-DD', total, tokens, bySource:{src:cost}} — last bucket is today.
         var daily = new List<(string Date, Dictionary<string, double> ByClass)>();
+        var dailySrc = new List<Dictionary<string, double>>(); // the same buckets per SOURCE
         if (hasLast30 && last30.TryGetProperty("daily", out var dl) && dl.ValueKind == JsonValueKind.Array)
             foreach (var b in dl.EnumerateArray())
             {
                 var byClass = new Dictionary<string, double>();
+                var bySrc = new Dictionary<string, double>(StringComparer.Ordinal);
                 if (b.TryGetProperty("bySource", out var bsx) && bsx.ValueKind == JsonValueKind.Object)
                     foreach (var prop in bsx.EnumerateObject())
-                        if (prop.Value.ValueKind == JsonValueKind.Number)
-                            Bump(byClass, Classify(prop.Name), prop.Value.GetDouble());
-                string date = b.TryGetProperty("date", out var dt) ? dt.GetString() ?? "" : "";
+                        if (prop.Value.ValueKind == JsonValueKind.Number && prop.Value.TryGetDouble(out var dv) && double.IsFinite(dv))
+                        {
+                            Bump(byClass, Classify(prop.Name), dv);
+                            Bump(bySrc, prop.Name, dv);
+                        }
+                string date = b.TryGetProperty("date", out var dt) && dt.ValueKind == JsonValueKind.String ? dt.GetString() ?? "" : "";
                 daily.Add((date, byClass));
+                dailySrc.Add(bySrc);
             }
 
         double TodayFor(string cls) => daily.Count > 0 ? daily[^1].ByClass.GetValueOrDefault(cls) : 0;
@@ -530,7 +605,7 @@ static class SummaryTransform
             if (metersEnabled && meters.TryGetProperty("buckets", out var bks) && bks.ValueKind == JsonValueKind.Array)
                 foreach (var b in bks.EnumerateArray())
                 {
-                    string key = b.TryGetProperty("key", out var kk) ? kk.GetString() ?? "" : "";
+                    string key = b.TryGetProperty("key", out var kk) && kk.ValueKind == JsonValueKind.String ? kk.GetString() ?? "" : "";
                     double pct = Num(b, "pct");
                     long? resetsAt = Millis(b, "resetsAt");
                     string label;
@@ -538,7 +613,7 @@ static class SummaryTransform
                     if (key == "five_hour") { label = "Session"; period = 18_000_000; }               // 5h
                     else if (key == "seven_day" || key == "seven_day_overall") { label = "Weekly"; period = 604_800_000; }
                     else { label = ScopedLabel(b); period = 604_800_000; }                            // per-model weekly
-                    claudeProgress.Add(Progress(label, pct, resetsAt, period));
+                    claudeProgress.Add(Progress(label, pct, resetsAt, period, ProjectedUsed(b)));
                 }
         }
         double claude30 = cost30.GetValueOrDefault("claude");
@@ -579,7 +654,7 @@ static class SummaryTransform
                 if (raw.Contains("weekly", StringComparison.OrdinalIgnoreCase)) { label = "Weekly"; period = 604_800_000; }
                 else if (raw.Contains("5h")) { label = "Session"; period = 18_000_000; }
                 else { label = ScopedLabel(b); period = 604_800_000; }
-                codexProgress.Add(Progress(label, pct, resetsAt, period));
+                codexProgress.Add(Progress(label, pct, resetsAt, period, ProjectedUsed(b)));
             }
         double codex30 = cost30.GetValueOrDefault("codex");
         if (codexProgress.Count > 0 || codex30 > 0)
@@ -601,8 +676,71 @@ static class SummaryTransform
             providers.Add(Provider(src, char.ToUpperInvariant(src[0]) + src[1..], lines));
         }
 
-        return new JsonObject { ["providers"] = providers, ["errors"] = errors }
-            .ToJsonString(new JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping });
+        var thresholds = new JsonArray();
+        foreach (var t in MeterScale.Sanitize(root.TryGetProperty("alertThresholds", out var at) ? at : default))
+            thresholds.Add(t);
+
+        return new JsonObject
+        {
+            ["providers"] = providers,
+            ["errors"] = errors,
+            ["sources"] = Sources(root, srcCost30, dailySrc),
+            ["thresholds"] = thresholds,
+        }.ToJsonString(new JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping });
+    }
+
+    // The popover's spend donut, per SOURCE like the dashboard's (#mini MiniDonut): one row per key
+    // of the server's allSources — alphabetical, and the order the dashboard colours by — with
+    // colour SourceSeries[i % 6], the dashboard's label, and today (the last daily bucket), week7 (the
+    // last 7 daily buckets: the strip's calendar-day week) and cost30 (last30.bySource). A server
+    // without allSources falls back to the period's source keys, ordinal-sorted like a JS sort().
+    private static JsonArray Sources(JsonElement root, Dictionary<string, double> cost30,
+        List<Dictionary<string, double>> daily)
+    {
+        var order = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        if (root.TryGetProperty("allSources", out var all) && all.ValueKind == JsonValueKind.Array)
+            foreach (var s in all.EnumerateArray())
+                if (s.ValueKind == JsonValueKind.String && s.GetString() is string k && k.Length > 0 && seen.Add(k))
+                    order.Add(k);
+        // Anything with spend the list does not name still gets a row (after it, never reshuffling it).
+        var extra = cost30.Keys.Concat(daily.SelectMany(d => d.Keys)).Where(k => k.Length > 0 && seen.Add(k)).ToList();
+        extra.Sort(StringComparer.Ordinal);
+        order.AddRange(extra);
+
+        JsonElement meta = root.TryGetProperty("sourceMeta", out var sm) && sm.ValueKind == JsonValueKind.Object ? sm : default;
+        var rows = new JsonArray();
+        for (int i = 0; i < order.Count; i++)
+        {
+            string id = order[i];
+            double today = daily.Count > 0 ? daily[^1].GetValueOrDefault(id) : 0;
+            double week7 = 0;
+            for (int d = Math.Max(0, daily.Count - 7); d < daily.Count; d++) week7 += daily[d].GetValueOrDefault(id);
+            rows.Add(new JsonObject
+            {
+                ["id"] = id,
+                ["label"] = SourceLabel(id, meta),
+                ["color"] = SourceSeries[i % SourceSeries.Length],
+                ["today"] = Math.Round(today, 4),
+                ["week7"] = Math.Round(week7, 4),
+                ["cost30"] = Math.Round(cost30.GetValueOrDefault(id), 4),
+            });
+        }
+        return rows;
+    }
+
+    // lib.js srcLabel: the custom source's own label (payload.sourceMeta) → the built-in label → the
+    // raw key. The server already sanitizes custom labels; control characters are dropped here too.
+    private static string SourceLabel(string id, JsonElement meta)
+    {
+        if (meta.ValueKind == JsonValueKind.Object && meta.TryGetProperty(id, out var m) && m.ValueKind == JsonValueKind.Object
+            && m.TryGetProperty("label", out var lb) && lb.ValueKind == JsonValueKind.String)
+        {
+            string clean = new string((lb.GetString() ?? "").Where(c => !char.IsControl(c)).ToArray()).Trim();
+            if (clean.Length > 64) clean = clean[..64];
+            if (clean.Length > 0) return clean;
+        }
+        return SourceLabels.TryGetValue(id, out var builtin) ? builtin : id;
     }
 
     private static JsonObject Provider(string id, string name, JsonArray lines) => new()
@@ -614,13 +752,15 @@ static class SummaryTransform
     };
 
     // format.kind:"percent" is REQUIRED — StripForm only counts progress lines carrying it.
-    private static JsonObject Progress(string label, double usedPct, long? resetsAtMs, long periodMs)
+    // "projected" (additive) = the server's straight-line % used at the reset, for the dashboard's
+    // projection hatch; absent until the server has observed the window long enough.
+    private static JsonObject Progress(string label, double usedPct, long? resetsAtMs, long periodMs, int? projectedUsed = null)
     {
         var o = new JsonObject
         {
             ["label"] = label,
             ["type"] = "progress",
-            ["used"] = (int)Math.Round(Math.Clamp(usedPct, 0, 100)),
+            ["used"] = (int)Math.Round(Math.Clamp(usedPct, 0, 100), MidpointRounding.AwayFromZero), // JS Math.round, as the dashboard
             ["limit"] = 100,
             ["format"] = new JsonObject { ["kind"] = "percent" },
             ["periodDurationMs"] = periodMs,
@@ -628,8 +768,16 @@ static class SummaryTransform
         if (resetsAtMs is long ms)
             o["resetsAt"] = DateTimeOffset.FromUnixTimeMilliseconds(ms).UtcDateTime
                 .ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", Inv);
+        if (projectedUsed is int pu) o["projected"] = pu;
         return o;
     }
+
+    // Bucket projLeftAtReset (% LEFT at the reset) → % USED at the reset, as the dashboard's meters do.
+    private static int? ProjectedUsed(JsonElement bucket) =>
+        bucket.TryGetProperty("projLeftAtReset", out var v) && v.ValueKind == JsonValueKind.Number
+            && v.TryGetDouble(out var left) && double.IsFinite(left)
+            ? (int)Math.Round(Math.Clamp(100 - left, 0, 100), MidpointRounding.AwayFromZero)
+            : null;
 
     // The donut regex-parses "$X" out of lines labeled EXACTLY Today / Last 7 Days / Last 30 Days —
     // keep the labels verbatim. No "All Time" line: per-source all-time isn't in the payload.

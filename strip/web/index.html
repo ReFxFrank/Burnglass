@@ -3,8 +3,9 @@
   Burnglass Strip popover UI (formerly Pulse Strip).
   Adapted from openusage-windows (https://github.com/rebers/openusage) tray/web/index.html,
   MIT License, Copyright (c) 2026 Robin Ebers. See strip/LICENSE-openusage.
-  Restyled for Burnglass (dark-only, the "Glass" palette); OpenUsage name/logo removed per its
-  trademark policy.
+  Restyled for Burnglass (dark-only, the "Glass" palette) to match the dashboard: spend by SOURCE
+  in the dashboard's source colours, usage windows as "% used" on the dashboard's meter bar.
+  OpenUsage name/logo removed per its trademark policy.
 -->
 <html lang="en">
 <head>
@@ -12,16 +13,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Burnglass</title>
 <style>
-/* ---- Burnglass design tokens (dark-only). Surfaces, ink and status are the dashboard's
-   Command Center dark set; the accent family is the "Glass" ice-cyan (brand tokens.css).
-   Amber/red mean status only; the ember orange lives in the logo mark, never here. ---- */
+/* ---- Burnglass design tokens (dark-only). Surfaces, ink, status, meters and the source series are
+   the dashboard's Command Center dark set (web/src/styles.css); the accent is the "Glass" ice-cyan.
+   Amber/red mean status only; source colours mean sources only; the ember orange lives in the logo
+   mark, never here. ---- */
 :root{
   --font: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
 
   --tray:#0a0b0f;                 /* popover page (--bg); the host's Backdrop matches it */
   --card:#12141a;                 /* cards (--panel) */
   --card-line:#22252f;            /* card edge (--line) */
-  --track:#18252c;                /* meter track (--m-track) */
   --segbg:#171a22;                /* segmented control trough (--panel-2) */
   --hover:#1a1d26;
   --hair:rgba(255,255,255,.08);
@@ -29,25 +30,25 @@
   --text:#edeff5;
   --text2:#b4b8c6;
   --text3:#8d92a4;
+  --text4:#5f6475;
 
   --accent:#4cd4f7;               /* Glass ice */
-  --fill:#4cd4f7;                 /* meter fill (--m-fill), used < 80% */
-  --bar:#33aed1;                  /* magnitude bars (--bar) */
-  --warn:#f2aa3c;                 /* meter fill, used >= 80% */
-  --bad:#f47171;                  /* meter fill, used >= 95% (--crit) */
+  --axis:#2e323e;                 /* chart axis line (--axis) */
+  --m-track:#18252c;              /* meter track + donut ring (--m-track) */
+  --m-fill:#4cd4f7;               /* meter fill below the lowest alert threshold (--m-fill) */
+  --warn:#f2aa3c;                 /* meter at/above the lowest threshold */
+  --crit:#f47171;                 /* meter at/above the highest threshold */
   --seg-on-bg:#1e212b;            /* --panel-3 */
   --seg-on-shadow:0 1px 2px rgba(0,0,0,.35);
 
   /* density */
   --pad-h:14px;                   /* row horizontal padding */
-  --bar-h:5px;                    /* meterHeight */
-  --row-gap:4px;                  /* rowInnerSpacing */
   --bar-row-pad:8px;              /* barRowPadding */
   --text-row-pad:5px;             /* textRowPadding */
   --section-gap:11px;             /* sectionSpacing */
   --header-gap:4px;               /* headerToCardSpacing */
   --card-gutter:4px;              /* cardGutter */
-  --radius:12px;                  /* cardCornerRadius (popover window radius 20px is host-side) */
+  --radius:10px;                  /* card radius = the dashboard's panels (--r-md); window radius 20px is host-side */
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{background:var(--tray);color:var(--text);font-family:var(--font);
@@ -62,34 +63,41 @@ html,body{background:var(--tray);color:var(--text);font-family:var(--font);
 .spend{background:var(--card);border:1px solid var(--card-line);border-radius:var(--radius);padding:12px 14px 14px;margin-bottom:var(--section-gap)}
 .spend-head{display:flex;align-items:center;gap:5px;margin-bottom:12px}
 .spend-title{font-size:15px;font-weight:600}
-.info{width:14px;height:14px;border-radius:50%;color:var(--text2);flex:0 0 auto}
+.info{width:14px;height:14px;border-radius:50%;color:var(--text3);flex:0 0 auto;display:flex}
 .spend-head .spacer{flex:1}
-.iconbtn{width:22px;height:22px;color:var(--text2);cursor:default;display:flex;align-items:center;justify-content:center}
 
-.seg{position:relative;display:flex;background:var(--segbg);border:1px solid var(--card-line);border-radius:9px;padding:2px;margin-bottom:14px;
+/* segmented control — the dashboard's Seg (trough --panel-2, selected --panel-3), plus the strip's
+   sliding + draggable thumb */
+.seg{position:relative;display:flex;background:var(--segbg);border:1px solid var(--card-line);border-radius:6px;padding:2px;margin-bottom:14px;
   touch-action:none;user-select:none;-webkit-user-select:none}
-.seg-thumb{position:absolute;top:2px;left:0;bottom:2px;width:33%;border-radius:7px;background:var(--seg-on-bg);
+.seg-thumb{position:absolute;top:2px;left:0;bottom:2px;width:33%;border-radius:4px;background:var(--seg-on-bg);
   box-shadow:var(--seg-on-shadow);z-index:0;will-change:transform;
   transition:transform .34s cubic-bezier(.34,1.28,.64,1), width .18s ease}
 .seg-thumb.drag{transition:none}
 .seg button{position:relative;z-index:1;flex:1;border:0;background:transparent;font-family:inherit;font-size:12px;
-  font-weight:600;color:var(--text2);padding:5px 0;border-radius:7px;cursor:default;transition:color .22s ease}
+  font-weight:500;color:var(--text3);height:24px;border-radius:4px;cursor:default;transition:color .22s ease}
+.seg button:hover{color:var(--text2)}
 .seg button.on{color:var(--text)}
 /* No focus ring — this is an app popover, not a form; the thumb already shows the selection. */
 .seg button:focus, .seg button:focus-visible{outline:none}
 
-.donut-wrap{display:flex;align-items:center;gap:16px}
-.donut{position:relative;width:132px;height:132px;flex:0 0 auto}
-.donut svg{transform:rotate(-90deg)}
-.donut svg circle{transition:stroke-dasharray .55s cubic-bezier(.22,1,.36,1),stroke-dashoffset .55s cubic-bezier(.22,1,.36,1),stroke .3s}
+/* donut + legend: spend by SOURCE, like the dashboard's mini view (MiniDonut) */
+.donut-wrap{display:flex;align-items:center;gap:14px}
+.donut{position:relative;width:116px;height:116px;flex:0 0 auto}
+.donut svg{display:block;transform:rotate(-90deg)}
+.donut svg circle{fill:none}
+.donut svg .ring{stroke:var(--m-track)}
 .donut-wrap.anim{animation:pop .32s ease}
 .donut .center{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
-  font-size:19px;font-weight:700;letter-spacing:-.3px}
-.legend{flex:1;display:flex;flex-direction:column;gap:9px;min-width:0}
-.legend .row{display:flex;align-items:center;gap:9px;font-size:14px}
-.legend .dot{width:11px;height:11px;border-radius:50%;flex:0 0 auto}
-.legend .name{font-weight:400;color:var(--text)}
-.legend .amt{margin-left:auto;font-weight:600}
+  font-size:18px;font-weight:700;letter-spacing:-.3px;font-variant-numeric:tabular-nums}
+/* At most 6 rows (top 5 + "Other"), 16px each + 4px gaps = 116px: never taller than the donut, so
+   switching tabs never changes the popover's height. */
+.legend{flex:1;display:flex;flex-direction:column;gap:4px;min-width:0}
+.legend .row{display:flex;align-items:center;gap:7px;height:16px;font-size:12px;min-width:0}
+.legend .sw{width:8px;height:8px;border-radius:2px;flex:0 0 auto}
+.legend .name{color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.legend .amt{margin-left:auto;color:var(--text);font-weight:500;font-variant-numeric:tabular-nums;white-space:nowrap;flex:0 0 auto}
+.legend .none{font-size:12px;color:var(--text3)}
 
 /* ---------- Provider section ---------- */
 .section{margin-bottom:var(--section-gap)}
@@ -101,41 +109,49 @@ html,body{background:var(--tray);color:var(--text);font-family:var(--font);
 .sec-head .spacer{flex:1}
 .sec-warn{color:var(--warn);font-size:11px}
 .mark-r{width:16px;height:16px;flex:0 0 auto;background:var(--text2);opacity:.9}
-/* Letter-badge fallback when no icon file ships for a provider — never render blank. */
+/* Letter-badge fallback when no icon file ships for a provider — never render blank. Neutral: a
+   provider glyph is not a data series. */
 .mark-fallback{border-radius:50%;display:flex;align-items:center;justify-content:center;
-  color:#fff;font-size:10px;font-weight:700;line-height:1;opacity:1}
+  background:var(--text4);color:var(--text);font-size:10px;font-weight:700;line-height:1;opacity:1}
 
 .card{background:var(--card);border:1px solid var(--card-line);border-radius:var(--radius);padding:var(--card-gutter) 0}
 
-/* meter (bounded) row */
+/* meter (bounded) row: title · the dashboard's MeterBar · "N% used" + reset */
 .mrow{padding:var(--bar-row-pad) var(--pad-h)}
-.mrow .lbl{display:flex;align-items:baseline;gap:6px;margin-bottom:var(--row-gap)}
-.mrow .title{font-size:13px;font-weight:600}
-.meter{position:relative;height:var(--bar-h);margin:var(--row-gap) 0}
-.meter .trk{position:absolute;inset:0;background:var(--track);border-radius:99px}
-.meter .fil{position:absolute;top:0;bottom:0;left:0;border-radius:99px;min-width:var(--bar-h);
-  transition:width .6s cubic-bezier(.22,1,.36,1), background .3s ease}
-.mrow .read{display:flex;align-items:baseline;gap:8px;font-size:12px;margin-top:var(--row-gap)}
-.mrow .read .head{color:var(--text);font-weight:400}
-.mrow .read .ctx{margin-left:auto;color:var(--text2);white-space:nowrap}
+.mrow .lbl{display:flex;align-items:baseline;gap:6px}
+.mrow .title{font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+/* = web/src/styles.css ".meter": fill = % used, projection hatch, threshold ticks, warn/crit tones */
+.meter{position:relative;height:8px;border-radius:2px;background:var(--m-track);margin:7px 0 6px}
+.meter .f{position:absolute;left:0;top:0;bottom:0;border-radius:2px;background:var(--m-fill)}
+.meter .p{position:absolute;top:0;bottom:0;border-radius:0 2px 2px 0;background:repeating-linear-gradient(135deg, var(--m-fill) 0 2px, transparent 2px 4px);opacity:.75}
+.meter .t{position:absolute;top:-3px;bottom:-3px;width:2px;margin-left:-1px;background:var(--card)}
+.meter .t::after{content:"";position:absolute;left:0;right:0;top:3px;bottom:3px;background:var(--text4)}
+.meter.warn .f{background:var(--warn)}
+.meter.warn .p{background:repeating-linear-gradient(135deg, var(--warn) 0 2px, transparent 2px 4px)}
+.meter.crit .f{background:var(--crit)}
+.meter.crit .p{background:repeating-linear-gradient(135deg, var(--crit) 0 2px, transparent 2px 4px)}
+.mrow .read{display:flex;align-items:baseline;gap:8px;font-size:12px;min-width:0}
+.mrow .read .head{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap}
+.mrow .read .proj{color:var(--text3);font-size:11px;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.mrow .read .ctx{margin-left:auto;color:var(--text2);white-space:nowrap;font-variant-numeric:tabular-nums}
+.mrow .read .warn{color:var(--warn)}
+.mrow .read .crit{color:var(--crit)}
 
 /* text (unbounded) row */
 .trow{display:flex;align-items:center;gap:10px;padding:var(--text-row-pad) var(--pad-h)}
 .trow.tight{padding-top:2px}
 .trow .tl{font-size:12px;font-weight:600;color:var(--text)}
-.trow .tv{margin-left:auto;font-size:12px;color:var(--text);text-align:right}
+.trow .tv{margin-left:auto;font-size:12px;color:var(--text);text-align:right;font-variant-numeric:tabular-nums}
 .trow .tv .sub{display:block;font-size:11px;color:var(--text2)}
 
-/* trend sparkline row */
+/* trend sparkline row — the dashboard's mini trend (MiniTrend): neutral days on an axis line, today
+   (the last bar) in the accent, no bar at all for a day with no spend */
 .chrow{padding:8px var(--pad-h)}
 .chrow .tl{font-size:12px;font-weight:600;margin-bottom:6px;display:flex}
 .chrow .tl .note{margin-left:auto;font-weight:400;color:var(--text2)}
-.spark{display:flex;align-items:flex-end;gap:2px;height:18px}
-.spark .b{flex:1;background:var(--bar);border-radius:1px;min-height:1px}
-
-/* expand caret */
-.caret{display:flex;align-items:center;justify-content:center;color:var(--text2);padding:5px 0;cursor:default}
-.caret svg{width:12px;height:12px}
+.spark{display:flex;align-items:flex-end;gap:2px;height:19px;border-bottom:1px solid var(--axis)}
+.spark .b{flex:1;min-width:2px;background:var(--text4);border-radius:1px 1px 0 0}
+.spark .b.today{background:var(--accent)}
 
 .empty{color:var(--text2);text-align:center;padding:26px 16px;font-size:13px}
 .hidden{display:none}
@@ -151,7 +167,7 @@ body.opening #app{animation:popopen .44s cubic-bezier(.16,1,.3,1)}
   100%{opacity:1;transform:scale(1)}
 }
 
-/* micro-animations (enhancement only, never hold an invisible state) */
+/* micro-animations (enhancement only, never hold an invisible state; nothing loops) */
 @keyframes pop{from{opacity:.45;transform:scale(.97)}to{opacity:1;transform:none}}
 .donut .center{transition:opacity .25s ease}
 
@@ -171,7 +187,7 @@ body.opening #app{animation:popopen .44s cubic-bezier(.16,1,.3,1)}
 .brand .wm{font-size:13px;font-weight:620;letter-spacing:-.018em;color:var(--text)}
 .brand .wm em{font-style:normal;color:var(--accent)}
 .footer .dash{border:0;background:transparent;color:var(--text2);font-family:inherit;font-size:12px;
-  font-weight:600;padding:4px 8px;border-radius:7px;cursor:default}
+  font-weight:600;padding:4px 8px;border-radius:6px;cursor:default}
 .footer .dash:hover{background:var(--hover);color:var(--accent)}
 </style>
 </head>
@@ -198,7 +214,9 @@ const ICONS = "icons/";
 // Icon files that actually ship in icons/ — anything else gets the letter-badge fallback,
 // so a missing icon file can never render as a blank glyph.
 const ICON_FILES = new Set(["claude","codex","gemini"]);
+const SVG_NS = "http://www.w3.org/2000/svg";
 const el = (t,c)=>{const e=document.createElement(t); if(c)e.className=c; return e;};
+const svgEl = (t,attrs)=>{const e=document.createElementNS(SVG_NS,t); for(const k in attrs) e.setAttribute(k,attrs[k]); return e;};
 function mark(node, providerId){ // monochrome provider glyph via CSS mask, or letter-badge fallback
   if(ICON_FILES.has(providerId)){
     const url = `url("${ICONS}${providerId}.svg")`;
@@ -208,29 +226,32 @@ function mark(node, providerId){ // monochrome provider glyph via CSS mask, or l
     node.style.webkitMaskPosition = node.style.maskPosition = "center";
   } else {
     node.classList.add("mark-fallback");
-    node.style.background = brandColor(providerId, 0);
     node.textContent = String(providerId||"?").charAt(0).toUpperCase();
   }
 }
 
-// Provider/source colors for glyph fallbacks and the spend donut/legend: the dashboard's provider
-// marks (--fam-*) for the big three, its categorical source series (--s1..s6) for the rest. Never
-// the accent (that is interaction/brand, not a data series) and never the logo's ember.
-const BRAND = {
-  claude:"#d97757", codex:"#19b38d", gemini:"#5b95f5",
-  cline:"#d55181", roo:"#c98500", continue:"#3987e5",
-  cli:"#3987e5", "claude-desktop":"#d97757", unknown:"#8a8f98"
-};
+// The dashboard's categorical SOURCE series, dark values (web/src/styles.css --s1..--s6). The host
+// sends each source's colour already assigned (by its position in the server's allSources, like the
+// dashboard's makeColorMap); this table is for a payload saved by an older strip, and the check
+// below rejects anything that is not a plain #rrggbb.
 const SERIES = ["#3987e5","#d95926","#199e70","#c98500","#d55181","#008300"];
-const brandColor = (id,i)=> BRAND[id] || SERIES[i%SERIES.length];
+const OTHER_COLOR = "#8d92a4"; // --text3: the merged "Other" slice is not a source
+const safeColor = (c,i)=> /^#[0-9a-f]{6}$/i.test(String(c||"")) ? c : SERIES[i%SERIES.length];
 
 function money(n){ // compact center label: $13.4K, $2.5K, $91.15
   if(n>=1000){ const k=n/1000; return "$"+(k>=100?Math.round(k):k.toFixed(1)).toString().replace(/\.0$/,"")+"K"; }
   return "$"+n.toFixed(2);
 }
-function moneyFull(n){ return "$"+n.toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2}); }
+// The dashboard's money(): "$2,178.09", "<$0.01".
+function moneyFull(n){
+  if(n>0 && n<0.01) return "<$0.01";
+  return "$"+n.toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
+}
 function parseDollars(s){ if(!s)return 0; const m=String(s).replace(/,/g,"").match(/\$([\d.]+)/); return m?parseFloat(m[1]):0; }
+const num = v => { const n=Number(v); return isFinite(n) && n>0 ? n : 0; };
 
+// "Resets in 7m" · "Resets in 2h 05m" · "Resets in 40d 18h" (the dashboard's dur(), to the minute —
+// the popover re-renders each time it opens rather than ticking).
 function fmtReset(iso){
   if(!iso) return null;
   let ms = new Date(iso).getTime() - Date.now();
@@ -238,41 +259,58 @@ function fmtReset(iso){
   if(ms<0) ms=0;
   const m = Math.floor(ms/60000), h=Math.floor(m/60), d=Math.floor(h/24);
   if(d>0) return `Resets in ${d}d ${h-d*24}h`;
-  if(h>0) return `Resets in ${h}h`;
+  if(h>0) return `Resets in ${h}h ${String(m-h*60).padStart(2,"0")}m`;
   return `Resets in ${Math.max(1,m)}m`;
+}
+
+/* ---------- alert thresholds / meter tone (the dashboard's lib.js alertThresholds + meterTone) ---------- */
+// The host passes the dashboard's alert thresholds as payload.thresholds; default 80 / 95.
+let THRESHOLDS = [80,95];
+function alertThresholds(t){
+  const list = Array.isArray(t) ? t.filter(n=>typeof n==="number" && n>0 && n<=100) : [];
+  return (list.length ? list : [80,95]).slice().sort((a,b)=>a-b);
+}
+// '' | 'warn' | 'crit' for a used-%: at/above the lowest threshold → warn, at/above the highest
+// (when there are 2+) → crit. The taskbar strip tints its numbers by the same rule.
+function meterTone(pct, th){
+  if(pct==null || !isFinite(pct) || !th.length) return "";
+  if(th.length>1 && pct>=th[th.length-1]) return "crit";
+  return pct>=th[0] ? "warn" : "";
 }
 
 /* ---------- meter row ---------- */
 function meterRow(line){
-  const used = Number(line.used)||0;
-  const limit = Number(line.limit)||100;
-  const usedFrac = Math.max(0, Math.min(1, used/limit));
-  const remainFrac = 1 - usedFrac;                       // meter shows remaining (Left style)
-  const remainPct = Math.round(remainFrac*100);
-
-  // Severity by USED percentage, on the dashboard's default alert thresholds (80 / 95) — the same
-  // ones its meters, the tray and the limit notifications use: used >= 95% -> crit, >= 80% -> warn,
-  // else the plain meter fill.
-  const usedPct = usedFrac*100;
-  const color = usedPct>=95 ? "var(--bad)" : usedPct>=80 ? "var(--warn)" : "var(--fill)";
+  const limit = Number(line.limit)>0 ? Number(line.limit) : 100;
+  const pct = Math.max(0, Math.min(100, (Number(line.used)||0)/limit*100));
+  const shown = Math.round(pct);                        // the number printed here AND on the taskbar
+  const tone = meterTone(shown, THRESHOLDS);
+  const pj = Number(line.projected);
+  const proj = line.projected!=null && isFinite(pj) && pj>pct ? Math.min(100, pj) : null;
 
   const row=el("div","mrow");
   const lbl=el("div","lbl");
   const title=el("span","title"); title.textContent=line.label; lbl.appendChild(title);
   row.appendChild(lbl);
 
-  const meter=el("div","meter");
-  meter.appendChild(el("div","trk"));
-  const fil=el("div","fil");
-  const target = remainFrac<=0 ? "0" : `max(var(--bar-h), ${(remainFrac*100).toFixed(2)}%)`;
-  // Set the real width immediately (visible even if rAF/animation is throttled); the CSS width
-  // transition still animates on later value changes.
-  fil.style.width=target; fil.style.background=color;
-  meter.appendChild(fil);
+  // The dashboard's MeterBar: fill = % used, hatch up to the projection, a tick per threshold.
+  const meter=el("div","meter"+(tone?" "+tone:""));
+  meter.setAttribute("role","meter");
+  meter.setAttribute("aria-valuemin","0"); meter.setAttribute("aria-valuemax","100");
+  meter.setAttribute("aria-valuenow",String(shown));
+  meter.setAttribute("aria-label",`${line.label}: ${shown}% used`);
+  const f=el("i","f"); f.style.width=pct.toFixed(1)+"%"; meter.appendChild(f);
+  if(proj!=null){ const p=el("i","p"); p.style.left=pct.toFixed(1)+"%"; p.style.width=(proj-pct).toFixed(1)+"%"; meter.appendChild(p); }
+  for(const th of THRESHOLDS){ const t=el("i","t"); t.style.left=th+"%"; meter.appendChild(t); }
   row.appendChild(meter);
 
   const read=el("div","read");
-  const head=el("span","head"); head.textContent=`${remainPct}% left`; read.appendChild(head);
+  const head=el("span","head"+(tone?" "+tone:"")); head.textContent=`${shown}% used`; read.appendChild(head);
+  if(proj!=null){
+    const pt=meterTone(Math.round(proj), THRESHOLDS);
+    const ps=el("span","proj"+(pt?" "+pt:"")); ps.textContent=`→ ${Math.round(proj)}% at reset`;
+    ps.title="Straight-line projection of % used at the reset, from the recent trend";
+    read.appendChild(ps);
+  }
   const ctx=el("span","ctx"); const r=fmtReset(line.resetsAt); if(r)ctx.textContent=r; read.appendChild(ctx);
   row.appendChild(read);
   return row;
@@ -295,8 +333,14 @@ function chartRow(line){
   if(line.note){ const n=el("span","note"); n.textContent=line.note; tl.appendChild(n); }
   row.appendChild(tl);
   const spark=el("div","spark");
-  const pts=line.points||[]; const max=Math.max(1,...pts.map(p=>Number(p.value)||0));
-  for(const p of pts){ const b=el("div","b"); b.style.height=`${Math.max(2,(Number(p.value)||0)/max*100)}%`; spark.appendChild(b); }
+  const pts=line.points||[]; const max=Math.max(0.0001,...pts.map(p=>num(p.value)));
+  pts.forEach((p,i)=>{
+    const v=num(p.value);
+    const b=el("div","b"+(i===pts.length-1?" today":"")); // the transform's last daily bucket is today
+    b.style.height = v>0 ? Math.max(2, v/max*18).toFixed(1)+"px" : "0";
+    if(p.label) b.title=p.label+(p.valueLabel?" · "+p.valueLabel:"");
+    spark.appendChild(b);
+  });
   row.appendChild(spark);
   return row;
 }
@@ -327,43 +371,64 @@ function providerSection(p){
   return sec;
 }
 
-/* ---------- total spend ---------- */
+/* ---------- total spend (by source) ---------- */
 let spendPeriod = "All Time";
-const PERIOD_LABEL = { "Today":"Today", "7 Days":"Last 7 Days", "30 Days":"Last 30 Days", "All Time":"All Time" };
-let LAST_PROVIDERS = [];
+const ALL_PERIODS=["Today","7 Days","30 Days","All Time"];
+const PERIOD_FIELD = { "Today":"today", "7 Days":"week7", "30 Days":"cost30", "All Time":"allTime" };
+const PERIOD_LINE = { "today":"Today", "week7":"Last 7 Days", "cost30":"Last 30 Days", "allTime":"All Time" };
+let PERIODS=ALL_PERIODS.slice(); // active tab set — "All Time" only when some source reports it
+let SPEND=null;   // live refs for in-place period switching
+let SOURCES=[];   // [{id,label,color,today,week7,cost30,allTime?}]
 
-function spendFor(providers, period){
-  const wanted = PERIOD_LABEL[period];
-  const rows=[];
-  for(let i=0;i<providers.length;i++){
-    const p=providers[i];
-    const line=(p.lines||[]).find(l=>l.type==="text"&&l.label===wanted);
-    const amt=parseDollars(line&&line.value);
-    if(amt>0) rows.push({id:p.providerId, name:p.displayName||p.providerId, amt, color:brandColor(p.providerId,i)});
+// One row per SOURCE. The host sends them (payload.sources: the server's allSources order, the
+// dashboard's colours and labels). A payload saved by an older strip has none: it falls back to one
+// row per provider section, read from its Today / Last 7 Days / Last 30 Days lines.
+function spendSources(payload, providers){
+  const list = payload && !Array.isArray(payload) && Array.isArray(payload.sources) ? payload.sources : null;
+  if(list && list.length){
+    return list.filter(s=>s && s.id!=null).map((s,i)=>({
+      id:String(s.id), label:String(s.label!=null && s.label!=="" ? s.label : s.id), color:safeColor(s.color,i),
+      today:num(s.today), week7:num(s.week7), cost30:num(s.cost30), allTime:num(s.allTime)
+    }));
   }
+  return providers.map((p,i)=>{
+    const row={ id:String(p.providerId||i), label:String(p.displayName||p.providerId||"?"), color:SERIES[i%SERIES.length] };
+    for(const f in PERIOD_LINE){
+      const line=(p.lines||[]).find(l=>l.type==="text"&&l.label===PERIOD_LINE[f]);
+      row[f]=parseDollars(line&&line.value);
+    }
+    return row;
+  });
+}
+
+// The selected tab's non-zero rows, largest first (the dashboard's order). More than 6 → the top 5
+// plus one neutral "Other" slice, so the legend stays within the donut's height.
+const MAX_ROWS = 6;
+function spendRows(period){
+  const f = PERIOD_FIELD[period];
+  let rows = SOURCES.map(s=>({ id:s.id, name:s.label, color:s.color, amt:s[f]||0 })).filter(r=>r.amt>0);
   rows.sort((a,b)=>b.amt-a.amt);
+  if(rows.length>MAX_ROWS){
+    const rest=rows.slice(MAX_ROWS-1);
+    rows=rows.slice(0,MAX_ROWS-1);
+    rows.push({ id:"__other", name:`Other (${rest.length})`, color:OTHER_COLOR,
+      amt:rest.reduce((s,r)=>s+r.amt,0), title:rest.map(r=>r.name+" "+moneyFull(r.amt)).join("\n") });
+  }
   return rows;
 }
 
-const ALL_PERIODS=["Today","7 Days","30 Days","All Time"];
-let PERIODS=ALL_PERIODS.slice(); // active tab set — "All Time" drops out when no provider reports it
-let SPEND=null; // live refs for in-place period switching
+function hasSpend(){ return SOURCES.some(s=>s.today>0||s.week7>0||s.cost30>0||s.allTime>0); }
+function availablePeriods(){ return SOURCES.some(s=>s.allTime>0) ? ALL_PERIODS.slice() : ALL_PERIODS.slice(0,3); }
 
-// Providers that don't track all-time spend just contribute $0 to the sum; the tab itself only
-// hides when NO provider reports an "All Time" dollar line at all.
-function availablePeriods(providers){
-  const hasAllTime = providers.some(p=>(p.lines||[]).some(l=>l.type==="text"&&l.label==="All Time"&&parseDollars(l.value)>0));
-  return hasAllTime ? ALL_PERIODS.slice() : ALL_PERIODS.slice(0,3);
-}
-
-function spendCard(providers){
-  PERIODS=availablePeriods(providers);
+function spendCard(){
+  PERIODS=availablePeriods();
   if(!PERIODS.includes(spendPeriod)) spendPeriod=PERIODS[PERIODS.length-1];
 
   const card=el("div","spend");
   const head=el("div","spend-head");
   const t=el("span","spend-title"); t.textContent="Total Spend"; head.appendChild(t);
-  const info=el("span","info"); info.innerHTML='<svg viewBox="0 0 16 16" width="14" height="14"><circle cx="8" cy="8" r="7" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M8 7v4M8 4.6v.1" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
+  const info=el("span","info"); info.title="Spend by source, from your local logs, in the dashboard's source colours";
+  info.innerHTML='<svg viewBox="0 0 16 16" width="14" height="14"><circle cx="8" cy="8" r="7" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M8 7v4M8 4.6v.1" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
   head.appendChild(info);
   head.appendChild(el("div","spacer"));
   card.appendChild(head);
@@ -371,13 +436,13 @@ function spendCard(providers){
   // sliding + draggable segmented control
   const seg=el("div","seg");
   const thumb=el("div","seg-thumb"); seg.appendChild(thumb);
-  const buttons=PERIODS.map((per,i)=>{
+  const buttons=PERIODS.map((per)=>{
     const b=el("button", per===spendPeriod?"on":""); b.textContent=per; seg.appendChild(b); return b;
   });
   card.appendChild(seg);
 
   const body=el("div"); card.appendChild(body);
-  SPEND={seg,thumb,buttons,body,providers};
+  SPEND={seg,thumb,buttons,body};
   attachSegDrag();
   updateSpendBody(false);
   requestAnimationFrame(()=>positionThumb(PERIODS.indexOf(spendPeriod), false));
@@ -404,7 +469,7 @@ function selectPeriod(i, animate){
   spendPeriod=PERIODS[i];
   SPEND.buttons.forEach((b,j)=>b.classList.toggle("on",j===i));
   positionThumb(i, animate);
-  if(changed) updateSpendBody(true);
+  if(changed){ updateSpendBody(true); postHeight(); }
 }
 
 function attachSegDrag(){
@@ -423,50 +488,61 @@ function attachSegDrag(){
 }
 
 function updateSpendBody(animate){
-  const {body,providers}=SPEND;
-  const rows=spendFor(providers, spendPeriod);
+  const {body}=SPEND;
+  const rows=spendRows(spendPeriod);
   const total=rows.reduce((s,r)=>s+r.amt,0);
-  body.innerHTML="";
+  body.textContent="";
   const wrap=el("div","donut-wrap"+(animate?" anim":""));
   const donut=el("div","donut");
-  // Mirrors the dashboard's MiniDonut geometry (web/src/mini.jsx): a fixed
-  // hairline 1.5-unit gap between segments (a %-of-circumference gap looked
-  // chipped), 0.5 minimum so tiny sources stay visible, soft 7%-white track.
-  const R=58, C=2*Math.PI*R, sw=15;
-  let svg=`<svg viewBox="0 0 132 132" width="132" height="132">`;
-  svg+=`<circle cx="66" cy="66" r="${R}" fill="none" stroke="rgba(255,255,255,0.07)" stroke-width="${sw}"/>`;
+  // The dashboard's MiniDonut geometry (web/src/mini.jsx): one ring of stroke segments on the meter
+  // track, a fixed 1.5-unit hairline gap between segments, 0.5 minimum so a tiny source stays
+  // visible. Built with DOM calls, never markup strings.
+  const S=116, R=52, C=2*Math.PI*R, sw=13, c=S/2;
+  const svg=svgEl("svg",{viewBox:`0 0 ${S} ${S}`, width:S, height:S, role:"img",
+    "aria-label":`Spend by source: ${moneyFull(total)}`});
+  svg.appendChild(svgEl("circle",{class:"ring", cx:c, cy:c, r:R, "stroke-width":sw}));
   let off=0; const gap = rows.length>1 ? 1.5 : 0;
-  for(const r of rows){
-    const frac= total>0 ? r.amt/total : 0;
-    const len=Math.max(0.5, frac*C - gap);
-    svg+=`<circle cx="66" cy="66" r="${R}" fill="none" stroke="${r.color}" stroke-width="${sw}" `
-       + `stroke-dasharray="${len} ${C}" stroke-dashoffset="${-off}" stroke-linecap="butt"/>`;
+  if(total>0) for(const r of rows){
+    const frac=r.amt/total;
+    const seg=svgEl("circle",{cx:c, cy:c, r:R, "stroke-width":sw, "stroke-linecap":"butt",
+      "stroke-dasharray":`${Math.max(0.5, frac*C-gap)} ${C}`, "stroke-dashoffset":String(-off)});
+    seg.style.stroke=r.color;
+    svg.appendChild(seg);
     off+=frac*C;
   }
-  svg+=`</svg>`;
-  donut.innerHTML=svg;
+  donut.appendChild(svg);
   const center=el("div","center"); center.textContent=money(total); donut.appendChild(center);
   wrap.appendChild(donut);
 
   const legend=el("div","legend");
-  rows.forEach((r,i)=>{
-    const row=el("div","row");
-    const dot=el("span","dot"); dot.style.background=r.color; row.appendChild(dot);
+  for(const r of rows){
+    const row=el("div","row"); row.title=r.title || (r.name+" "+moneyFull(r.amt));
+    const sw_=el("i","sw"); sw_.style.background=r.color; row.appendChild(sw_);
     const nm=el("span","name"); nm.textContent=r.name; row.appendChild(nm);
-    const am=el("span","amt"); am.textContent=r.amt>=1000?moneyFull(r.amt):("$"+r.amt.toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2})); row.appendChild(am);
+    const am=el("span","amt"); am.textContent=moneyFull(r.amt); row.appendChild(am);
     legend.appendChild(row);
-  });
-  if(rows.length===0){ const e=el("div","name"); e.style.color="var(--text2)"; e.textContent="No spend in this period"; legend.appendChild(e); }
+  }
+  if(rows.length===0){ const e=el("div","none"); e.textContent="No spend in this period"; legend.appendChild(e); }
   wrap.appendChild(legend);
   body.appendChild(wrap);
 }
 
-/* ---------- render ---------- */
-function hasSpend(providers){
-  return providers.some(p=>(p.lines||[]).some(l=>l.type==="text"&&/Last 30 Days|Today|Yesterday/.test(l.label)&&parseDollars(l.value)>0));
+// The host sizes the window to the content after each render. The legend never outgrows the donut,
+// so a tab switch should not change the height — but if it ever does, report it the same way.
+let RENDERED_HEIGHT=0;
+function postHeight(){
+  try{
+    const h=Math.min(document.body.scrollHeight, 2000);
+    if(h===RENDERED_HEIGHT) return;
+    RENDERED_HEIGHT=h;
+    window.chrome.webview.postMessage({height:h});
+  }catch(_){}
 }
+
+/* ---------- render ---------- */
 function escapeHtml(s){ return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 
+let LAST_PROVIDERS = [];
 let LAST_ERRORS=[];
 function rerender(){ renderApp(LAST_PROVIDERS, LAST_ERRORS); }
 
@@ -498,15 +574,18 @@ function renderApp(providers, errors){
   LAST_ERRORS = errors||[];
   const app=document.getElementById("app");
   app.innerHTML="";
+  SPEND=null;
   const ids=new Set((providers||[]).map(p=>p.providerId));
   const errs=actionableErrors(errors, ids);
   if((!providers || providers.length===0) && errs.length===0){
-    const e=el("div","empty"); e.textContent="No usage yet — Burnglass is watching your local logs."; app.appendChild(e); return;
+    const e=el("div","empty"); e.textContent="No usage yet — Burnglass is watching your local logs."; app.appendChild(e);
+  } else {
+    if(hasSpend()) app.appendChild(spendCard());
+    for(const p of providers) app.appendChild(providerSection(p));
+    for(const e of errs) app.appendChild(errorSection(e));
+    app.appendChild(footer());
   }
-  if(hasSpend(providers)) app.appendChild(spendCard(providers));
-  for(const p of providers) app.appendChild(providerSection(p));
-  for(const e of errs) app.appendChild(errorSection(e));
-  app.appendChild(footer());
+  RENDERED_HEIGHT=Math.min(document.body.scrollHeight, 2000); // the host reports this one itself
 }
 
 function footer(){
@@ -534,46 +613,62 @@ function brandMark(){
   return b;
 }
 
-// Entry point the host calls: renderData(<array or {providers,errors}>)
+// Entry point the host calls: renderData(<array or {providers, errors, sources, thresholds}>)
 window.renderData = function(payload){
   try{
     let providers = Array.isArray(payload) ? payload : (payload && payload.providers) || [];
     const errors = (payload && payload.errors) || [];
     const byId={}; for(const e of errors){ if(e && e.providerId) byId[e.providerId]=e.message; }
     for(const p of providers){ if(byId[p.providerId]) p.__error=byId[p.providerId]; }
+    THRESHOLDS = alertThresholds(payload && !Array.isArray(payload) ? payload.thresholds : null);
+    SOURCES = spendSources(payload, providers);
     renderApp(providers, errors);
-  }catch(err){ document.getElementById("app").innerHTML='<div class="empty">'+String(err)+'</div>'; }
+  }catch(err){ const a=document.getElementById("app"); a.textContent=""; const e=el("div","empty"); e.textContent=String(err); a.appendChild(e); }
 };
 
 /* ---------- standalone preview sample (ignored when the host injects real data) ---------- */
-// Demo payload used when the page is opened directly. Numbers are illustrative.
-const SAMPLE=[{"displayName":"Claude","plan":"Pro","providerId":"claude","fetchedAt":new Date().toISOString(),"lines":[
- {"label":"Session","type":"progress","used":32,"limit":100,"format":{"kind":"percent"},"resetsAt":new Date(Date.now()+2*3600e3).toISOString(),"periodDurationMs":18000000},
- {"label":"Weekly","type":"progress","used":46,"limit":100,"format":{"kind":"percent"},"resetsAt":new Date(Date.now()+2.1*24*3600e3).toISOString(),"periodDurationMs":604800000},
- {"label":"Today","type":"text","value":"$12.40 · 9.8M tokens"},
- {"label":"Last 7 Days","type":"text","value":"$86.20 · 71.4M tokens"},
- {"label":"Last 30 Days","type":"text","value":"$318.75 · 264.9M tokens"},
- {"label":"All Time","type":"text","value":"$742.10 · 615.3M tokens"},
- {"label":"Usage Trend","type":"barChart","note":"From your Claude usage history (estimated)",
-  "points":[3,5,2,8,11,6,9,14,7,4,12,16,9,6,10,13,8,5,11,15,7,9,12,6,10,14,8,11,9,13]
-    .map((v,i)=>({label:"d"+i,value:v*1e6,valueLabel:(v)+"M tokens"}))}
-]},
-{"displayName":"Codex","plan":"Plus","providerId":"codex","fetchedAt":new Date().toISOString(),"lines":[
- {"label":"Weekly","type":"progress","used":29,"limit":100,"format":{"kind":"percent"},"resetsAt":new Date(Date.now()+3.5*24*3600e3).toISOString(),"periodDurationMs":604800000},
- {"label":"Last 7 Days","type":"text","value":"$24.80 · 18.6M tokens"},
- {"label":"Last 30 Days","type":"text","value":"$96.40 · 74.2M tokens"},
- {"label":"All Time","type":"text","value":"$210.55 · 168.9M tokens"}
-]},
-{"displayName":"Gemini CLI","providerId":"gemini","fetchedAt":new Date().toISOString(),"lines":[
- {"label":"Last 7 Days","type":"text","value":"$18.30 · 12.1M tokens"},
- {"label":"Last 30 Days","type":"text","value":"$62.15 · 48.7M tokens"},
- {"label":"All Time","type":"text","value":"$128.90 · 101.4M tokens"}
-]},
-{"displayName":"Roo Code","providerId":"roo","fetchedAt":new Date().toISOString(),"lines":[
- {"label":"Last 30 Days","type":"text","value":"$9.40 · 6.2M tokens"},
- {"label":"All Time","type":"text","value":"$21.05 · 14.9M tokens"}
-]}];
-if(!window.__NO_SAMPLE__) renderApp(SAMPLE, []);
+// Demo payload used when the page is opened directly (and by `burnglass-strip --shots` for the
+// README). Same shape SummaryTransform.ToUi emits; numbers are illustrative.
+const SAMPLE=(()=>{
+  const now=Date.now(), iso=ms=>new Date(now+ms).toISOString(), H=3600e3, D=24*H;
+  const trend=(vals)=>({ label:"Daily Spend", type:"barChart", note:"Last 30 days",
+    points:vals.map((v,i)=>({ label:"d"+i, value:v, valueLabel:"$"+v.toFixed(2) })) });
+  const pct=(label,used,resetMs,periodMs,projected)=>Object.assign({ label, type:"progress", used, limit:100,
+    format:{kind:"percent"}, resetsAt:iso(resetMs), periodDurationMs:periodMs }, projected!=null?{projected}:{});
+  return {
+    providers:[
+      { displayName:"Claude", providerId:"claude", fetchedAt:iso(0), lines:[
+        pct("Session", 32, 2*H+12*60e3, 18000000, 58),
+        pct("Weekly", 83, 2.1*D, 604800000),
+        pct("Fable", 12, 2.1*D, 604800000),
+        { label:"Today", type:"text", value:"$12.40" },
+        { label:"Last 7 Days", type:"text", value:"$86.20" },
+        { label:"Last 30 Days", type:"text", value:"$318.75 · 264.9M tokens" },
+        trend([3,5,2,8,11,6,9,14,7,4,12,16,9,6,10,13,8,5,11,15,7,9,12,6,10,14,8,11,9,12.4]) ] },
+      { displayName:"Codex", providerId:"codex", fetchedAt:iso(0), lines:[
+        pct("Weekly", 29, 3.5*D, 604800000),
+        { label:"Today", type:"text", value:"$1.10" },
+        { label:"Last 7 Days", type:"text", value:"$24.80" },
+        { label:"Last 30 Days", type:"text", value:"$96.40 · 74.2M tokens" },
+        trend([2,4,1,5,3,6,2,4,3,5,2,6,4,3,5,2,4,6,3,5,2,4,3,1,5,4,2,3,4,1.1]) ] },
+      { displayName:"Gemini", providerId:"gemini", fetchedAt:iso(0), lines:[
+        { label:"Today", type:"text", value:"$0.00" },
+        { label:"Last 7 Days", type:"text", value:"$18.30" },
+        { label:"Last 30 Days", type:"text", value:"$62.15 · 48.7M tokens" } ] }
+    ],
+    errors:[],
+    // The server's allSources (alphabetical) → the dashboard's colours by position.
+    sources:[
+      { id:"claude-desktop", label:"Claude Desktop", color:SERIES[0], today:4.15, week7:31.60, cost30:104.25 },
+      { id:"cli", label:"Claude CLI", color:SERIES[1], today:8.25, week7:54.60, cost30:214.50 },
+      { id:"codex", label:"Codex", color:SERIES[2], today:1.10, week7:24.80, cost30:96.40 },
+      { id:"foreman", label:"FOREMAN", color:SERIES[3], today:0, week7:0, cost30:0 },
+      { id:"gemini", label:"Gemini CLI", color:SERIES[4], today:0, week7:18.30, cost30:62.15 }
+    ],
+    thresholds:[80,95]
+  };
+})();
+if(!window.__NO_SAMPLE__) window.renderData(SAMPLE);
 </script>
 </body>
 </html>

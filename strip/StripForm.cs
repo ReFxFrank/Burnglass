@@ -22,13 +22,22 @@ sealed class StripForm : Form
     public Action? OnOpenDashboard;
     public Func<bool>? IsDark;
 
-    // Each provider carries BOTH its usage (% left, up to two lines) and its price (30-day API-cost).
-    // The strip rotates between the two with a vertical roll animation.
-    private sealed record Cell(string ProviderId, string UsageTop, string UsageBottom, string Price)
+    // Each provider carries BOTH its usage (% USED — the number the popover and the dashboard show — up
+    // to two lines) and its price (30-day API-cost). The strip rotates between the two with a vertical
+    // roll animation. TopTone/BottomTone = MeterScale.Tone of each number (0 plain, 1 warn, 2 crit).
+    // PctUsed marks a cell built with % used: a cache written by an older strip (which printed % LEFT)
+    // lacks it, and its usage numbers are dropped on load rather than shown inverted (see LoadCache).
+    private sealed record Cell(string ProviderId, string UsageTop, string UsageBottom, string Price,
+        int TopTone = 0, int BottomTone = 0, bool PctUsed = false)
     {
         public bool HasUsage => UsageTop.Length > 0;
         public bool HasPrice => Price.Length > 0;
     }
+
+    // Status ink for a tinted usage number: the dashboard's --warn / --crit (dark).
+    private static readonly Brush WarnInk = new SolidBrush(Color.FromArgb(0xf2, 0xaa, 0x3c));
+    private static readonly Brush CritInk = new SolidBrush(Color.FromArgb(0xf4, 0x71, 0x71));
+    private static Brush ToneInk(int tone, Brush plain) => tone >= 2 ? CritInk : tone == 1 ? WarnInk : plain;
     private List<Cell> _cells = new();
 
     // Rotation state: false = show usage, true = show price. `_flipping`/`_flipProgress` drive the roll.
@@ -123,8 +132,11 @@ sealed class StripForm : Form
             using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(uiJson) ? "[]" : uiJson);
             // Accept both the bare array and the {providers, errors} wrapper.
             JsonElement providers = doc.RootElement;
-            if (doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty("providers", out var pv))
+            bool wrapped = doc.RootElement.ValueKind == JsonValueKind.Object;
+            if (wrapped && doc.RootElement.TryGetProperty("providers", out var pv))
                 providers = pv;
+            // The alert thresholds the payload carries (the dashboard's), default 80 / 95.
+            var thresholds = MeterScale.Sanitize(wrapped && doc.RootElement.TryGetProperty("thresholds", out var th) ? th : default);
             if (providers.ValueKind == JsonValueKind.Array)
             {
                 foreach (var p in providers.EnumerateArray())
@@ -141,7 +153,7 @@ sealed class StripForm : Form
                             {
                                 double used = l.TryGetProperty("used", out var u) && u.TryGetDouble(out var uv) ? uv : 0;
                                 double limit = l.TryGetProperty("limit", out var li) && li.TryGetDouble(out var lv) && lv > 0 ? lv : 100;
-                                pcts.Add((int)Math.Round(Math.Clamp(100 - used * 100 / limit, 0, 100)));
+                                pcts.Add(MeterScale.UsedPct(used, limit)); // % USED, as the popover prints it
                             }
                             else if (type == "text" && l.TryGetProperty("label", out var lab) && lab.GetString() == "Last 30 Days"
                                 && l.TryGetProperty("value", out var val))
@@ -152,11 +164,13 @@ sealed class StripForm : Form
                     if (id.Length == 0) continue;
                     string uTop = pcts.Count > 0 ? pcts[0] + "%" : "";
                     string uBot = pcts.Count > 1 ? pcts[1] + "%" : "";
+                    int tTop = pcts.Count > 0 ? MeterScale.Tone(pcts[0], thresholds) : 0;
+                    int tBot = pcts.Count > 1 ? MeterScale.Tone(pcts[1], thresholds) : 0;
                     string price = spend30 is > 0 ? CompactMoney(spend30.Value) : "";
                     // Keep the provider if it has EITHER usage or price; the strip rotates between whatever
                     // it has (a provider with only one just shows that one, no flip).
                     if (uTop.Length > 0 || price.Length > 0)
-                        cells.Add(new Cell(id, uTop, uBot, price));
+                        cells.Add(new Cell(id, uTop, uBot, price, tTop, tBot, PctUsed: true));
                 }
             }
         }
@@ -204,9 +218,20 @@ sealed class StripForm : Form
         catch { }
     }
 
+    // A cache without PctUsed was written by a strip that printed % LEFT (≤ 2.0.0-rc.1, or the Pulse-era
+    // copy AppPaths.ReadPath falls back to): its usage numbers would read inverted, so only its prices
+    // are kept. The live payload (strip-ui.json, then the first fetch) replaces them within seconds.
     private static List<Cell> LoadCache()
     {
-        try { return JsonSerializer.Deserialize<List<Cell>>(File.ReadAllText(AppPaths.ReadPath(CacheName))) ?? new(); }
+        try
+        {
+            var cached = JsonSerializer.Deserialize<List<Cell>>(File.ReadAllText(AppPaths.ReadPath(CacheName))) ?? new();
+            return cached
+                .Where(c => c is not null && c.ProviderId is not null && c.UsageTop is not null && c.UsageBottom is not null && c.Price is not null)
+                .Select(c => c.PctUsed ? c : c with { UsageTop = "", UsageBottom = "", TopTone = 0, BottomTone = 0 })
+                .Where(c => c.HasUsage || c.HasPrice)
+                .ToList();
+        }
         catch { return new(); }
     }
 
@@ -331,6 +356,8 @@ sealed class StripForm : Form
 
     // Draw one cell's value block (usage = two lines, price = one bold line), centered on `centerY`.
     // `k` = dpi scale (see Render): the pixel offsets that center the text must grow with the fonts.
+    // A usage number at/above the lowest alert threshold is drawn amber, at/above the highest red
+    // (the cell's tones); otherwise the plain ink (b1 top line, b2 second line). Prices stay plain.
     private static void DrawValue(Graphics g, float x, Cell cell, bool isPrice, float centerY,
         Font fTop, Font fBot, StringFormat sf, Brush b1, Brush b2, float k = 1f)
     {
@@ -340,12 +367,12 @@ sealed class StripForm : Form
         }
         else if (cell.UsageBottom.Length > 0)
         {
-            g.DrawString(cell.UsageTop, fTop, b1, x, centerY - 15 * k, sf);
-            g.DrawString(cell.UsageBottom, fBot, b2, x, centerY + 1 * k, sf);
+            g.DrawString(cell.UsageTop, fTop, ToneInk(cell.TopTone, b1), x, centerY - 15 * k, sf);
+            g.DrawString(cell.UsageBottom, fBot, ToneInk(cell.BottomTone, b2), x, centerY + 1 * k, sf);
         }
         else
         {
-            g.DrawString(cell.UsageTop, fTop, b1, x, centerY - 8 * k, sf);
+            g.DrawString(cell.UsageTop, fTop, ToneInk(cell.TopTone, b1), x, centerY - 8 * k, sf);
         }
     }
 
