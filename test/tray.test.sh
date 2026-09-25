@@ -430,6 +430,21 @@ ok(!/try \{[^\r\n]*Application\]::Run\(\)/.test(src) && /^\[System\.Windows\.For
 ok(/'Open dashboard', \$null, \{ Open-BgDashboard \}/.test(src) && /could not open the dashboard: /.test(src) && /could not open the mini overview: /.test(src),
    "the browser-opening handlers catch locally and log a WARN");
 ok(/AbandonedMutexException/.test(src), "an abandoned icon lock still counts as acquired");
+// The compiled guard: DPI awareness (the owner's 4K/150% log said "16px") and
+// a C# ThreadException handler (no .NET "Unhandled exception" dialog), in its
+// own try/catch, before the first control and before the icon size is read.
+const guardAt = lines.findIndex((x) => /\[BurnglassTrayGuard\]::DpiAware\(\); \[BurnglassTrayGuard\]::Install\(\$logFile\)/.test(x));
+const niAt = lines.findIndex((x) => /New-Object System\.Windows\.Forms\.NotifyIcon/.test(x));
+const sizeAt = lines.findIndex((x) => /SmallIconSize/.test(x));
+ok(guardAt > 0 && /^\s*try \{ Add-Type -ReferencedAssemblies System\.Windows\.Forms -TypeDefinition '/.test(lines[guardAt]) && /^\s*catch \{ Write-BgLog \('error guard unavailable/.test(lines[guardAt + 1]),
+   "the guard is compiled in its own try/catch (a blocked compiler never stops the icon)");
+ok(guardAt < niAt && guardAt < sizeAt, "the guard runs before the first control and before the icon size is read");
+const guardLine = lines[guardAt] || "";
+ok((guardLine.match(/'/g) || []).length === 2, "the C# source carries no single quote (it sits in a PowerShell single-quoted string)");
+ok(/SetProcessDPIAware/.test(guardLine) && /SetUnhandledExceptionMode\(UnhandledExceptionMode\.CatchException\)/.test(guardLine)
+   && /ThreadException\+=/.test(guardLine) && /FileShare\.ReadWrite/.test(guardLine) && /Environment\.Exit\(3\)/.test(guardLine),
+   "the guard: DPI-aware, CatchException + a ThreadException handler that logs (shared file access) and exits 3");
+ok(!/\$"/.test(guardLine) && !/\)\s*=>/.test(guardLine), "the guard is C# 5 (no interpolated strings, no lambdas/expression bodies)");
 ok(src.includes("/api/statusline?from=tray&pid=' + $PID"), "polls identify the tray (?from=tray&pid=)");
 ok(!/Start-Process 'powershell\.exe'/.test(src) && /Join-Path \$PSHOME 'powershell\.exe'/.test(src), "relaunch uses an absolute powershell.exe path");
 ok(/^exit \$script:exitCode$/m.test(src) && /exit 4/.test(src) && /\$script:exitCode = 5/.test(src), "exit codes 2/4/5 for the server");

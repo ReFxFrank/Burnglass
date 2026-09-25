@@ -131,6 +131,16 @@ instead of the old fixed 60 / 85.
   too, right after it has risen (it used to be ignored, and the popover then
   stayed open until you clicked the strip again).
 
+**Fixed: the tray icon never appeared when Burnglass started it.** Burnglass
+launched PowerShell with no console at all, and Windows PowerShell 5.1 ended
+before running the first line of the tray script. The same script run from a
+terminal showed its icon. The tray now gets a hidden console. It also closes
+together with Burnglass (Stop, update), so no dead icon is left behind. The
+icon is now sharp on scaled displays: PowerShell ignored the Windows scale,
+so a 4K screen at 150% got a stretched 16 px icon instead of the 24 px one.
+An unexpected error inside the tray is logged and the tray closes quietly,
+instead of showing .NET's "Unhandled exception" dialog.
+
 **The tray icon says why it isn't there.** When the icon can't start,
 System > Integrations now shows why: the exit code, PowerShell's own message
 (for example a Group Policy or antivirus block), a hint for the likely cause,

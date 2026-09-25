@@ -51,7 +51,7 @@ const crypto = require('crypto');
 
 // Version — keep in sync with package.json (build/make-exe.mjs enforces this).
 // The constant keeps its v1 NAME: make-exe's drift check greps for it.
-const PULSE_VERSION = '2.0.0-rc.2';
+const PULSE_VERSION = '2.0.0-rc.3';
 const BRAND = 'Burnglass';
 
 // BURNGLASS_<NAME> wins; PULSE_<NAME> (the v1 spelling) stays a permanent,
@@ -6629,6 +6629,29 @@ const TRAY_ICONS = {
 // THIS (falling back to config when nothing has decided yet), or a
 // flag-started tray would read config tray!==true and kill itself in 30s.
 let trayDesired = null;
+// The tray's compiled guard (see trayScript): DPI awareness + a WinForms
+// ThreadException handler. C# 5 (Windows PowerShell 5.1 compiles with the
+// .NET Framework csc) and NO single quotes: it is embedded verbatim in a
+// PowerShell single-quoted string.
+const TRAY_GUARD_CS = [
+  'using System;using System.IO;using System.Text;using System.Threading;using System.Windows.Forms;using System.Runtime.InteropServices;',
+  'public static class BurnglassTrayGuard{',
+  '[DllImport("user32.dll")]static extern bool SetProcessDPIAware();',
+  'static string logPath;',
+  'public static void DpiAware(){try{SetProcessDPIAware();}catch{}}',
+  'public static void Install(string path){logPath=path;',
+  'Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);',
+  'Application.ThreadException+=new ThreadExceptionEventHandler(OnThread);',
+  'AppDomain.CurrentDomain.UnhandledException+=new UnhandledExceptionEventHandler(OnDomain);}',
+  'static void Log(string msg){',
+  'try{string line=DateTime.UtcNow.ToString("o").Substring(0,23)+"Z ERROR [burnglass] tray: "+msg+"\\n";',
+  'using(FileStream fs=new FileStream(logPath,FileMode.Append,FileAccess.Write,FileShare.ReadWrite|FileShare.Delete)){byte[] b=Encoding.UTF8.GetBytes(line);fs.Write(b,0,b.Length);}}catch{}',
+  'try{Console.Error.WriteLine("ERROR "+msg);}catch{}}',
+  'static void OnThread(object s,ThreadExceptionEventArgs e){Log("unexpected error in the icon ("+e.Exception.GetType().Name+": "+e.Exception.Message+") - the tray closed itself; toggle Tray icon off and on to restart it.");Environment.Exit(3);}',
+  'static void OnDomain(object s,UnhandledExceptionEventArgs e){Exception x=e.ExceptionObject as Exception;Log("fatal error ("+(x!=null?x.GetType().Name+": "+x.Message:"unknown")+")");}',
+  '}',
+].join('');
+
 function trayScript(port) {
   const pngTable = (state) => '@{ ' + [16, 20, 24, 32].map((n) => n + " = '" + TRAY_ICONS[state][n] + "'").join('; ') + ' }';
   return '﻿' + [ // BOM: PowerShell 5.1 reads a BOM-less script as ANSI and would garble a non-ASCII home path
@@ -6714,6 +6737,20 @@ function trayScript(port) {
     '  $script:canDestroy = $false',
     "  try { Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public class BurnglassIconUtil{[DllImport(\"user32.dll\")]public static extern bool DestroyIcon(IntPtr h);}'; $script:canDestroy = $true }",
     "  catch { Write-BgLog ('icon-handle helper unavailable (' + $_.Exception.Message + ') - continuing without it.') 'WARN' }",
+    // Two things only compiled code can do, BEFORE the first control exists:
+    //  - DPI awareness. powershell.exe is DPI-unaware, so SmallIconSize read 16
+    //    on a 150% screen and Windows stretched the 16 px drawing (blurry) —
+    //    the owner's log said "16px" on a 4K / 150% display. System-aware, the
+    //    size is the real one (24 at 150%) and the matching drawing is used.
+    //  - A WinForms ThreadException handler in C#. Without one, an exception
+    //    that escapes an event handler shows .NET's "Unhandled exception has
+    //    occurred" dialog (seen when a PowerShell pipeline was stopped under
+    //    the icon — a scriptblock handler cannot run at all then, so this must
+    //    not be PowerShell). It logs one ERROR line (log file shared for
+    //    read/write — the server keeps it open) + stderr, and exits 3 quietly.
+    // Compile blocked → the old behaviour, never a reason to show nothing.
+    "  try { Add-Type -ReferencedAssemblies System.Windows.Forms -TypeDefinition '" + TRAY_GUARD_CS + "'; [BurnglassTrayGuard]::DpiAware(); [BurnglassTrayGuard]::Install($logFile) }",
+    "  catch { Write-BgLog ('error guard unavailable (' + $_.Exception.Message + ') - continuing without it.') 'WARN' }",
     "  $script:step = 'creating the notification icon'",
     "  $base = 'http://127.0.0.1:" + port + "'",
     '  $ni = New-Object System.Windows.Forms.NotifyIcon',
@@ -7085,14 +7122,18 @@ function startTray(port) {
     noteTrayNotStarted('spawn', 'tray.ps1 could not be written: ' + e.message);
     return;
   }
-  // stdout + stderr → <home>/tray-error.log, a descriptor WE open (truncated
-  // per spawn) and hand over: works with detached, and holds PowerShell's own
-  // errors from before the script runs. Unopenable → start it without.
+  // stdout + stderr → <home>/tray-error.log (truncated per spawn), PIPED
+  // through this process rather than handed over as a file descriptor: an
+  // inherited descriptor makes libuv drop CREATE_NO_WINDOW, and the console
+  // Windows would then allocate can surface as a visible (Windows Terminal)
+  // window. Unopenable → start it without.
   const errPath = trayErrorLogPath();
   let out = null;
   try { out = fs.openSync(errPath, 'w'); } catch (e) {
     console.warn('[burnglass] tray: could not open ' + errPath + ' for its output (' + e.message + ') — starting it without');
   }
+  const outStream = out !== null ? fs.createWriteStream(errPath, { fd: out, autoClose: true }) : null;
+  if (outStream) outStream.on('error', () => {});
   const spawnedAt = Date.now();
   trayProc.lastError = null;
   trayProc.lockHeldAt = null;
@@ -7103,8 +7144,21 @@ function startTray(port) {
     // cwd = the home: tray.ps1 starts msedge / a relaunch by name, and a bare
     // name is looked up in the current folder first — the server's own cwd
     // is wherever it was started (Downloads, for a portable exe).
+    // NOT detached on Windows. Detached = DETACHED_PROCESS = no console at
+    // all, and Windows PowerShell 5.1 died there before running a line of
+    // tray.ps1: every server-started tray on the owner's machine left no
+    // output while the same script run from a terminal showed its icon.
+    // Not detached + windowsHide = CREATE_NO_WINDOW: a real console with no
+    // window. It also puts the tray in libuv's kill-on-close job, so it ends
+    // WITH the server (Stop, update relaunch) instead of lingering as a dead
+    // icon until its polls fail; what IT starts (Edge, a relaunch) breaks
+    // away. Off Windows (test hook) it stays detached as before.
     const child = require('child_process').spawn(cmd, args,
-      { detached: true, stdio: out !== null ? ['ignore', out, out] : 'ignore', windowsHide: true, cwd: home });
+      { detached: process.platform !== 'win32', stdio: outStream ? ['ignore', 'pipe', 'pipe'] : 'ignore', windowsHide: true, cwd: home });
+    if (outStream) {
+      child.stdout.pipe(outStream, { end: false });
+      child.stderr.pipe(outStream, { end: false });
+    }
     trayProc.child = child;
     trayProc.spawnedAt = spawnedAt;
     let ended = false;
@@ -7118,10 +7172,17 @@ function startTray(port) {
       if (trayProc.child === child) trayProc.child = null;
       noteTrayNotStarted('spawn', path.basename(cmd) + ' could not be started: ' + e.message);
     });
+    // Judge the exit once its output is in the file: 'close' (pipes drained),
+    // or 500 ms after 'exit' if something it started still holds the pipes.
     child.on('exit', (code, signal) => {
-      if (ended) return;
-      ended = true;
-      onTrayExit(child, spawnedAt, out !== null ? errPath : null, code, signal);
+      const finish = () => {
+        if (ended) return;
+        ended = true;
+        const judge = () => onTrayExit(child, spawnedAt, outStream ? errPath : null, code, signal);
+        if (outStream && !outStream.writableEnded) outStream.end(judge); else judge();
+      };
+      const t = setTimeout(finish, 500);
+      child.once('close', () => { clearTimeout(t); finish(); });
     });
     child.unref();
     if (child.pid) console.log('[burnglass] tray icon starting (Windows notification area, pid ' + child.pid + ') — right-click it for the menu.');
@@ -7129,7 +7190,9 @@ function startTray(port) {
     console.warn('[burnglass] tray failed to start: ' + e.message);
     noteTrayNotStarted('spawn', 'the tray could not be started: ' + e.message);
   } finally {
-    if (out !== null) { try { fs.closeSync(out); } catch (_) {} }
+    // the stream owns the descriptor (autoClose); a spawn that threw never
+    // got a child to pipe from, so close it here
+    if (outStream && !trayProc.child) { try { outStream.end(); } catch (_) {} }
   }
 }
 
