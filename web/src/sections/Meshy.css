@@ -1,9 +1,85 @@
 /* =============================================================================
-   sections/Meshy.css — styles for sections/Meshy.jsx ONLY.
-   OWNER: the Meshy section engineer. Scope EVERY selector under .sec-meshy (the
-   class <Section id="meshy"> puts on the root) — CSS is global and four people
-   edit sections in parallel. Floating content (Tip/Menu/Sheet) is portalled
-   to <body>: style it through its own prefixed class (meshy-…), not .sec-meshy.
-   Use the tokens + primitives in ../styles.css; never hard-code colours.
-   Mockup reference (design-command/src/styles.css): .meshy .bigunit .minidl .mbars .sublab (l.512-521); ≤760 l.682
+   sections/Meshy.css — styles for sections/Meshy.jsx.
+   Scoped under .sec-meshy, except the key form (.meshy-kf…), which System
+   reuses in its integration row and is therefore prefixed, not scoped.
+   Tokens + primitives only; no hard-coded colours.
+   Mockup: .meshy .bigunit .minidl .mbars .sublab (design-command styles.css).
    ============================================================================= */
+
+/* ---- header ---- */
+.sec-meshy .meshy-tt { min-width: 0; }
+.sec-meshy .ph .pt .badge { margin-left: 2px; }
+.sec-meshy .meshy-panel.is-warn { border-color: var(--warn-line); }
+.sec-meshy .meshy-panel.is-crit { border-color: var(--crit-line); }
+
+/* ---- body: balance | per day | by type ---- */
+.sec-meshy .meshy {
+  display: grid; grid-template-columns: minmax(180px, max-content) minmax(0, 1.1fr) minmax(0, 1fr);
+  gap: var(--sp-6); align-items: start;
+}
+.sec-meshy .meshy > * { min-width: 0; }
+.sec-meshy .bigunit {
+  font-size: var(--fs-2xl); line-height: var(--lh-2xl); font-weight: var(--fw-semi); letter-spacing: -.02em;
+  font-variant-numeric: tabular-nums; color: var(--text); overflow-wrap: anywhere;
+}
+.sec-meshy .bigunit small {
+  font-size: var(--fs-xs); color: var(--text-3); font-weight: var(--fw-semi); letter-spacing: var(--track-caps);
+  text-transform: uppercase; margin-left: 6px; white-space: nowrap; display: inline-block;
+}
+.sec-meshy .minidl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 12px 0 0; }
+.sec-meshy .minidl > div { min-width: 0; }
+.sec-meshy .minidl dt { font-size: var(--fs-2xs); line-height: var(--lh-2xs); color: var(--text-3); white-space: nowrap; }
+.sec-meshy .minidl dd { margin: 0; font-weight: var(--fw-semi); font-variant-numeric: tabular-nums; color: var(--text); }
+.sec-meshy .meshy-dt-tip { cursor: help; border-bottom: 1px dotted var(--text-4); border-radius: 0; }
+
+/* credits-per-day bars: one flex column per day, the bar at the bottom */
+.sec-meshy .mbars { display: flex; align-items: stretch; gap: 2px; height: 56px; border-bottom: 1px solid var(--axis); }
+.sec-meshy .mbars .mb-col { flex: 1; min-width: 0; display: flex; align-items: flex-end; border-radius: 2px 2px 0 0; }
+.sec-meshy .mbars .mb-col:hover { background: var(--hover); }
+.sec-meshy .mbars i { display: block; width: 100%; background: var(--q5); border-radius: 2px 2px 0 0; }
+.sec-meshy .mbars i.zero { height: 0; }
+.sec-meshy .cx-cap { display: flex; justify-content: space-between; font-size: var(--fs-2xs); color: var(--text-3); margin-top: 4px; }
+
+/* by task type */
+.sec-meshy .meshy-tbl { margin-top: -4px; }
+.sec-meshy .meshy-tbl .tr { grid-template-columns: minmax(0, 140px) minmax(40px, 1fr) 60px; }
+.sec-meshy .meshy-tbl .t { font-size: var(--fs-xs); color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.sec-meshy .meshy-tbl .barcell .v { width: 40px; }
+.sec-meshy .meshy-tbl .r { font-size: var(--fs-xs); }
+.sec-meshy .meshy-cov { margin: 8px 0 0; }
+.sec-meshy .meshy-cov b { color: var(--text-2); }
+.sec-meshy .meshy-none { grid-column: span 2; align-self: center; }
+.sec-meshy .meshy-none .hint { margin: 0; }
+
+/* key editing (Manage key) and the no-key invitation */
+.sec-meshy .meshy-edit {
+  display: flex; flex-direction: column; gap: 8px; padding: 0 0 var(--sp-4); margin-bottom: var(--sp-4);
+  border-bottom: 1px solid var(--line);
+}
+.sec-meshy .meshy-edit .hint { margin: 0; }
+.sec-meshy .meshy-invite { display: flex; flex-direction: column; gap: 10px; max-width: 720px; }
+.sec-meshy .meshy-invite .hint { margin: 0; }
+
+/* stale / error / first-read footer */
+.sec-meshy .meshy-note { display: flex; gap: 8px; align-items: flex-start; min-width: 0; overflow-wrap: anywhere; color: var(--text-2); }
+.sec-meshy .meshy-note .ic-sm { flex: none; margin-top: 2px; color: var(--text-3); }
+.sec-meshy .meshy-note.warn .ic-sm { color: var(--warn); }
+.sec-meshy .meshy-note.crit .ic-sm { color: var(--crit); }
+
+/* ---- key form (shared with System) ---- */
+.meshy-kf { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.meshy-kf-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; min-width: 0; }
+.meshy-kf-row .input { flex: 1 1 180px; min-width: 0; height: 30px; }
+.meshy-kf-row .btn { flex: none; }
+.meshy-kf-err { display: flex; align-items: center; gap: 6px; font-size: var(--fs-xs); color: var(--crit); overflow-wrap: anywhere; }
+
+@media (max-width: 1024px) {
+  .sec-meshy .meshy { grid-template-columns: minmax(180px, max-content) minmax(0, 1fr); }
+  .sec-meshy .meshy-types { grid-column: 1 / -1; }
+}
+@media (max-width: 760px) {
+  .sec-meshy .meshy { grid-template-columns: minmax(0, 1fr); gap: var(--sp-4); }
+  .sec-meshy .meshy-none { grid-column: auto; }
+  .sec-meshy .minidl { gap: 10px 8px; }
+  .sec-meshy .meshy-tbl .tr { grid-template-columns: minmax(0, 118px) minmax(40px, 1fr) 56px; }
+}
