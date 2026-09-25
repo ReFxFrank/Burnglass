@@ -359,6 +359,22 @@ function Integrations({ data, notify, thresholds, ovr }) {
         : <Stat>Not allowed yet</Stat>;
   const th = (thresholds && thresholds.length ? thresholds : [80, 95]).join(' / ');
   const agent = agentWord(data.agentState);
+  // A failed post-update strip refresh (payload.strip.refresh, additive): the
+  // server retries it — on a timer (retryAt), else at its next start while
+  // retriesLeft > 0 — and after the last attempt the strip is updated by hand.
+  const sr = strip.refresh && strip.refresh.status === 'failed' ? strip.refresh : null;
+  const releasesUrl = data.update && data.update.releasesUrl;
+  const stripRefreshNote = sr ? (
+    <span className="hint sys-strip-refresh">
+      <b>Couldn’t update the strip{sr.version ? ` to v${sr.version}` : ''}:</b> {String(sr.error || 'unknown error')}.{' '}
+      {sr.checking ? 'Retrying now…'
+        : sr.retryAt ? `Retrying in ~${Math.max(1, Math.round((sr.retryAt - Date.now()) / 60000))} min.`
+          : sr.retriesLeft > 0 ? `Retrying at the next start of ${BRAND}.`
+            : releasesUrl
+              ? <>Get {STRIP_EXE_NAME} from the <a className="lnk" href={releasesUrl} target="_blank" rel="noreferrer">release page</a>.</>
+              : <>Get {STRIP_EXE_NAME} from the release page.</>}
+    </span>
+  ) : null;
 
   return (
     <section className="sys-col sys-int" aria-labelledby="sys-int-h">
@@ -476,9 +492,11 @@ function Integrations({ data, notify, thresholds, ovr }) {
           <ToggleRow
             title={`${BRAND} Strip`}
             on={on('strip')}
-            status={on('strip') && !strip.path ? <Stat tone="warn">Exe not found</Stat> : onOff('strip')}
+            status={on('strip') && !strip.path ? <Stat tone="warn">Exe not found</Stat>
+              : sr ? <Stat tone="warn" title={String(sr.error || '')}>Update failed</Stat> : onOff('strip')}
             busy={busy === 'strip'}
             note={noteFor('strip')}
+            extra={stripRefreshNote}
             onToggle={(next) => toggle('strip', next, (n, r) => {
               if (!n) return 'Strip off. It exits within a minute.';
               return r.strip && r.strip.path

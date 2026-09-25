@@ -14,7 +14,12 @@
 #     a pre-release version (v2.0.0-rc.1) whole at 360–1920 px. Wide screens
 #     (1440–3440 px): the content column is centred past its cap and the top
 #     bar lines up with it; the rail's source rows fit "Claude Desktop" beside
-#     a four-figure amount while a long label still ellipsizes.
+#     a four-figure amount while a long label still ellipsizes — also when the
+#     rail SCROLLS with a classic scrollbar (a second Chromium without
+#     --hide-scrollbars, short window). Meter rows keyed __proto__ /
+#     constructor never blank the page; a stale Claude window says "waiting
+#     for the next check" (Codex keeps "run a turn"); a failed post-update
+#     strip refresh shows in System's strip row with how it will heal.
 # Part 2 checks web/dist, so run `npm run build` (web/) after changing web/src.
 # Env: WEB_TEST_SERVER=<server.js> tests another copy (e.g. a scratch build);
 #      WEB_TEST_PORT (default 4923); PLAYWRIGHT_MODULE / PW_CHROMIUM overrides.
@@ -308,6 +313,135 @@ for (const w of [1440, 1920, 2560, 3440]) {
   ok(long && long.cut && long.ellipsis === "ellipsis", "rail: a long source label still ellipsizes (" + JSON.stringify(long) + ")");
   ok(rows.length === 3 && rows.every((x) => x.amtInside && x.amtWhole), "rail: every amount is shown whole inside its row");
   await ctx.close();
+}
+const RAIL_PATCH = (j) => {
+  j.allSources = ["claude-desktop", "cli", "foreman"];
+  for (const p of j.periods || []) {
+    p.bySource = { "claude-desktop": { cost: 2178.09, tokens: 1, messages: 1 }, cli: { cost: 3.45, tokens: 1, messages: 1 }, foreman: { cost: 1234.5, tokens: 1, messages: 1 } };
+  }
+};
+// ...and while the rail SCROLLS with a classic scrollbar: Playwright hides
+// scrollbars by default (--hide-scrollbars), so a second Chromium keeps them
+// and a short window makes the rail overflow (a long month list does the
+// same on a tall one). The label used to lose ~1.5 px to the scrollbar.
+{
+  let b2 = null;
+  try {
+    b2 = await chromium.launch({ ...(chrome ? { executablePath: chrome } : {}), args: ["--no-sandbox"], ignoreDefaultArgs: ["--hide-scrollbars"] });
+  } catch (e) { console.log("SKIP  rail with a classic scrollbar: Chromium did not launch (" + String(e.message).split("\n")[0] + ")"); }
+  if (b2) {
+    for (const [w, h] of [[1440, 520], [1920, 600]]) {
+      const ctx = await b2.newContext({ viewport: { width: w, height: h }, colorScheme: "dark" });
+      const page = await ctx.newPage();
+      await page.route("**/api/summary*", async (route) => {
+        const r = await route.fetch(); const j = await r.json(); RAIL_PATCH(j);
+        await route.fulfill({ response: r, json: j });
+      });
+      await page.goto(BASE, { waitUntil: "networkidle" });
+      await page.waitForSelector(".rail .srcrow .opt", { timeout: 15000 });
+      const r = await page.evaluate(() => {
+        const ri = document.querySelector(".rail-in");
+        const rows = [...document.querySelectorAll(".rail .srcrow .opt")].map((o) => {
+          const l = o.querySelector(".lbl"), a = o.querySelector(".amt");
+          return { label: l.textContent, amt: a.textContent, cut: l.scrollWidth > l.clientWidth };
+        });
+        return { scrolls: ri.scrollHeight > ri.clientHeight, scrollbarW: ri.offsetWidth - ri.clientWidth, rows };
+      });
+      const desk = r.rows.find((x) => x.label === "Claude Desktop");
+      if (!r.scrolls || r.scrollbarW <= 0) {
+        console.log("SKIP  " + w + "x" + h + " rail: no classic scrollbar here (" + JSON.stringify({ scrolls: r.scrolls, scrollbarW: r.scrollbarW }) + ")");
+      } else {
+        ok(desk && desk.amt === "$2,178.09" && !desk.cut,
+           w + "x" + h + " rail scrolling with a " + r.scrollbarW + " px scrollbar: \"Claude Desktop\" still whole beside $2,178.09 (" + JSON.stringify(desk) + ")");
+      }
+      await ctx.close();
+    }
+    await b2.close();
+  }
+}
+
+// Meter rows keyed like Object.prototype members never blank the page
+// (METER_NAMES["__proto__"] used to hand React an object: error #31).
+{
+  const errors = [];
+  const soon = Date.now() + 3600e3;
+  // Not open(): a blanked page never shows #system, and that must be a FAIL
+  // here, not a timeout that ends the whole run.
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const page = await ctx.newPage();
+  page.on("pageerror", (e) => errors.push(String(e.message).slice(0, 120)));
+  await page.route("**/api/summary*", async (route) => {
+    const r = await route.fetch(); const j = await r.json();
+    j.meters = { enabled: true, status: "ok", fetchedAt: Date.now(), lastGoodAt: Date.now(), error: null, buckets: [
+      { key: "__proto__", label: "Claude · proto", pct: 40, resetsAt: soon, stale: false, projLeftAtReset: null },
+      { key: "constructor", label: "Claude · ctor", pct: 20, resetsAt: soon, stale: false, projLeftAtReset: null },
+      { key: "five_hour", label: "Claude · 5-hour session", pct: 30, resetsAt: soon, stale: false, projLeftAtReset: null } ] };
+    j.alerts = [];
+    await route.fulfill({ response: r, json: j });
+  });
+  await page.goto(BASE, { waitUntil: "networkidle" });
+  await page.waitForSelector("#system", { timeout: 8000 }).catch(() => {});
+  const r = await page.evaluate(() => ({
+    root: (document.getElementById("root") || { childElementCount: 0 }).childElementCount,
+    cells: [...document.querySelectorAll(".mc .nm")].map((e) => e.textContent),
+  }));
+  ok(r.root > 0 && errors.length === 0 && r.cells.includes("Proto") && r.cells.includes("Ctor") && r.cells.includes("5-hour session"),
+     "meter rows keyed __proto__ / constructor render as plain cells, the page stays up (" + JSON.stringify({ cells: r.cells, errors }) + ")");
+  await ctx.close();
+}
+
+// A stale (rolled-over) window: the Claude server re-checks on its own, Codex
+// needs a turn — the cell and the mini view say which.
+{
+  const past = Date.now() - 60e3, soon = Date.now() + 3600e3;
+  const patch = (j) => {
+    j.meters = { enabled: true, status: "rate-limited", fetchedAt: Date.now(), lastGoodAt: Date.now() - 600e3, error: "rate-limited", buckets: [
+      { key: "five_hour", label: "Claude · 5-hour session", pct: 97, resetsAt: past, stale: true, projLeftAtReset: null },
+      { key: "seven_day", label: "Claude · weekly (all models)", pct: 50, resetsAt: soon, stale: false, projLeftAtReset: null } ] };
+    j.codexMeters = { asOf: Date.now() - 600e3, buckets: [
+      { key: "codex_primary", label: "Codex · session (5h)", pct: 60, resetsAt: past, stale: true } ] };
+    j.alerts = [];
+  };
+  const { ctx, page } = await open(1280, patch);
+  const cells = await page.$$eval(".mc", (els) => els.map((e) => ({ nm: e.querySelector(".nm").textContent, stale: e.classList.contains("stale"), foot: e.querySelector(".mc-foot").textContent })));
+  const fh = cells.find((c) => c.nm === "5-hour session"), cxp = cells.find((c) => /Codex/.test(c.nm));
+  ok(fh && fh.stale && /waiting for the next check/.test(fh.foot) && !/run a/.test(fh.foot), "a stale Claude window: dimmed, \"waiting for the next check\" (" + JSON.stringify(fh) + ")");
+  ok(cxp && cxp.stale && /run a Codex turn/.test(cxp.foot), "a stale Codex window still says to run a turn (" + JSON.stringify(cxp) + ")");
+  await page.goto(BASE + "#mini", { waitUntil: "networkidle" });
+  await page.waitForSelector(".mini-row", { timeout: 15000 }).catch(() => {});
+  const mini = await page.$$eval(".mini-row", (els) => els.map((e) => e.textContent.replace(/\s+/g, " ").trim()));
+  ok(mini.some((t) => /5-hour session/.test(t) && /stale · waiting for the next check/.test(t)) && mini.some((t) => /stale · run a turn/.test(t)),
+     "#mini: the same per-provider stale copy (" + JSON.stringify(mini) + ")");
+  await ctx.close();
+}
+
+// A failed post-update strip refresh shows in the System strip row, with how it
+// heals (retry timer / next start / by hand from the release page).
+{
+  const base = { status: "failed", version: "2.0.0-rc.2", error: "release lookup failed: HTTP 500", at: Date.now(), attempts: 1, checking: false };
+  const stripRow = async (refresh) => {
+    const { ctx, page } = await open(1280, (j) => {
+      j.strip = { supported: true, enabled: true, path: "C:\\burnglass\\burnglass-strip.exe", refresh };
+      j.update = Object.assign({}, j.update, { releasesUrl: "https://github.com/ReFxFrank/Burnglass/releases" });
+    });
+    const t = await page.evaluate(() => {
+      const row = [...document.querySelectorAll(".tg")].find((r) => /Strip/.test((r.querySelector(".tg-n") || {}).textContent || ""));
+      if (!row) return null;
+      const a = row.querySelector(".sys-strip-refresh a");
+      return { text: row.textContent.replace(/\s+/g, " ").trim(), href: a ? a.getAttribute("href") : null };
+    });
+    await ctx.close();
+    return t;
+  };
+  let t = await stripRow(Object.assign({}, base, { retriesLeft: 4, retryAt: Date.now() + 30 * 60e3 }));
+  ok(t && /Update failed/.test(t.text) && /Couldn’t update the strip to v2\.0\.0-rc\.2: release lookup failed: HTTP 500\./.test(t.text) && /Retrying in ~30 min\./.test(t.text),
+     "System strip row: a failed refresh with its retry countdown (" + JSON.stringify(t && t.text.slice(0, 200)) + ")");
+  t = await stripRow(Object.assign({}, base, { retriesLeft: 3, retryAt: null }));
+  ok(t && /Retrying at the next start/.test(t.text), "System strip row: retried at the next start when no timer runs");
+  t = await stripRow(Object.assign({}, base, { attempts: 5, retriesLeft: 0, retryAt: null }));
+  ok(t && /release page/.test(t.text) && t.href === "https://github.com/ReFxFrank/Burnglass/releases", "System strip row: after the last attempt, the release page link (" + JSON.stringify(t) + ")");
+  t = await stripRow({ status: "updated", version: "2.0.0-rc.2", at: Date.now(), attempts: 1, files: [] });
+  ok(t && !/Couldn’t update/.test(t.text) && !/Update failed/.test(t.text), "System strip row: a successful refresh adds nothing");
 }
 await browser.close();
 process.exit(fail);

@@ -10,7 +10,13 @@
 #   - a 429 backoff is persisted and honored across a restart (capped at 1h),
 #     then resumes; Recheck now forces a fetch and clears the saved backoff
 #   - windows whose resetsAt passed are dropped (and trigger an immediate check)
-#   - too old / corrupt / foreign files are ignored without a crash
+#   - too old / corrupt / foreign files are ignored without a crash; rows named
+#     __proto__ / constructor are refused (they used to get an OBJECT label,
+#     which blanked the dashboard) — from the file and from the live API
+#   - a restored window that rolls over AFTER the restore is marked stale
+#     (under a saved backoff and under a rejected login): no alert, the status
+#     line flags it, and a check that fails on the login drops it (with every
+#     window gone the card is back to its no-bars / Connect state)
 #   - meters off: the file is removed (route AND a start with meters off), is
 #     never written, and a leftover is never loaded
 #   - the fake token never appears in the cache file or the logs; mode 0600
@@ -258,7 +264,8 @@ stop
 wcache '{ v: 1, fetchedAt: now - 5e3, nextAttemptAt: "soon", streak: "lots", buckets: [
   { key: 5, pct: 1 }, { key: "five_hour", pct: "90" }, { key: "seven_day", pct: 44, resetsAt: "tomorrow" },
   { key: "seven_day_opus", label: "Claude · weekly · Opus", pct: 45, resetsAt: now + 3 * 86400e3 },
-  { key: "bad\u001b[31m", label: "Claude · x", pct: 10 }, { key: "odd_one", label: "\u001b[2Jevil", pct: 250 }, null, [1] ] }'
+  { key: "bad\u001b[31m", label: "Claude · x", pct: 10 }, { key: "odd_one", label: "\u001b[2Jevil", pct: 250 }, null, [1],
+  { key: "__proto__", label: "Claude · x", pct: 85, resetsAt: now + 3600e3 }, { key: "constructor", pct: 20 }, { key: "prototype", pct: 30 } ] }'
 start
 curl -sf -o /dev/null "http://127.0.0.1:$PORT/api/health"; ok "$([ $? -eq 0 ] && echo 1 || echo 0)" "H: server healthy after a hostile file"
 summary "$TMP/h4.json"
@@ -266,6 +273,8 @@ ok "$(jv "$TMP/h4.json" 's.meters.status === "ok" && s.meters.buckets.map((b) =>
   "H: only well-formed rows restored ($(jv "$TMP/h4.json" 's.meters.buckets.map((b) => b.key).join(",")'))"
 ok "$(jv "$TMP/h4.json" 'const o = s.meters.buckets.find((b) => b.key === "odd_one"); o.label === "Claude · odd one" && o.pct === 100 ? 1 : 0')" \
   "H: a control-char label is replaced and pct clamped to 0–100"
+ok "$(jv "$TMP/h4.json" 's.meters.buckets.every((b) => typeof b.label === "string") && !s.alerts.some((a) => /__proto__|constructor|prototype/.test(a.key) || typeof a.label !== "string") ? 1 : 0')" \
+  "H: __proto__ / constructor / prototype rows refused — every label a string, no alert for them ($(jv "$TMP/h4.json" 'JSON.stringify(s.alerts.map((a) => [a.key, typeof a.label]))'))"
 
 # ---- I: meters off -> file removed, never written, never loaded ---------------------------------
 ok "$(has_cache)" "I: (a cache file exists before turning the meters off)"
@@ -290,8 +299,73 @@ sleep 0.8
 ok "$([ "$(count)" = "$((C10 + 1))" ] && echo 1 || echo 0)" "I: ...a fresh fetch happens instead"
 stop
 
+# ---- J: a restored window that rolls over after the restore goes stale (saved backoff) ------------
+stop
+mode "m=ok"
+wcache '{ v: 1, fetchedAt: now - 60e3, nextAttemptAt: now + 600e3, streak: 1, buckets: [
+  { key: "five_hour", label: "Claude · 5-hour session", pct: 97, resetsAt: now + 3500 },
+  { key: "seven_day", label: "Claude · weekly (all models)", pct: 50, resetsAt: now + 3 * 86400e3 } ] }'
+FH_J=$(jv "$CACHE" 's.buckets[0].resetsAt')
+C11=$(count)
+start
+summary "$TMP/j1.json"
+ok "$(jv "$TMP/j1.json" 'const fh = s.meters.buckets.find((b) => b.key === "five_hour"); s.meters.status === "rate-limited" && fh.pct === 97 && fh.stale === false && s.alerts.some((a) => a.key === "claude:five_hour") ? 1 : 0')" \
+  "J: before its reset the restored 5-hour window is current (97% alert)"
+sleep_until $((FH_J + 1200))
+summary "$TMP/j2.json"; curl -s "http://127.0.0.1:$PORT/api/statusline" > "$TMP/j2sl.json"
+ok "$(jv "$TMP/j2.json" 'const b = (k) => s.meters.buckets.find((x) => x.key === k); b("five_hour").stale === true && b("seven_day").stale === false && s.meters.status === "rate-limited" ? 1 : 0')" \
+  "J: after it rolled over (still inside the backoff) five_hour is stale:true, seven_day is not ($(jv "$TMP/j2.json" 'JSON.stringify(s.meters.buckets.map((b) => [b.key, b.stale]))'))"
+ok "$(jv "$TMP/j2.json" '!s.alerts.some((a) => a.key === "claude:five_hour") ? 1 : 0')" "J: ...no alert for the rolled window ($(jv "$TMP/j2.json" 'JSON.stringify(s.alerts.map((a) => a.key))'))"
+ok "$(jv "$TMP/j2sl.json" 's.meters.claudeFiveHourStale === true && s.meters.claudeWeekly === 50 && !(s.block && s.block.official) ? 1 : 0')" \
+  "J: /api/statusline flags it (claudeFiveHourStale, the tray's base icon) and no official 5h block ($(jv "$TMP/j2sl.json" 'JSON.stringify(s.meters)'))"
+ok "$([ "$(count)" = "$C11" ] && echo 1 || echo 0)" "J: (no request during the saved backoff)"
+
+# ---- K: the same under a rejected login (restart with stale credentials) -----------------------------
+stop
+cp "$CL/.credentials.json" "$TMP/creds.good"
+echo '{"claudeAiOauth":{"accessToken":"sk-test-EXPIRED-token","expiresAt":1000}}' > "$CL/.credentials.json"
+wcache '{ v: 1, fetchedAt: now - 5 * 60e3, buckets: [
+  { key: "five_hour", label: "Claude · 5-hour session", pct: 97, resetsAt: now + 4000 },
+  { key: "seven_day", label: "Claude · weekly (all models)", pct: 50, resetsAt: now + 3 * 86400e3 } ] }'
+FH_K=$(jv "$CACHE" 's.buckets[0].resetsAt')
+start
+summary "$TMP/k0.json"; sleep 0.8; summary "$TMP/k1.json"
+ok "$(jv "$TMP/k1.json" 's.meters.status === "expired" && s.meters.buckets.length === 2 ? 1 : 0')" \
+  "K: the first check is rejected (401 -> expired); the restored windows are still open ($(jv "$TMP/k1.json" 's.meters.status + " / " + s.meters.buckets.length'))"
+sleep_until $((FH_K + 1200))
+summary "$TMP/k2.json"; curl -s "http://127.0.0.1:$PORT/api/statusline" > "$TMP/k2sl.json"
+ok "$(jv "$TMP/k2.json" 'const fh = s.meters.buckets.find((b) => b.key === "five_hour"); fh && fh.stale === true && !s.alerts.some((a) => a.key === "claude:five_hour") ? 1 : 0')" \
+  "K: after the roll: five_hour stale, no alert ($(jv "$TMP/k2.json" 'JSON.stringify(s.alerts.map((a) => a.key))'))"
+ok "$(jv "$TMP/k2sl.json" 's.meters.claudeFiveHourStale === true ? 1 : 0')" "K: ...and the status line / tray feed flags it"
+recheck "$TMP/k3.json"
+ok "$(jv "$TMP/k3.json" 's.meters.status === "expired" && s.meters.buckets.map((b) => b.key).join() === "seven_day" ? 1 : 0')" \
+  "K: a check that fails on the login drops the rolled window, the open weekly one stays ($(jv "$TMP/k3.json" 's.meters.buckets.map((b) => b.key).join(",")'))"
+stop
+wcache '{ v: 1, fetchedAt: now - 5 * 60e3, buckets: [
+  { key: "five_hour", label: "Claude · 5-hour session", pct: 97, resetsAt: now + 3000 } ] }'
+FH_K2=$(jv "$CACHE" 's.buckets[0].resetsAt')
+start
+summary "$TMP/k4.json"; sleep 0.8
+sleep_until $((FH_K2 + 1200))
+recheck "$TMP/k5.json"; summary "$TMP/k6.json"
+ok "$(jv "$TMP/k6.json" 's.meters.status === "expired" && s.meters.buckets.length === 0 && s.alerts.length === 0 ? 1 : 0')" \
+  "K: every restored window rolled + the login rejected: no bars, no alert — the Connect card state rc.1 showed ($(jv "$TMP/k6.json" 's.meters.status + " / " + s.meters.buckets.length'))"
+stop
+cp "$TMP/creds.good" "$CL/.credentials.json"
+
+# ---- L: prototype-named keys from the LIVE usage endpoint ---------------------------------------------
+mode "m=proto"
+rm -f "$CACHE"
+start
+recheck "$TMP/l1.json"; summary "$TMP/l2.json"
+ok "$(jv "$TMP/l2.json" 's.meters.status === "ok" && s.meters.buckets.length >= 5 && !s.meters.buckets.some((b) => ["__proto__", "constructor", "prototype"].includes(b.key)) && s.meters.buckets.every((b) => typeof b.label === "string") ? 1 : 0')" \
+  "L: a live response with __proto__ / constructor / prototype keys: those rows refused, every label a string ($(jv "$TMP/l2.json" 's.meters.buckets.map((b) => b.key).join(",")'))"
+ok "$(jv "$TMP/l2.json" '!s.alerts.some((a) => typeof a.label !== "string") ? 1 : 0')" "L: ...and no alert carries a non-string label"
+mode "m=ok"
+stop
+
 # ---- secrets ------------------------------------------------------------------------------------
-if grep -l "sk-test-oauth-token" "$TMP"/srv-*.log "$TMP"/snap-*.json "$CACHE" 2>/dev/null | grep -q .; then LEAK=0; else LEAK=1; fi
+if grep -l "sk-test-oauth-token\|sk-test-EXPIRED-token" "$TMP"/srv-*.log "$TMP"/snap-*.json "$CACHE" 2>/dev/null | grep -q .; then LEAK=0; else LEAK=1; fi
 ok "$LEAK" "the fake OAuth token never appears in a cache file or a server log"
 ok "$(ls "$TMP"/snap-*.json 2>/dev/null | wc -l | awk '{print ($1 >= 3) ? 1 : 0}')" "(token check covered the saved snapshots)"
 ok "$(ls "$PH" | grep -c '\.tmp$' | awk '{print ($1 == 0) ? 1 : 0}')" "no temp files left in the home"

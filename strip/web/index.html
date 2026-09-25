@@ -281,9 +281,14 @@ function meterTone(pct, th){
 /* ---------- meter row ---------- */
 function meterRow(line){
   const limit = Number(line.limit)>0 ? Number(line.limit) : 100;
-  const pct = Math.max(0, Math.min(100, (Number(line.used)||0)/limit*100));
-  const shown = Math.round(pct);                        // the number printed here AND on the taskbar
-  const tone = meterTone(shown, THRESHOLDS);
+  const usedPct = Math.max(0, Math.min(100, (Number(line.used)||0)/limit*100));
+  const shown = Math.round(usedPct);                    // the number printed here AND on the taskbar
+  // The UNROUNDED % used (the transform's additive "pct"; a payload without it falls back to
+  // used/limit): the tone, the fill and the projection compare it, as the dashboard's meterTone and
+  // the server's alerts do — a rounded 79.5 → 80 turned amber here while the dashboard stayed plain.
+  const raw = Number(line.pct);
+  const pct = line.pct!=null && isFinite(raw) ? Math.max(0, Math.min(100, raw)) : usedPct;
+  const tone = meterTone(pct, THRESHOLDS);
   const pj = Number(line.projected);
   const proj = line.projected!=null && isFinite(pj) && pj>pct ? Math.min(100, pj) : null;
 

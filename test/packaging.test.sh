@@ -15,7 +15,11 @@
 #    the popover payload against fixture summaries: per-SOURCE spend rows in
 #    the dashboard's order, colours (--s1..--s6, dark) and labels (sourceMeta >
 #    built-in > raw key), and the alert thresholds / meter tones the strip,
-#    the popover and the dashboard share.
+#    the popover and the dashboard share — tones from the UNROUNDED % (79.5 is
+#    plain like on the dashboard, though it prints 80), spend amounts not
+#    pre-rounded (12.344996 must not become $12.35), a stale (rolled-over)
+#    Claude window dropped like a Codex one. With Playwright + Chromium the
+#    popover page (strip/web/index.html) then renders that payload (else SKIP).
 # 2. release.yml: test/packaging/release-workflow.py (python3 + PyYAML).
 #
 # Overrides, for proving a regression against an older tree:
@@ -199,7 +203,27 @@ static class UiHarness
             Console.WriteLine(MeterScale.UsedPct(double.Parse(args[1], inv), double.Parse(args[2], inv)));
             return 0;
         }
-        Console.WriteLine("usage: transform <file> | tones <json> <pct>... | used <used> <limit>");
+        // `linetone <thresholds-json> <progress-line-json>...` prints "<printed %>/<tone>" per line,
+        // the tone as StripForm computes it (MeterScale.LinePct; by reflection, so an older tree
+        // without it still compiles and reports NO-LINEPCT).
+        if (args.Length >= 3 && args[0] == "linetone")
+        {
+            var linePct = typeof(MeterScale).GetMethod("LinePct");
+            if (linePct == null) { Console.WriteLine("NO-LINEPCT"); return 0; }
+            using var thDoc = JsonDocument.Parse(args[1]);
+            var th = MeterScale.Sanitize(thDoc.RootElement);
+            foreach (var a in args.Skip(2))
+            {
+                using var ld = JsonDocument.Parse(a);
+                var l = ld.RootElement;
+                double used = l.TryGetProperty("used", out var u) && u.TryGetDouble(out var uv) ? uv : 0;
+                double limit = l.TryGetProperty("limit", out var li) && li.TryGetDouble(out var lv) && lv > 0 ? lv : 100;
+                double raw = (double)linePct.Invoke(null, new object[] { l })!;
+                Console.WriteLine(MeterScale.UsedPct(used, limit) + "/" + MeterScale.Tone(raw, th));
+            }
+            return 0;
+        }
+        Console.WriteLine("usage: transform <file> | tones <json> <pct>... | used <used> <limit> | linetone <json> <line>...");
         return 2;
     }
 }
@@ -370,6 +394,28 @@ else
     { "key": "codex_primary", "label": "Codex · session (5h)", "pct": 50, "stale": true } ] }
 }
 JSON
+  # D: the review findings - five_hour 79.5 / weekly 94.5 (print 80 / 95, but
+  # the dashboard's tone is plain / warn), a stale (rolled-over) scoped Claude
+  # window, and an amount whose sub-cent part rounds down (12.344996 -> $12.34).
+  cat > "$T/summary-d.json" <<'JSON'
+{
+  "allSources": ["cli"],
+  "alertThresholds": [80, 95],
+  "periods": [
+    { "key": "last30", "bySource": { "cli": { "cost": 12.344996, "tokens": 1000 } },
+      "daily": [ { "date": "2026-09-25", "bySource": { "cli": 12.344996 } } ] }
+  ],
+  "meters": { "enabled": true, "status": "rate-limited", "buckets": [
+    { "key": "five_hour", "label": "Claude · 5-hour session", "pct": 79.5, "resetsAt": 4102444800000, "stale": false },
+    { "key": "seven_day", "label": "Claude · weekly (all models)", "pct": 94.5, "resetsAt": 4102444800000, "stale": false },
+    { "key": "model_scoped:fable", "label": "Claude · weekly · Fable", "pct": 97, "resetsAt": 1000, "stale": true } ] }
+}
+JSON
+  # E: a restart with an expired login whose only restored window has rolled
+  # over: no usable Claude meter -> the sign-in card, as before the restore.
+  printf '%s' '{"periods":[{"key":"last30","bySource":{},"daily":[]}],"meters":{"enabled":true,"status":"expired","buckets":[{"key":"five_hour","label":"Claude · 5-hour session","pct":97,"resetsAt":1000,"stale":true}]}}' > "$T/summary-e.json"
+  ui transform "$T/summary-d.json" > "$T/ui-d.json" 2>&1
+  ui transform "$T/summary-e.json" > "$T/ui-e.json" 2>&1
   # B: an older server - no allSources / sourceMeta / alertThresholds.
   printf '%s' '{"periods":[{"key":"last30","bySource":{"b":{"cost":1},"a":{"cost":2},"B":{"cost":3}},"daily":[]}],"alertThresholds":"80"}' > "$T/summary-b.json"
   printf '%s' 'not json' > "$T/summary-c.json"
@@ -396,11 +442,13 @@ says(eq(src.map((s) => s.label), ['Claude Desktop', 'Claude CLI', 'Codex', 'Cont
   'sources: labels = sourceMeta label > built-in label > raw key (got ' + src.map((s) => s.label).join(' | ') + ')');
 const by = Object.fromEntries(src.map((s) => [s.id, s]));
 const amt = (id) => by[id] ? [by[id].today, by[id].week7, by[id].cost30] : null;
-says(eq(amt('claude-desktop'), [8, 1878.09, 2178.09]), 'sources: claude-desktop today / 7 calendar days / 30d = ' + JSON.stringify(amt('claude-desktop')));
-says(eq(amt('codex'), [0.45, 3.45, 3.45]), 'sources: codex amounts = ' + JSON.stringify(amt('codex')));
-says(eq(amt('roo'), [0, 0, 0.75]) && eq(amt('continue'), [0, 0, 1.5]), 'sources: spend outside the last 7 daily buckets counts only toward 30d');
-says(eq(amt('cli'), [0, 0, 0]) && eq(amt('foreman'), [0, 0, 0]), 'sources: zero-spend sources keep their row (and colour slot)');
-says(eq(amt('stray'), [0.1, 0.1, 0]), 'sources: a daily-only source gets today/7d from the daily buckets');
+// Amounts are raw sums now (no 4-decimal round), so compare to 1e-9.
+const near = (a, b) => Array.isArray(a) && a.length === b.length && a.every((x, i) => typeof x === 'number' && Math.abs(x - b[i]) < 1e-9);
+says(near(amt('claude-desktop'), [8, 1878.09, 2178.09]), 'sources: claude-desktop today / 7 calendar days / 30d = ' + JSON.stringify(amt('claude-desktop')));
+says(near(amt('codex'), [0.45, 3.45, 3.45]), 'sources: codex amounts = ' + JSON.stringify(amt('codex')));
+says(near(amt('roo'), [0, 0, 0.75]) && near(amt('continue'), [0, 0, 1.5]), 'sources: spend outside the last 7 daily buckets counts only toward 30d');
+says(near(amt('cli'), [0, 0, 0]) && near(amt('foreman'), [0, 0, 0]), 'sources: zero-spend sources keep their row (and colour slot)');
+says(near(amt('stray'), [0.1, 0.1, 0]), 'sources: a daily-only source gets today/7d from the daily buckets');
 says(eq(a.thresholds, [70.5, 95]), 'thresholds: alertThresholds sanitized to (0,100] ascending (got ' + JSON.stringify(a.thresholds) + ')');
 const prov = (a.providers || []).map((p) => p.providerId);
 says(prov[0] === 'claude' && prov[1] === 'codex', 'providers: Claude + Codex sections unchanged (got ' + prov.join(',') + ')');
@@ -412,6 +460,20 @@ says(meters[0] && meters[0].projected === 88 && meters.slice(1).every((m) => !('
   'claude meters: projLeftAtReset 12.4 -> projected 88% used at reset; absent/null -> no projected');
 const cx = (((a.providers || [])[1] || {}).lines || []).filter((l) => l.type === 'progress');
 says(eq(cx.map((m) => [m.label, m.used]), [['Weekly', 11]]), 'codex meters: stale window dropped, weekly 11% used');
+says(meters[0] && meters[0].pct === 70.5 && meters[1] && meters[1].pct === 36, 'claude meters: "pct" carries the unrounded % used (70.5 printed as 71)');
+
+const d = read('ui-d.json');
+const dcl = ((d.providers || []).find((p) => p.providerId === 'claude') || {}).lines || [];
+const dm = dcl.filter((l) => l.type === 'progress');
+says(eq(dm.map((m) => [m.label, m.used, m.pct]), [['Session', 80, 79.5], ['Weekly', 95, 94.5]]),
+  'review D: a stale (rolled-over) Claude window is dropped; 79.5 / 94.5 print 80 / 95 and keep pct = ' + JSON.stringify(dm.map((m) => [m.label, m.used, m.pct])));
+const dcli = (d.sources || []).find((x) => x.id === 'cli') || {};
+says(dcli.today === 12.344996 && dcli.week7 === 12.344996 && dcli.cost30 === 12.344996,
+  'review D: source amounts are not pre-rounded (12.344996, not 12.345) = ' + JSON.stringify([dcli.today, dcli.week7, dcli.cost30]));
+says(dcl.some((l) => l.label === 'Today' && l.value === '$12.34'), 'review D: the Claude card prints $12.34 for the same amount');
+const e = read('ui-e.json');
+says(!((e.providers || []).some((p) => p.providerId === 'claude')) && (e.errors || []).some((x) => x.providerId === 'claude' && /sign in/i.test(x.message)),
+  'review E: expired login + only a rolled-over Claude window -> no bars, the sign-in card (got ' + JSON.stringify({ p: (e.providers || []).map((p) => p.providerId), e: e.errors }) + ')');
 
 const b = read('ui-b.json');
 says(eq((b.sources || []).map((s) => [s.id, s.label, s.color]), [['B', 'B', S[0]], ['a', 'a', S[1]], ['b', 'b', S[2]]]),
@@ -432,6 +494,53 @@ JS
   [ "$out" = "TH=80,95 80=1 95=2 " ] && pass "tones: no thresholds -> 80/95" || fail "tones {}: $out"
   out="$(ui used 70.5 100) $(ui used 0.5 1) $(ui used 150 100) $(ui used -5 100) $(ui used 5 0)"
   [ "$out" = "71 50 100 0 0" ] && pass "used %: rounds halves up, clamps 0..100, limit 0 -> 0" || fail "used %: $out"
+  # The taskbar tone (StripForm): from the line's unrounded "pct", not the printed number;
+  # a line without "pct" (a payload an older strip saved) falls back to used/limit.
+  out=$(ui linetone '[80,95]' '{"used":80,"limit":100,"pct":79.5}' '{"used":95,"limit":100,"pct":94.5}' \
+    '{"used":80,"limit":100,"pct":80}' '{"used":80,"limit":100}' '{"used":95,"limit":100,"pct":"x"}' | tr '\n' ' ')
+  [ "$out" = "80/0 95/1 80/1 80/1 95/2 " ] \
+    && pass "taskbar tone from the unrounded %: 79.5 prints 80 but stays plain, 94.5 prints 95 but stays amber (dashboard meterTone)" \
+    || fail "taskbar tone: $out"
+
+  # The popover page itself (strip/web/index.html) renders fixture D's payload.
+  PWMOD=${PLAYWRIGHT_MODULE:-}
+  [ -z "$PWMOD" ] && PWMOD=$(node -e 'try { console.log(require.resolve("playwright")) } catch (_) {}' 2>/dev/null)
+  if [ -z "$PWMOD" ] && command -v npm >/dev/null 2>&1; then
+    G=$(npm root -g 2>/dev/null); [ -n "$G" ] && [ -f "$G/playwright/index.js" ] && PWMOD="$G/playwright/index.js"
+  fi
+  CHROME=${PW_CHROMIUM:-}; [ -z "$CHROME" ] && [ -x /opt/pw-browsers/chromium ] && CHROME=/opt/pw-browsers/chromium
+  if [ -z "$PWMOD" ]; then
+    echo "SKIP: popover render (Playwright not found; set PLAYWRIGHT_MODULE)"
+  else
+    node --input-type=module - "$PWMOD" "$CHROME" "$STRIP_DIR/web/index.html" "$T/ui-d.json" <<'JS' || FAILS=$((FAILS + 1))
+const [pwmod, chrome, page0, uiFile] = process.argv.slice(2);
+const { pathToFileURL } = await import('node:url');
+const fs = await import('node:fs');
+const pw = await import(pathToFileURL(pwmod).href);
+const chromium = pw.chromium || (pw.default && pw.default.chromium);
+let bad = 0;
+const says = (c, m) => { console.log((c ? 'PASS: ' : 'FAIL: ') + m); if (!c) bad++; };
+let browser;
+try { browser = await chromium.launch({ ...(chrome ? { executablePath: chrome } : {}), args: ['--no-sandbox'] }); }
+catch (e) { console.log('SKIP: popover render (Chromium did not launch: ' + String(e.message).split('\n')[0] + ')'); process.exit(0); }
+const page = await browser.newPage({ viewport: { width: 372, height: 900 }, colorScheme: 'dark' });
+await page.addInitScript(() => { window.__NO_SAMPLE__ = true; });
+await page.goto(pathToFileURL(page0).href);
+await page.evaluate((p) => window.renderData(p), JSON.parse(fs.readFileSync(uiFile, 'utf8')));
+const r = await page.evaluate(() => ({
+  meters: [...document.querySelectorAll('.mrow')].map((m) => [m.querySelector('.title').textContent, m.querySelector('.head').textContent, m.querySelector('.head').className, m.querySelector('.meter').className]),
+  legend: [...document.querySelectorAll('.legend .row')].map((x) => x.textContent.replace(/\s+/g, ' ').trim()),
+  center: (document.querySelector('.donut .center') || {}).textContent || null,
+  today: [...document.querySelectorAll('.trow')].map((x) => x.textContent.replace(/\s+/g, ' ').trim()).filter((t) => /^Today/.test(t)),
+}));
+says(JSON.stringify(r.meters) === JSON.stringify([['Session', '80% used', 'head', 'meter'], ['Weekly', '95% used', 'head warn', 'meter warn']]),
+  'popover: 79.5% prints 80 and stays plain, 94.5% prints 95 and stays amber — as #mini shows them (' + JSON.stringify(r.meters) + ')');
+says(r.legend.some((t) => /Claude CLI\s*\$12\.34$/.test(t)) && !r.legend.some((t) => /12\.35/.test(t)) && !/12\.35/.test(r.center || ''),
+  'popover: the donut legend / centre say $12.34 like the Claude card and the dashboard (' + JSON.stringify({ legend: r.legend, center: r.center, today: r.today }) + ')');
+await browser.close();
+process.exit(bad ? 1 : 0);
+JS
+  fi
 fi
 
 [ $FAILS -eq 0 ] && echo "packaging: all passed" || echo "packaging: $FAILS failure(s)"

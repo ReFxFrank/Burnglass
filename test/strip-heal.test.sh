@@ -45,6 +45,24 @@
 #      the ~/.pulse tree stays byte-identical (hard rule 3b: nothing there is
 #      renamed, replaced, created or cleaned up)
 #  S7b the "no strip" reason carries no path (payload: basenames only)
+#  S18 the strip is turned off from the dashboard while a refresh restarts it
+#      (after the kill, during the pause before the relaunch) -> not launched
+#  S19 the same while waiting for a strip that will not die (~5 s window)
+#  S20 a FAILED refresh (release lookup HTTP 500) is kept in
+#      <home>/strip-refresh.json and retried on the next (normal) start, which
+#      swaps the file and removes the marker; a third start fetches nothing
+#  S21 within one process a failure is retried on a timer
+#      (PULSE_STRIP_REFRESH_RETRY_MS); the running managed strip is restarted
+#      on the new file
+#  S22 after STRIP_REFRESH_MAX_ATTEMPTS (5) nothing is fetched any more, but
+#      the failure stays in the payload (retriesLeft 0)
+#  S23 an interrupted attempt ("pending" marker, dead pid) is retried; one
+#      whose pid is alive (another server's attempt in flight) is not
+#  S24 a marker from another version is ignored and removed
+#  S25 a failed refresh on a server whose home IS ~/.pulse writes no marker
+#      there (hard rule 3b)
+#  hygiene: server.js runs Windows builtins (tasklist / taskkill / reg /
+#      powershell) only by absolute System32 path, never by bare name
 # STRIP_HEAL_SERVER=<server.js> runs the suite against another server copy
 # (e.g. an older tree, to prove a regression).
 set -u
@@ -54,8 +72,8 @@ TMP=$(mktemp -d)
 MOCKS=""
 cleanup() { for p in $MOCKS; do kill "$p" 2>/dev/null; done; if [ -n "${KEEP_TMP:-}" ]; then echo "TMP=$TMP"; else rm -rf "$TMP"; fi; }
 trap cleanup EXIT
-# This suite owns ports 5861-5885; a leftover listener would make results lie.
-for p in $(seq 5861 5885); do
+# This suite owns ports 5861-5895; a leftover listener would make results lie.
+for p in $(seq 5861 5895); do
   curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$p/"; rc=$?
   if [ $rc -ne 7 ]; then echo "FAIL  port $p is already in use (curl rc=$rc) — stop whatever holds it"; exit 1; fi
 done
@@ -90,6 +108,7 @@ http.createServer((q, s) => {
   if (q.url.startsWith("/repos/")) {
     const body = fs.readFileSync(path.join(DIR, "rel.json"), "utf8");
     if (body.trim() === "NOTFOUND") { s.writeHead(404, { "Content-Type": "application/json" }); return s.end("{\"message\":\"Not Found\"}"); }
+    if (body.trim() === "ERROR500") { s.writeHead(500, { "Content-Type": "application/json" }); return s.end("{\"message\":\"Server Error\"}"); }
     s.writeHead(200, { "Content-Type": "application/json" }); return s.end(body);
   }
   const dl = /^\/dl\/([\w.-]+)$/.exec(q.url);
@@ -107,11 +126,12 @@ http.createServer((q, s) => {
 MOCKS="$MOCKS $!"
 for _ in $(seq 1 50); do curl -s -o /dev/null "http://127.0.0.1:$MP/__stats" && break; sleep 0.1; done
 
-# mkrel <mode>: ok | nodigest | baddigest | notfound | nostrip | aliasonly
+# mkrel <mode>: ok | nodigest | baddigest | notfound | error500 | nostrip | aliasonly
 mkrel() {
   node -e '
 const [mode, sha, size, port, out] = process.argv.slice(1);
 if (mode === "notfound") { require("fs").writeFileSync(out, "NOTFOUND"); process.exit(0); }
+if (mode === "error500") { require("fs").writeFileSync(out, "ERROR500"); process.exit(0); }
 const a = (name, digest) => ({ name, size: +size, browser_download_url: "http://127.0.0.1:" + port + "/dl/" + name,
   url: "http://127.0.0.1:" + port + "/api-asset/" + name, ...(digest ? { digest } : {}) });
 const d = mode === "nodigest" ? null : mode === "baddigest" ? "sha256:" + "0".repeat(64) : "sha256:" + sha;
@@ -160,6 +180,18 @@ wait_refresh() {
   return 1
 }
 summary() { curl -s "http://127.0.0.1:$1/api/summary" > "$2"; }
+# wait_status <port> <out> <status>: poll /api/summary until strip.refresh.status is <status>
+wait_status() {
+  for _ in $(seq 1 100); do
+    curl -s "http://127.0.0.1:$1/api/summary" > "$2" 2>/dev/null
+    node -e 'try { const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); process.exit(s.strip && s.strip.refresh && s.strip.refresh.status === process.argv[2] ? 0 : 1); } catch (_) { process.exit(1); }' "$2" "$3" && return 0
+    sleep 0.2
+  done
+  return 1
+}
+# marker <file> <expr over m = the parsed file> -> exit status
+marker() { node -e 'let m = null; try { m = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); } catch (_) {} process.exit(m && new Function("m", "return (" + process.argv[2] + ")")(m) ? 0 : 1)' "$1" "$2"; }
+strip_off() { curl -s -X POST -H 'X-Pulse: 1' "http://127.0.0.1:$1/api/strip/disable" > "$2"; }
 # js <summary.json> <expr over s> -> exit status
 js() { node -e 'const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); process.exit(new Function("s", "return (" + process.argv[2] + ")")(s) ? 0 : 1)' "$1" "$2"; }
 wait_file() { for _ in $(seq 1 60); do [ -s "$1" ] && return 0; sleep 0.2; done; return 1; }
@@ -451,8 +483,159 @@ check "S17c strip beside a server exe inside ~/.pulse: skipped, nothing fetched,
   "js '$TMP/s17c.json' 's.strip.refresh.status === \"skipped\" && /old Pulse folder/.test(s.strip.refresh.reason)' && [ \"\$(stats 'l.length')\" = 0 ] && [ ! -e '$H17/.burnglass/bin' ]"
 check "S17c ~/.pulse byte-identical (incl. the .old the cleanup must not touch)" "cmp -s '$TMP/s17c-before.txt' '$TMP/s17c-after.txt'"
 
+# ------------------------------------------------------------------ S18 off during the relaunch pause
+case_dirs s18
+cp "$TMP/old.bin" "$C/exe/burnglass-strip.exe"
+touch "$C/stub/running"; echo '{"strip": true}' > "$C/home/config.json"
+mkrel ok; reset_mock
+start_srv 5883 "$TMP/s18.log" $(common) "${FORCE[@]}" -- --after-update
+wait_up 5883
+for _ in $(seq 1 300); do [ -s "$C/stub/kills.log" ] && break; sleep 0.03; done
+strip_off 5883 "$TMP/s18-off.json"   # lands inside the 1.5 s pause before the relaunch
+sleep 3
+summary 5883 "$TMP/s18.json"
+stop_srv $SRV
+check "S18 (the swap + kill happened; the disable answered and stuck)" \
+  "[ \"\$(lines '$C/stub/kills.log')\" = 1 ] && same '$TMP/new.bin' '$C/exe/burnglass-strip.exe' && js '$TMP/s18-off.json' 's.ok === true && s.strip.enabled === false' && js '$TMP/s18.json' 's.strip.enabled === false'"
+check "S18 turned off during the pause before the relaunch: NOT launched" "[ ! -e '$C/stub/launches.log' ]"
+check "S18 the skipped relaunch is logged after the dashboard's disable" \
+  "grep -q 'strip was turned off meanwhile' '$TMP/s18.log' && [ \"\$(grep -n 'strip disabled from the dashboard' '$TMP/s18.log' | cut -d: -f1)\" -lt \"\$(grep -n 'turned off meanwhile' '$TMP/s18.log' | cut -d: -f1)\" ]"
+
+# ------------------------------------------------------------------ S19 off while waiting for a stuck strip
+case_dirs s19
+cp "$TMP/old.bin" "$C/exe/burnglass-strip.exe"
+touch "$C/stub/running" "$C/stub/sticky"; echo '{"strip": true}' > "$C/home/config.json"
+reset_mock
+start_srv 5884 "$TMP/s19.log" $(common) "${FORCE[@]}" -- --after-update
+wait_up 5884
+for _ in $(seq 1 300); do [ -s "$C/stub/kills.log" ] && break; sleep 0.03; done
+strip_off 5884 "$TMP/s19-off.json"   # inside the ~5 s wait for the old strip to exit
+for _ in $(seq 1 60); do grep -q 'did not exit within' "$TMP/s19.log" && break; sleep 0.2; done
+sleep 0.8
+stop_srv $SRV
+check "S19 turned off while waiting for a strip that will not die: no launch attempt" \
+  "grep -q 'did not exit within' '$TMP/s19.log' && [ ! -e '$C/stub/launches.log' ] && grep -q 'strip was turned off meanwhile' '$TMP/s19.log'"
+
+# ------------------------------------------------------------------ S20 failed -> retried on the next start
+case_dirs s20; S20=$C
+cp "$TMP/old.bin" "$C/exe/burnglass-strip.exe"
+MK=$C/home/strip-refresh.json
+mkrel error500; reset_mock
+start_srv 5885 "$TMP/s20a.log" $(common) "${FORCE[@]}" -- --after-update
+wait_up 5885; wait_refresh 5885 "$TMP/s20a.json"
+stop_srv $SRV
+check "S20 release lookup HTTP 500: failed, file untouched" \
+  "js '$TMP/s20a.json' 's.strip.refresh.status === \"failed\" && /HTTP 500/.test(s.strip.refresh.error)' && same '$TMP/old.bin' '$C/exe/burnglass-strip.exe'"
+check "S20 payload says how it heals: attempt 1, 4 retries left, an in-process retry scheduled" \
+  "js '$TMP/s20a.json' 's.strip.refresh.attempts === 1 && s.strip.refresh.retriesLeft === 4 && s.strip.refresh.retryAt > Date.now() && s.strip.refresh.checking === false'"
+check "S20 the failure is kept in <home>/strip-refresh.json (no path in it)" \
+  "marker '$MK' 'm.v === 1 && m.version === \"$VER\" && m.status === \"failed\" && m.attempts === 1 && /HTTP 500/.test(m.error) && !JSON.stringify(m).includes(\"$TMP\")'"
+mkrel ok; reset_mock
+start_srv 5886 "$TMP/s20b.log" $(common) "${FORCE[@]}"
+wait_up 5886; wait_status 5886 "$TMP/s20b.json" updated
+stop_srv $SRV
+check "S20 a NORMAL start retries it: updated, the file swapped" \
+  "js '$TMP/s20b.json' 's.strip.refresh.status === \"updated\" && s.strip.refresh.attempts === 2' && same '$TMP/new.bin' '$C/exe/burnglass-strip.exe'"
+check "S20 one lookup + one download for the retry, logged as a retry" \
+  "[ \"\$(api_count)\" = 1 ] && [ \"\$(dl_count)\" = 1 ] && grep -q 'retrying the failed refresh to v$VER (attempt 2 of 5)' '$TMP/s20b.log'"
+check "S20 success removes the marker" "[ ! -e '$MK' ]"
+reset_mock
+start_srv 5887 "$TMP/s20c.log" $(common) "${FORCE[@]}"
+wait_up 5887; sleep 1.2; summary 5887 "$TMP/s20c.json"
+stop_srv $SRV
+check "S20 the next normal start: nothing owed, nothing fetched, refresh null" \
+  "[ \"\$(stats 'l.length')\" = 0 ] && js '$TMP/s20c.json' 's.strip.refresh === null'"
+
+# ------------------------------------------------------------------ S21 in-process retry timer
+case_dirs s21
+cp "$TMP/old.bin" "$C/exe/burnglass-strip.exe"
+touch "$C/stub/running"; echo '{"strip": true}' > "$C/home/config.json"
+mkrel error500; reset_mock
+start_srv 5888 "$TMP/s21.log" $(common) "${FORCE[@]}" PULSE_STRIP_REFRESH_RETRY_MS=2500 -- --after-update
+wait_up 5888; wait_refresh 5888 "$TMP/s21a.json"
+mkrel ok
+wait_status 5888 "$TMP/s21b.json" updated
+for _ in $(seq 1 40); do [ "$(lines "$C/stub/launches.log")" -ge 2 ] && break; sleep 0.2; done
+sleep 0.5
+stop_srv $SRV
+check "S21 first attempt failed with a retry scheduled ~2.5 s out" \
+  "js '$TMP/s21a.json' 's.strip.refresh.status === \"failed\" && s.strip.refresh.retryAt - s.strip.refresh.at > 1500 && s.strip.refresh.retryAt - s.strip.refresh.at < 4000'"
+check "S21 the timer retried in-process: updated (attempt 2), file swapped, marker gone" \
+  "js '$TMP/s21b.json' 's.strip.refresh.attempts === 2' && same '$TMP/new.bin' '$C/exe/burnglass-strip.exe' && [ ! -e '$C/home/strip-refresh.json' ]"
+check "S21 the running managed strip was restarted on the new file (killed once, launched once more)" \
+  "[ \"\$(lines '$C/stub/kills.log')\" = 1 ] && [ \"\$(lines '$C/stub/launches.log')\" = 2 ] && head -1 '$C/stub/launches.log' | grep -q '^already-running ' && tail -1 '$C/stub/launches.log' | grep -qx 'launch $C/exe/burnglass-strip.exe'"
+
+# ------------------------------------------------------------------ S22 gave up
+case_dirs s22
+cp "$TMP/old.bin" "$C/exe/burnglass-strip.exe"
+node -e 'require("fs").writeFileSync(process.argv[1], JSON.stringify({ v: 1, version: process.argv[2], status: "failed", at: Date.now() - 60e3, attempts: 5, error: "release lookup failed: HTTP 500" }))' "$C/home/strip-refresh.json" "$VER"
+mkrel ok; reset_mock
+start_srv 5889 "$TMP/s22.log" $(common) "${FORCE[@]}"
+wait_up 5889; sleep 1.2; summary 5889 "$TMP/s22.json"
+stop_srv $SRV
+check "S22 five failed attempts: nothing fetched, file untouched, marker kept" \
+  "[ \"\$(stats 'l.length')\" = 0 ] && same '$TMP/old.bin' '$C/exe/burnglass-strip.exe' && [ -e '$C/home/strip-refresh.json' ]"
+check "S22 ...and the failure stays in the payload (retriesLeft 0, no retry scheduled)" \
+  "js '$TMP/s22.json' 's.strip.refresh.status === \"failed\" && s.strip.refresh.retriesLeft === 0 && s.strip.refresh.retryAt === null && /HTTP 500/.test(s.strip.refresh.error)'"
+
+# ------------------------------------------------------------------ S23 interrupted attempt
+case_dirs s23
+cp "$TMP/old.bin" "$C/exe/burnglass-strip.exe"
+node -e 'require("fs").writeFileSync(process.argv[1], JSON.stringify({ v: 1, version: process.argv[2], status: "pending", at: Date.now() - 60e3, attempts: 1, pid: 999999999 }))' "$C/home/strip-refresh.json" "$VER"
+mkrel ok; reset_mock
+start_srv 5890 "$TMP/s23a.log" $(common) "${FORCE[@]}"
+wait_up 5890; wait_status 5890 "$TMP/s23a.json" updated
+stop_srv $SRV
+check "S23 an attempt interrupted mid-way (pending, its process gone) is retried on the next start" \
+  "js '$TMP/s23a.json' 's.strip.refresh.attempts === 2' && same '$TMP/new.bin' '$C/exe/burnglass-strip.exe' && grep -q 'retrying the interrupted refresh' '$TMP/s23a.log' && [ ! -e '$C/home/strip-refresh.json' ]"
+case_dirs s23b
+cp "$TMP/old.bin" "$C/exe/burnglass-strip.exe"
+LIVEPID=${MOCKS##* }
+node -e 'require("fs").writeFileSync(process.argv[1], JSON.stringify({ v: 1, version: process.argv[2], status: "pending", at: Date.now(), attempts: 1, pid: +process.argv[3] }))' "$C/home/strip-refresh.json" "$VER" "$LIVEPID"
+reset_mock
+start_srv 5891 "$TMP/s23b.log" $(common) "${FORCE[@]}"
+wait_up 5891; sleep 1.2; summary 5891 "$TMP/s23b.json"
+stop_srv $SRV
+check "S23 a pending attempt whose process is alive (another server) is left alone" \
+  "[ \"\$(stats 'l.length')\" = 0 ] && js '$TMP/s23b.json' 's.strip.refresh === null' && same '$TMP/old.bin' '$C/exe/burnglass-strip.exe' && [ -e '$C/home/strip-refresh.json' ]"
+
+# ------------------------------------------------------------------ S24 another version's marker
+case_dirs s24
+cp "$TMP/old.bin" "$C/exe/burnglass-strip.exe"
+node -e 'require("fs").writeFileSync(process.argv[1], JSON.stringify({ v: 1, version: "0.0.1", status: "failed", at: Date.now(), attempts: 1, error: "x" }))' "$C/home/strip-refresh.json"
+reset_mock
+start_srv 5892 "$TMP/s24.log" $(common) "${FORCE[@]}"
+wait_up 5892; sleep 1.2; summary 5892 "$TMP/s24.json"
+stop_srv $SRV
+check "S24 a marker from another version: ignored (nothing fetched, refresh null) and removed" \
+  "[ \"\$(stats 'l.length')\" = 0 ] && js '$TMP/s24.json' 's.strip.refresh === null' && [ ! -e '$C/home/strip-refresh.json' ]"
+
+# ------------------------------------------------------------------ S25 home IS ~/.pulse
+C=$TMP/s25; H25=$C/fakehome; mkdir -p "$H25/.pulse" "$C/exe" "$C/stub"
+echo '{}' > "$H25/.pulse/config.json"; echo 'not a folder' > "$H25/.burnglass"
+cp "$TMP/old.bin" "$C/exe/burnglass-strip.exe"
+hash_tree "$H25/.pulse" "$TMP/s25-before.txt"
+mkrel error500; reset_mock
+start_srv 5893 "$TMP/s25.log" HOME="$H25" PULSE_STRIP_EXE_DIR="$C/exe" PULSE_STRIP_PROC_STUB="$C/stub" "${FORCE[@]}" -- --after-update
+wait_up 5893; wait_refresh 5893 "$TMP/s25.json"
+stop_srv $SRV
+check "S25 degraded run on ~/.pulse, the strip beside the exe failed to refresh: no marker written into ~/.pulse" \
+  "js '$TMP/s25.json' 's.homeMigration && s.homeMigration.status === \"failed\" && s.strip.refresh.status === \"failed\"' && [ ! -e '$H25/.pulse/strip-refresh.json' ] && ! ls '$H25/.pulse' | grep -q 'strip-refresh'"
+
 # ------------------------------------------------------------------ hygiene
 check "no server log mentions an unexpected crash" "! grep -l 'TypeError\|ReferenceError\|Unhandled' '$TMP'/s*.log >/dev/null 2>&1"
+# A bare name is looked up in the CURRENT folder first on Windows (libuv's
+# search_path), and the server's cwd can be Downloads: every Windows builtin
+# goes through system32Exe / powershellExe (absolute System32 path).
+bare_builtins() {
+  node -e '
+const src = require("fs").readFileSync(process.argv[1], "utf8").split("\n");
+const re = /\b(execFile|execFileSync|spawn|spawnSync)\(\s*(?:[^,()]*\?\s*)?["\x27](tasklist|taskkill|reg|powershell)(\.exe)?["\x27]/;
+const hits = src.map((l, i) => [i + 1, l]).filter(([, l]) => re.test(l.replace(/\/\/.*$/, "")));
+for (const [n, l] of hits) console.log(n + ": " + l.trim());
+process.exit(hits.length ? 1 : 0);' "$SERVER"
+}
+check "server.js runs tasklist / taskkill / reg / powershell only by absolute System32 path" "bare_builtins"
 
 [ $FAILS -eq 0 ] && echo "strip-heal: all passed" || echo "strip-heal: $FAILS failure(s)"
 exit $((FAILS > 0))

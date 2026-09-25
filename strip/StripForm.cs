@@ -143,6 +143,7 @@ sealed class StripForm : Form
                 {
                     string id = p.TryGetProperty("providerId", out var pid) ? pid.GetString() ?? "" : "";
                     var pcts = new List<int>();
+                    var tones = new List<int>();
                     double? spend30 = null;
                     if (p.TryGetProperty("lines", out var lines))
                         foreach (var l in lines.EnumerateArray())
@@ -154,6 +155,9 @@ sealed class StripForm : Form
                                 double used = l.TryGetProperty("used", out var u) && u.TryGetDouble(out var uv) ? uv : 0;
                                 double limit = l.TryGetProperty("limit", out var li) && li.TryGetDouble(out var lv) && lv > 0 ? lv : 100;
                                 pcts.Add(MeterScale.UsedPct(used, limit)); // % USED, as the popover prints it
+                                // Tone from the UNROUNDED % (the line's "pct"), like the dashboard and the
+                                // popover — the printed number is rounded, the colour must not be.
+                                tones.Add(MeterScale.Tone(MeterScale.LinePct(l), thresholds));
                             }
                             else if (type == "text" && l.TryGetProperty("label", out var lab) && lab.GetString() == "Last 30 Days"
                                 && l.TryGetProperty("value", out var val))
@@ -164,8 +168,8 @@ sealed class StripForm : Form
                     if (id.Length == 0) continue;
                     string uTop = pcts.Count > 0 ? pcts[0] + "%" : "";
                     string uBot = pcts.Count > 1 ? pcts[1] + "%" : "";
-                    int tTop = pcts.Count > 0 ? MeterScale.Tone(pcts[0], thresholds) : 0;
-                    int tBot = pcts.Count > 1 ? MeterScale.Tone(pcts[1], thresholds) : 0;
+                    int tTop = tones.Count > 0 ? tones[0] : 0;
+                    int tBot = tones.Count > 1 ? tones[1] : 0;
                     string price = spend30 is > 0 ? CompactMoney(spend30.Value) : "";
                     // Keep the provider if it has EITHER usage or price; the strip rotates between whatever
                     // it has (a provider with only one just shows that one, no flip).

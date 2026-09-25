@@ -18,7 +18,7 @@ import { useState } from 'react';
 import { Icon } from './icons.jsx';
 import { FamilyMark } from './logos.jsx';
 import { Badge, Btn, InfoTip, MeterBar, Panel, cx } from './ui.jsx';
-import { BRAND, ago, dur, formatReset, localDateStr, meterTone, num, shortDate, tokens, useTick } from './lib.js';
+import { BRAND, ago, dur, formatReset, localDateStr, meterTone, num, shortDate, staleNote, tokens, useTick } from './lib.js';
 
 const HOUR = 3600e3;
 
@@ -32,8 +32,11 @@ const METER_NAMES = {
   codex_secondary: 'Codex · weekly',
 };
 export function meterName(b, provider) {
-  if (b && METER_NAMES[b.key]) return METER_NAMES[b.key];
-  let s = String((b && (b.label || b.key)) || '').replace(/^(Claude|Codex)\s*·\s*/i, '').trim();
+  // Own keys only: METER_NAMES['__proto__'] is Object.prototype — an object
+  // as a React child blanks the whole page (React error #31).
+  if (b && typeof b.key === 'string' && Object.prototype.hasOwnProperty.call(METER_NAMES, b.key)) return METER_NAMES[b.key];
+  const raw = b ? (typeof b.label === 'string' && b.label ? b.label : b.key) : '';
+  let s = String(raw || '').replace(/^(Claude|Codex)\s*·\s*/i, '').trim();
   s = s.replace(/^weekly\b/, 'Weekly');
   s = s.charAt(0).toUpperCase() + s.slice(1);
   return provider === 'codex' ? 'Codex · ' + s : s;
@@ -76,7 +79,7 @@ export function MeterCell({ b, provider, thresholds }) {
   }
   return (
     <div className={cx('mc', tone, stale && 'stale')}>
-      <div className="mc-top" title={b.label}>
+      <div className="mc-top" title={typeof b.label === 'string' ? b.label : undefined}>
         <FamilyMark family={provider === 'codex' ? 'openai' : 'claude'} size={14} title="" />
         <span className="nm">{name}</span>
       </div>
@@ -90,11 +93,11 @@ export function MeterCell({ b, provider, thresholds }) {
         thresholds={thresholds}
         tone={stale ? '' : undefined}
         stale={stale}
-        label={`${b.label || name}: ${Math.round(pct)}% used${projUsed != null ? `, about ${projUsed}% at reset` : ''}`}
+        label={`${typeof b.label === 'string' && b.label ? b.label : name}: ${Math.round(pct)}% used${projUsed != null ? `, about ${projUsed}% at reset` : ''}`}
       />
       <div className="mc-foot">
         {stale
-          ? <span>window rolled over · run a turn to refresh</span>
+          ? <span>{staleNote(provider)}</span>
           : b.resetsAt ? <Countdown ts={b.resetsAt} /> : null}
       </div>
     </div>

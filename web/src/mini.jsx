@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import {
   BRAND, alertThresholds, dur, formatReset, localDateStr, makeColorMap, meterTone, money, moneyAxis,
-  shortDate, srcLabel, tokens, useTick,
+  shortDate, srcLabel, staleNote, tokens, useTick,
 } from './lib.js';
 import { MeterBar, Seg, Tip, cx } from './ui.jsx';
 import { Icon, BrandMark, Wordmark } from './icons.jsx';
@@ -54,7 +54,7 @@ function MiniRows({ buckets, thresholds, provider }) {
               )}
               <span>
                 {b.stale
-                  ? 'stale · run a turn to refresh'
+                  ? staleNote(provider === 'Codex' ? 'codex' : 'claude', true)
                   : remaining != null && remaining > 0
                     ? <>resets in <b>{dur(remaining)}</b></>
                     : b.resetsAt ? 'resetting…' : ''}

@@ -287,6 +287,14 @@ export function meterTone(pctUsed, thresholds = [80, 95]) {
   if (pctUsed >= lo) return 'warn';
   return '';
 }
+// Footer copy for a STALE meter bucket (its window rolled over since the
+// reading). Codex refreshes from the snapshot its next local turn writes;
+// Claude's account meter is re-read by the server itself (after a rate-limit
+// wait, a failed check or a new sign-in) — "run a turn" would be wrong there.
+export function staleNote(provider, short) {
+  if (provider === 'codex') return short ? 'stale · run a turn to refresh' : 'window rolled over · run a Codex turn to refresh';
+  return short ? 'stale · waiting for the next check' : 'window rolled over · waiting for the next check';
+}
 
 // ---- export links ---------------------------------------------------------------
 // Same-origin GET link for /api/export carrying the period AND the active

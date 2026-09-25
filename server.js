@@ -3714,7 +3714,8 @@ function buildSummary(sourceFilter, opts) {
   // feature exists.
   payload.tray = { supported: process.platform === 'win32', enabled: trayDesired !== null ? trayDesired : readConfig().tray === true };
   payload.openusage = { supported: process.platform === 'win32', enabled: readConfig().openusage === true, path: findOpenUsage() };
-  // refresh: the post-update strip refresh's outcome on this start (additive).
+  // refresh: the post-update strip refresh's outcome on this start (additive;
+  // a failure also carries attempts / retriesLeft / retryAt / checking).
   payload.strip = { supported: process.platform === 'win32', enabled: readConfig().strip === true, path: findPulseStrip(), refresh: stripRefreshForPayload() };
   // Run at startup: registry-backed (not config), memoized so this costs
   // nothing per build.
@@ -4516,6 +4517,16 @@ const METER_LABELS = {
   seven_day_oauth_apps: 'Claude · weekly · apps',
   seven_day_cowork: 'Claude · weekly · Cowork',
 };
+// Bucket keys are data (the API's top-level keys, a cache file's rows), so a
+// label is looked up as an OWN string only: `METER_LABELS['__proto__']` is
+// Object.prototype and `['constructor']` the Object function — truthy
+// non-strings that made such a row a "known key" with an object label, which
+// the dashboard cannot render (React error #31 blanked the whole page).
+// Those names are never meter keys and are refused outright.
+const METER_KEY_RESERVED = new Set(['__proto__', 'constructor', 'prototype']);
+function meterLabelFor(key) {
+  return Object.prototype.hasOwnProperty.call(METER_LABELS, key) ? METER_LABELS[key] : null;
+}
 
 // Normalize one usage bucket from the API response. utilization is a 0–100
 // percentage — Claude Code's own schema: "Percentage of the window used,
@@ -4524,21 +4535,23 @@ const METER_LABELS = {
 // endpoint.) The old "≤ 1 means a fraction" rule rendered a real 0.9% as 90%
 // at the start of every window — and could fire a false 80% alert.
 function parseMeterBucket(key, v) {
+  if (typeof key !== 'string' || METER_KEY_RESERVED.has(key)) return null;
   if (!v || typeof v !== 'object') return null;
   let u = v.utilization;
   if (typeof u !== 'number' || !isFinite(u)) return null;
   const pct = u;
+  const known = meterLabelFor(key);
   // Undisclosed top-level keys — rotating codenames (`nimbus_quill`,
   // `cinder_cove`, `omelette_promotional`…) Anthropic has never documented,
   // usually at 0 with no reset — stay hidden until they carry real usage, so
   // the card doesn't fill with meaningless 0% rows. Known keys always render.
-  if (!METER_LABELS[key] && !(pct > 0)) return null;
+  if (!known && !(pct > 0)) return null;
   let resetsAt = null;
   if (v.resets_at) {
     const t = typeof v.resets_at === 'number' ? v.resets_at * (v.resets_at < 1e12 ? 1000 : 1) : Date.parse(v.resets_at);
     if (isFinite(t)) resetsAt = t;
   }
-  return { key, label: METER_LABELS[key] || 'Claude · ' + key.replace(/_/g, ' '), pct: Math.max(0, Math.min(100, pct)), resetsAt };
+  return { key, label: known || 'Claude · ' + key.replace(/_/g, ' '), pct: Math.max(0, Math.min(100, pct)), resetsAt };
 }
 
 function refreshAccountMeters(done) {
@@ -4551,6 +4564,7 @@ function refreshAccountMeters(done) {
     metersInFlight = false;
     schedule(METERS_OK_MS);
     metersState.status = 'no-login';
+    dropRolledMeterBuckets();
     metersState.error = IS_MAC
       ? 'No Claude Code login found — Burnglass checked ~/.claude/.credentials.json and the macOS Keychain. ' +
         'If a Keychain permission dialog appeared, choose "Always Allow"; if you have never used Claude Code ' +
@@ -4601,6 +4615,7 @@ function refreshAccountMeters(done) {
       }
       schedule(METERS_ERR_MS);
       metersState.status = /HTTP 401|HTTP 403/.test(err.message) ? 'expired' : 'error';
+      if (metersState.status === 'expired') dropRolledMeterBuckets();
       metersState.error = metersState.status === 'expired'
         ? 'Claude rejected the login (' + err.message + ')' +
           (looksExpired ? ' — the token file is stale. ' : ' — ') +
@@ -4661,6 +4676,21 @@ function refreshAccountMeters(done) {
     done && done(metersState);
   });
   }); // readOauthTokenAsync
+}
+
+// A check that cannot succeed until the user signs in again (no login found,
+// or the login was rejected): last-good windows that have already rolled over
+// are dropped. Nothing will refresh them, and a dead row would stand in for
+// the no-bars state — the dashboard's Connect card, the strip's sign-in card —
+// that rc.1 showed after such a restart. Windows still open keep their last
+// good value; with none left there is no last-good reading any more.
+function dropRolledMeterBuckets() {
+  const now = Date.now();
+  const all = metersState.buckets || [];
+  const kept = all.filter((b) => !(b.resetsAt != null && b.resetsAt <= now));
+  if (kept.length === all.length) return;
+  metersState.buckets = kept;
+  if (!kept.length) metersState.lastGoodAt = null;
 }
 
 function metersRateLimitMessage(waitMs) {
@@ -4752,7 +4782,7 @@ function persistMetersCache() {
 function cachedMeterBucket(b) {
   if (!b || typeof b !== 'object' || Array.isArray(b)) return null;
   const key = b.key;
-  if (typeof key !== 'string' || !key || key.length > 160 || HAS_CONTROL.test(key)) return null;
+  if (typeof key !== 'string' || !key || key.length > 160 || HAS_CONTROL.test(key) || METER_KEY_RESERVED.has(key)) return null;
   if (typeof b.pct !== 'number' || !isFinite(b.pct)) return null;
   let resetsAt = null;
   if (b.resetsAt != null) {
@@ -4760,11 +4790,12 @@ function cachedMeterBucket(b) {
     resetsAt = b.resetsAt;
   }
   // Known keys take today's label; others keep the one they were fetched with.
-  let label = METER_LABELS[key];
+  let label = meterLabelFor(key);
   if (!label) {
     label = typeof b.label === 'string' && b.label.length <= 200 && !HAS_CONTROL.test(b.label) && /^Claude · /.test(b.label)
       ? b.label : 'Claude · ' + key.replace(/_/g, ' ');
   }
+  if (typeof label !== 'string') return null;
   return { key, label, pct: Math.max(0, Math.min(100, b.pct)), resetsAt };
 }
 
@@ -5810,7 +5841,7 @@ function pidLooksLikeClaude(pid, now) {
     const done = (name) => pidImages.set(pid, { name, at: Date.now(), pending: false });
     try {
       const args = mode === 'tasklist' ? ['/FI', 'PID eq ' + pid, '/FO', 'CSV', '/NH'] : ['-o', 'comm=', '-p', String(pid)];
-      require('child_process').execFile(mode === 'tasklist' ? 'tasklist' : 'ps', args, { windowsHide: true, timeout: 5000 }, (err, out) => {
+      require('child_process').execFile(mode === 'tasklist' ? system32Exe('tasklist.exe') : 'ps', args, { windowsHide: true, timeout: 5000 }, (err, out) => {
         let name = null;
         if (!err && typeof out === 'string') {
           const s = out.trim();
@@ -6200,7 +6231,9 @@ function statuslineMeterPcts(s) {
   const out = {};
   if (s.meters && s.meters.enabled && Array.isArray(s.meters.buckets)) {
     const fh = s.meters.buckets.find((b) => b.key === 'five_hour');
-    const wk = s.meters.buckets.find((b) => b.key === 'seven_day' || b.key === 'seven_day_overall');
+    // A rolled-over weekly window is left out (the status line then falls
+    // back to the rate_limits Claude Code passes on stdin), like Codex's.
+    const wk = s.meters.buckets.find((b) => (b.key === 'seven_day' || b.key === 'seven_day_overall') && !b.stale);
     if (fh) out.claudeFiveHour = Math.round(fh.pct);
     // Additive: the tray shows its neutral base icon for stale data (the
     // tooltip still carries the last %).
@@ -6309,12 +6342,24 @@ function metersForPayload(background) {
   if (due && bgOk) {
     refreshAccountMeters(); // async; next poll picks it up
   }
+  const now = Date.now();
   return {
     enabled: true,
     status: metersState.status === 'off' ? 'loading' : metersState.status,
     // Attach the burn-rate projection per bucket (null until observed long
     // enough). Fresh objects — the state buckets stay unclobbered.
-    buckets: (metersState.buckets || []).map((b) => ({ ...b, projLeftAtReset: projectedLeftAtReset(b) })),
+    // `stale` (the Codex snapshot rule): a window whose resetsAt has passed
+    // rolled over since this reading, so its % says nothing about the new
+    // window. Last-good rows outlive their windows whenever no fresh reading
+    // arrives — a 429 backoff, an expired login, a failed check, and above
+    // all a reading restored from meters-cache.json at start-up — and a stale
+    // row is skipped by computeAlerts, flagged to the tray / status line
+    // (statuslineMeterPcts), dimmed on the dashboard and dropped by the strip.
+    buckets: (metersState.buckets || []).map((b) => ({
+      ...b,
+      stale: b.resetsAt != null && b.resetsAt <= now,
+      projLeftAtReset: projectedLeftAtReset(b),
+    })),
     fetchedAt: metersState.fetchedAt,
     lastGoodAt: metersState.lastGoodAt,
     error: metersState.error,
@@ -6728,7 +6773,7 @@ function startTray(port) {
     return;
   }
   try {
-    const child = require('child_process').spawn('powershell.exe',
+    const child = require('child_process').spawn(powershellExe(),
       ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', scriptPath],
       { detached: true, stdio: 'ignore', windowsHide: true });
     // Spawn failures surface as an ASYNC 'error' event, not a throw — without
@@ -6779,11 +6824,23 @@ function findOpenUsage() {
   openusageMemo = { at: now, key, path: resolved };
   return resolved;
 }
+// A Windows builtin by ABSOLUTE path under %SystemRoot%\System32. A bare
+// name is looked up in the CURRENT folder first (libuv's search_path, like
+// CreateProcess), and the server's cwd is wherever it was started — the exe's
+// own folder on a double-click, e.g. Downloads for a portable copy — so a
+// tasklist.exe / reg.exe / powershell.exe planted there would run instead.
+// Off Windows (test hooks only, e.g. BURNGLASS_IMAGE_CHECK=tasklist) the bare
+// name without ".exe" is returned, as before.
+function system32Exe(...parts) {
+  if (process.platform !== 'win32') return parts[parts.length - 1].replace(/\.exe$/i, '');
+  return path.join(process.env.SystemRoot || process.env.windir || 'C:\\Windows', 'System32', ...parts);
+}
+function powershellExe() { return system32Exe('WindowsPowerShell', 'v1.0', 'powershell.exe'); }
 function openusageRunning(exe, cb) {
   // tasklist ships with Windows — still zero runtime dependencies.
   const name = path.basename(exe);
   try {
-    require('child_process').execFile('tasklist', ['/FI', 'IMAGENAME eq ' + name, '/FO', 'CSV', '/NH'],
+    require('child_process').execFile(system32Exe('tasklist.exe'), ['/FI', 'IMAGENAME eq ' + name, '/FO', 'CSV', '/NH'],
       { windowsHide: true }, (err, out) => {
         cb(!err && typeof out === 'string' && out.toLowerCase().includes(name.toLowerCase()));
       });
@@ -6796,7 +6853,7 @@ function openusageRunning(exe, cb) {
 function imagesRunning(names, cb) {
   const want = new Set(names.map((n) => String(n).toLowerCase()));
   try {
-    require('child_process').execFile('tasklist', ['/FO', 'CSV', '/NH'],
+    require('child_process').execFile(system32Exe('tasklist.exe'), ['/FO', 'CSV', '/NH'],
       { windowsHide: true, maxBuffer: 8 * 1024 * 1024 }, (err, out) => {
         if (err || typeof out !== 'string') return cb(false);
         for (const line of out.split(/\r?\n/)) {
@@ -6951,6 +7008,22 @@ function launchPulseStrip() {
 // Never fatal and never blocking: every failure is logged, reported in
 // payload.strip.refresh, and the server runs on.
 //
+// A FAILED refresh is retried, so one passing failure (a GitHub 5xx or 403
+// rate limit, a network blip at the relaunch, a server stopped during the
+// ~100 MB download, a swap that hits a locked file) does not leave the strip
+// on the old version until the next release. <home>/strip-refresh.json
+// ({v, version, status: failed|pending, at, attempts, error?, pid?}) exists
+// only while a refresh of THIS version is owed: "pending" is written when an
+// attempt starts (a process that dies mid-download leaves it behind), the
+// outcome replaces it, and any result but a failure removes it. A later
+// start of the same version retries a failed or interrupted refresh under
+// the same gates (packaged Windows, updateCheck, no stripPath); within a
+// process a failure is retried on a timer (30 min, doubling, at most 6 h).
+// At most STRIP_REFRESH_MAX_ATTEMPTS attempts per version — after that the
+// failure stays in the payload (the System section's strip row shows it with
+// the release link) and nothing is fetched any more. Never written when the
+// home IS ~/.pulse (hard rule 3b: nothing there is deleted).
+//
 // Test hooks (envv — BURNGLASS_* or PULSE_*; the real after-update condition
 // is the --after-update flag itself, which a suite passes on the command line):
 //   BURNGLASS_STRIP_REFRESH_FORCE=1   treat this process as the packaged
@@ -6966,6 +7039,8 @@ function launchPulseStrip() {
 //       taskkill argv to <dir>/kills.log and removes `running` (kept when
 //       <dir>/sticky exists — a strip that will not die); a launch appends
 //       "launch <exe>" (or "already-running <exe>") to <dir>/launches.log
+//   BURNGLASS_STRIP_REFRESH_RETRY_MS=<ms>  the in-process retry's first delay
+//       (default 30 min; doubles per attempt, capped at 6 h)
 const STRIP_NAMES = ['burnglass-strip.exe', 'pulse-strip.exe'];
 // The real strip is a ~100 MB self-contained .NET exe; anything this small is
 // an error page or a truncated file, whatever its digest says.
@@ -6974,6 +7049,15 @@ const STRIP_DOWNLOAD_MAX_MS = 10 * 60 * 1000;
 const STRIP_STOP_WAIT_MS = 5000;
 const STRIP_RELAUNCH_DELAY_MS = 1500;
 let stripRefreshState = null; // payload.strip.refresh
+const STRIP_REFRESH_FILE = 'strip-refresh.json';
+const STRIP_REFRESH_MAX_ATTEMPTS = 5;
+const STRIP_REFRESH_RETRY_MAX_MS = 6 * 3600e3;
+let stripRefreshAttempts = 0;      // attempts for PULSE_VERSION so far (persisted in the marker)
+let stripRefreshBusy = false;      // an attempt is in flight
+let stripRefreshRetryTimer = null;
+let stripRefreshRetryAt = null;    // when the in-process retry fires (payload)
+let stripRefreshUpdateCheck = false; // the listen callback's updateCheck gate
+let stripLaunchLoopback = false;   // bound to loopback: the server may launch the strip
 
 function stripExeDir() { return envv('STRIP_EXE_DIR') || path.dirname(process.execPath); }
 function stripProcStub() { return envv('STRIP_PROC_STUB') || ''; }
@@ -7009,13 +7093,109 @@ function insideLegacyHome(p) {
   return P === L || P.startsWith(L.endsWith(path.sep) ? L : L + path.sep);
 }
 function setStripRefresh(status, extra) {
-  stripRefreshState = Object.assign({ status, at: Date.now(), version: PULSE_VERSION }, extra || {});
+  stripRefreshState = Object.assign({ status, at: Date.now(), version: PULSE_VERSION, attempts: stripRefreshAttempts }, extra || {});
   summaryMemo = { at: 0, payload: null }; // payload.strip carries it
+  // Owed again (failed) → the marker keeps it for the next start; anything
+  // else settles this version's refresh.
+  if (status === 'failed') {
+    writeStripRefreshMarker({ status, at: stripRefreshState.at, attempts: stripRefreshAttempts, error: stripRefreshState.error || null });
+  } else {
+    removeStripRefreshMarker();
+  }
 }
 function stripRefreshForPayload() {
   const s = stripRefreshState;
   if (!s) return null;
-  return Object.assign({}, s, s.files ? { files: s.files.map((f) => Object.assign({}, f)) } : {});
+  const out = Object.assign({}, s, s.files ? { files: s.files.map((f) => Object.assign({}, f)) } : {});
+  if (s.status === 'failed') {
+    // Additive: how the failure will heal — an in-process retry at retryAt,
+    // else one at the next start while retriesLeft > 0, else by hand.
+    out.retriesLeft = Math.max(0, STRIP_REFRESH_MAX_ATTEMPTS - (s.attempts || 0));
+    out.retryAt = stripRefreshRetryAt;
+    out.checking = stripRefreshBusy;
+  }
+  return out;
+}
+
+// ---- the retry marker (<home>/strip-refresh.json) ----
+function stripRefreshMarkerPath() {
+  // Hard rule 3(b): the marker is removed again, and nothing under ~/.pulse
+  // is ever deleted — a run whose home IS the legacy folder keeps it in
+  // memory only (its refresh is skipped there anyway).
+  const home = appHome();
+  if (sameEntry(home, legacyHomePath())) return null;
+  return path.join(home, STRIP_REFRESH_FILE);
+}
+// Re-validated: it is only data on disk. Null when absent or unusable.
+function readStripRefreshMarker() {
+  const f = stripRefreshMarkerPath();
+  if (!f) return null;
+  let j = null;
+  try {
+    const st = fs.statSync(f);
+    if (!st.isFile() || st.size > 64 * 1024) return null;
+    j = JSON.parse(fs.readFileSync(f, 'utf8'));
+  } catch (_) { return null; }
+  if (!j || typeof j !== 'object' || Array.isArray(j) || j.v !== 1) return null;
+  if (typeof j.version !== 'string' || !j.version || j.version.length > 64) return null;
+  if (j.status !== 'failed' && j.status !== 'pending') return null;
+  const attempts = Number.isInteger(j.attempts) && j.attempts > 0 ? Math.min(j.attempts, 1000) : 1;
+  const at = typeof j.at === 'number' && isFinite(j.at) && j.at > 0 ? j.at : null;
+  const error = typeof j.error === 'string' && j.error ? j.error.replace(/[\x00-\x1f\x7f-\x9f]/g, ' ').slice(0, 400) : null;
+  const pid = Number.isInteger(j.pid) && j.pid > 0 ? j.pid : null;
+  return { version: j.version, status: j.status, attempts, at, error, pid };
+}
+function writeStripRefreshMarker(m) {
+  const f = stripRefreshMarkerPath();
+  if (!f) return;
+  const body = Object.assign({ v: 1, version: PULSE_VERSION }, m);
+  const tmp = f + '.' + process.pid + '.tmp';
+  try {
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(tmp, JSON.stringify(body));
+    fs.renameSync(tmp, f);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch (_) {}
+    console.warn('[burnglass] strip refresh: could not save ' + homeLabel(STRIP_REFRESH_FILE) + ' (' + stripErrText(e) + ') — a failure is not retried after a restart');
+  }
+}
+function removeStripRefreshMarker() {
+  const f = stripRefreshMarkerPath();
+  if (!f) return;
+  try { fs.unlinkSync(f); } catch (_) { /* none */ }
+}
+function stripRefreshRetryBaseMs() {
+  const n = Number(envv('STRIP_REFRESH_RETRY_MS'));
+  return isFinite(n) && n > 0 ? n : 30 * 60 * 1000;
+}
+// In-process retry of a failed attempt (at most one timer; unref'd).
+function scheduleStripRefreshRetry() {
+  const s = stripRefreshState;
+  if (stripRefreshRetryTimer || !s || s.status !== 'failed' || stripRefreshAttempts >= STRIP_REFRESH_MAX_ATTEMPTS) return;
+  const delay = Math.min(stripRefreshRetryBaseMs() * Math.pow(2, Math.max(0, stripRefreshAttempts - 1)), STRIP_REFRESH_RETRY_MAX_MS);
+  stripRefreshRetryAt = Date.now() + delay;
+  summaryMemo = { at: 0, payload: null };
+  console.log('[burnglass] strip refresh: retrying in ~' + Math.max(1, Math.round(delay / 60000)) + 'm (attempt ' +
+    (stripRefreshAttempts + 1) + ' of ' + STRIP_REFRESH_MAX_ATTEMPTS + ')');
+  stripRefreshRetryTimer = setTimeout(() => {
+    stripRefreshRetryTimer = null;
+    stripRefreshRetryAt = null;
+    if (stripRefreshBusy) return;
+    console.log('[burnglass] strip refresh: retrying the failed refresh to v' + PULSE_VERSION);
+    try {
+      runStripRefreshAttempt((res) => {
+        if (!res || !(res.swapped > 0)) return;
+        // Files changed under a strip that may be running: a server-managed
+        // one is restarted on the new file — only if it IS running (the user
+        // may have closed it; the next start launches it).
+        if (readConfig().strip === true && stripLaunchLoopback) launchStripAfterRefresh(res, { onlyRestart: true });
+        else console.log('[burnglass] strip refresh: the strip runs v' + PULSE_VERSION + ' from its next start');
+      });
+    } catch (e) {
+      console.warn('[burnglass] strip refresh failed: ' + ((e && e.message) || e));
+    }
+  }, delay);
+  if (stripRefreshRetryTimer.unref) stripRefreshRetryTimer.unref();
 }
 // Payload/marker-safe error text: fs errors become "CODE (syscall)" (their
 // messages carry full paths); everything else is our own or a network
@@ -7247,24 +7427,66 @@ async function runStripRefresh(targets) {
 // Entry point (listen callback). Calls done(result) exactly once — at once
 // when there is nothing to refresh on this start (result null, or a skip),
 // else after the refresh settles; result.swapped > 0 when a file changed.
+// Applies on the start right after an update, and on a later start of the
+// same version that still owes one (a failed or interrupted attempt — the
+// strip-refresh.json marker), up to STRIP_REFRESH_MAX_ATTEMPTS.
 function refreshStripAfterUpdate(opts, done) {
   done = once(done || (() => {}));
-  if (!IS_AFTER_UPDATE || !stripRefreshPlatformOk()) return done(null);
+  if (!stripRefreshPlatformOk()) return done(null);
+  stripRefreshUpdateCheck = !!(opts && opts.updateCheck);
+  const marker = readStripRefreshMarker();
+  const same = !!(marker && marker.version === PULSE_VERSION);
+  if (marker && !same) removeStripRefreshMarker(); // an older release's leftover
+  stripRefreshAttempts = same ? marker.attempts : 0;
+  if (!IS_AFTER_UPDATE) {
+    // A "pending" marker whose process is still alive is another server's
+    // attempt in flight (a second port on the same home) — not ours to redo.
+    const inFlightElsewhere = same && marker.status === 'pending' && marker.pid && marker.pid !== process.pid && pidAlive(marker.pid);
+    if (!same || inFlightElsewhere) return done(null);
+    const shown = { status: 'failed', at: marker.at || Date.now(), version: PULSE_VERSION, attempts: marker.attempts,
+      error: marker.status === 'pending' ? 'the previous attempt was interrupted' : (marker.error || 'unknown error') };
+    if (marker.attempts >= STRIP_REFRESH_MAX_ATTEMPTS) {
+      // Given up: nothing is fetched any more, but the failure stays visible.
+      stripRefreshState = shown;
+      summaryMemo = { at: 0, payload: null };
+      console.warn('[burnglass] strip refresh: v' + PULSE_VERSION + ' could not be installed after ' + marker.attempts +
+        ' attempts — download burnglass-strip.exe from ' + RELEASES_PAGE);
+      return done(null);
+    }
+    stripRefreshState = shown; // until this attempt settles
+    summaryMemo = { at: 0, payload: null };
+    console.log('[burnglass] strip refresh: retrying the ' + (marker.status === 'pending' ? 'interrupted' : 'failed') +
+      ' refresh to v' + PULSE_VERSION + ' (attempt ' + (marker.attempts + 1) + ' of ' + STRIP_REFRESH_MAX_ATTEMPTS + ')');
+  }
+  runStripRefreshAttempt(done);
+}
+
+// One attempt under the gates (updateCheck, stripPath, something to refresh);
+// done(result) once, as above. Shared by the start-up path and the retry timer.
+function runStripRefreshAttempt(done) {
+  done = once(done || (() => {}));
   const skip = (reason) => {
     setStripRefresh('skipped', { reason });
     console.log('[burnglass] strip refresh skipped: ' + reason);
     return done(stripRefreshState);
   };
-  if (!opts || !opts.updateCheck) return skip('update checks are off (--no-update-check / "updateCheck": false)');
+  if (!stripRefreshUpdateCheck || readConfig().updateCheck === false) return skip('update checks are off (--no-update-check / "updateCheck": false)');
   const c = readConfig();
   if (typeof c.stripPath === 'string' && c.stripPath) return skip('"stripPath" is set — a strip at a path you chose is never replaced');
+  stripRefreshAttempts++;
   let found;
   try { found = stripRefreshTargets(); } catch (e) {
     setStripRefresh('failed', { error: stripErrText(e) });
     console.warn('[burnglass] strip refresh failed: ' + ((e && e.message) || e));
+    scheduleStripRefreshRetry();
     return done(stripRefreshState);
   }
   if (!found.targets.length) return skip(found.reason);
+  // Written before the first byte moves: a process that dies mid-download
+  // leaves "pending" behind, and the next start retries it.
+  writeStripRefreshMarker({ status: 'pending', at: Date.now(), attempts: stripRefreshAttempts, pid: process.pid });
+  stripRefreshBusy = true;
+  summaryMemo = { at: 0, payload: null };
   console.log('[burnglass] strip refresh: checking ' + found.targets.map((t) => t.name).join(', ') + ' against release v' + PULSE_VERSION);
   runStripRefresh(found.targets).then((st) => {
     if (st.status === 'failed') console.warn('[burnglass] strip refresh failed: ' + st.error);
@@ -7274,7 +7496,12 @@ function refreshStripAfterUpdate(opts, done) {
     setStripRefresh('failed', { error: stripErrText(e) });
     console.warn('[burnglass] strip refresh failed: ' + ((e && e.message) || e));
     return stripRefreshState;
-  }).then((st) => done(st))
+  }).then((st) => {
+    stripRefreshBusy = false;
+    summaryMemo = { at: 0, payload: null };
+    scheduleStripRefreshRetry();
+    done(st);
+  })
     // A throw in the launch that follows must not become an unhandled
     // rejection (which ends the process on Node >= 15).
     .catch((e) => console.warn('[burnglass] strip relaunch after the refresh failed: ' + ((e && e.message) || e)));
@@ -7283,11 +7510,24 @@ function refreshStripAfterUpdate(opts, done) {
 // After the refresh (or at once when it did not apply): a server-managed
 // strip starts once. When files were swapped and the OLD strip still runs, it
 // is stopped first (the mutex would bounce the new one) and waited for.
-function launchStripAfterRefresh(res) {
-  if (!res || !(res.swapped > 0)) return launchPulseStrip();
-  const relaunch = () => { stripMemo = { at: 0, key: null, path: null }; launchPulseStrip(); };
+// opts.onlyRestart (the in-process retry): only a strip that IS running is
+// restarted — nothing is launched otherwise.
+function launchStripAfterRefresh(res, opts) {
+  const onlyRestart = !!(opts && opts.onlyRestart);
+  if (!res || !(res.swapped > 0)) return onlyRestart ? undefined : launchPulseStrip();
+  const relaunch = () => {
+    stripMemo = { at: 0, key: null, path: null };
+    // Re-read at the moment of the launch: the stop + wait + pause below
+    // takes up to ~6.5 s, and a dashboard "off" in that window must win (the
+    // caller's check ran before it).
+    if (readConfig().strip !== true) {
+      console.log('[burnglass] strip refresh: the strip was turned off meanwhile — not starting it again');
+      return;
+    }
+    launchPulseStrip();
+  };
   stripRunning((running) => {
-    if (!running) return relaunch();
+    if (!running) return onlyRestart ? undefined : relaunch();
     console.log('[burnglass] strip refresh: restarting the running strip on v' + PULSE_VERSION);
     stopStrips(() => waitStripsGone(Date.now() + STRIP_STOP_WAIT_MS, (gone) => {
       if (!gone) console.warn('[burnglass] strip refresh: the old strip did not exit within ' + (STRIP_STOP_WAIT_MS / 1000) + ' s — it runs the new version from its next start');
@@ -7313,13 +7553,14 @@ function stopStrips(cb) {
     if (!isFileAt(path.join(stub, 'sticky'))) { try { fs.unlinkSync(path.join(stub, 'running')); } catch (_) {} }
     return cb();
   }
-  // taskkill.exe from System32 by absolute path (a copy beside the exe or in
-  // the cwd must not be picked up); argv array, never a shell string. Its exit
-  // status is ignored — "not found" for the image that was not running is
-  // normal; waitStripsGone is the real check. Deliberately NO /T: a browser
-  // the strip opened ("Open dashboard") can be its child process, and a tree
-  // kill would close the user's browser.
-  const exe = path.join(process.env.SystemRoot || process.env.windir || 'C:\\Windows', 'System32', 'taskkill.exe');
+  // taskkill.exe from System32 by absolute path (system32Exe: a copy beside
+  // the exe or in the cwd must not be picked up — the tasklist polls in
+  // stripRunning / waitStripsGone go the same way); argv array, never a shell
+  // string. Its exit status is ignored — "not found" for the image that was
+  // not running is normal; waitStripsGone is the real check. Deliberately NO
+  // /T: a browser the strip opened ("Open dashboard") can be its child
+  // process, and a tree kill would close the user's browser.
+  const exe = system32Exe('taskkill.exe');
   try {
     require('child_process').execFile(exe, args, { windowsHide: true, timeout: 15000 }, () => cb());
   } catch (_) { cb(); }
@@ -7405,7 +7646,7 @@ function readStartupEntry() {
   }
   if (process.platform !== 'win32') return { enabled: false, command: '' };
   try {
-    const out = require('child_process').execFileSync('reg.exe',
+    const out = require('child_process').execFileSync(system32Exe('reg.exe'),
       ['query', STARTUP_RUN_KEY, '/v', STARTUP_VALUE_NAME],
       { windowsHide: true, encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] });
     // "    Pulse    REG_SZ    "C:\...\pulse.exe" --no-open"  (lazy + \s*$ keeps
@@ -7456,11 +7697,11 @@ function setStartup(on, exe) {
   const opts = { windowsHide: true, timeout: 10000, stdio: ['ignore', 'ignore', 'pipe'] };
   try {
     if (on) {
-      cp.execFileSync('reg.exe',
+      cp.execFileSync(system32Exe('reg.exe'),
         ['add', STARTUP_RUN_KEY, '/v', STARTUP_VALUE_NAME, '/t', 'REG_SZ', '/d', command, '/f'], opts);
     } else {
       try {
-        cp.execFileSync('reg.exe', ['delete', STARTUP_RUN_KEY, '/v', STARTUP_VALUE_NAME, '/f'], opts);
+        cp.execFileSync(system32Exe('reg.exe'), ['delete', STARTUP_RUN_KEY, '/v', STARTUP_VALUE_NAME, '/f'], opts);
       } catch (e) {
         if (!e || e.status !== 1) throw e; // status 1 = already absent, which IS the goal
       }
@@ -7970,6 +8211,7 @@ function startServer(port, host, opts) {
     // back at once, so the launch is unchanged. Config is re-read then — a
     // dashboard toggle during a long download wins.
     const stripLoopback = LOOPBACK_HOSTS.has(host);
+    stripLaunchLoopback = stripLoopback; // the retry timer's launch gate
     const afterStripRefresh = once((res) => {
       if (readConfig().strip === true && stripLoopback) launchStripAfterRefresh(res);
       else if (res && res.swapped > 0) console.log('[burnglass] strip refresh: the strip runs v' + PULSE_VERSION + ' from its next start');
@@ -8174,7 +8416,7 @@ function createShortcuts(specs) {
     if (s.description) lines.push(`$s${i}.Description = ${psQuote(s.description)};`);
     lines.push(`$s${i}.Save();`);
   });
-  require('child_process').execFileSync('powershell.exe',
+  require('child_process').execFileSync(powershellExe(),
     ['-NoProfile', '-NonInteractive', '-Command', lines.join(' ')],
     { stdio: 'ignore', windowsHide: true, timeout: 30000 });
 }
@@ -8186,7 +8428,7 @@ function desktopDirs() {
   if (desktopDirsMemo) return desktopDirsMemo;
   const out = [];
   try {
-    const s = require('child_process').execFileSync('powershell.exe',
+    const s = require('child_process').execFileSync(powershellExe(),
       ['-NoProfile', '-NonInteractive', '-Command', "[Environment]::GetFolderPath('Desktop')"],
       { encoding: 'utf8', windowsHide: true, timeout: 20000 }).trim();
     if (s) out.push(s);
@@ -8274,7 +8516,7 @@ function localProgramsDir() {
 function regQueryValue(key, name) {
   if (process.platform !== 'win32') return null;
   try {
-    const out = require('child_process').execFileSync('reg.exe', ['query', key, '/v', name],
+    const out = require('child_process').execFileSync(system32Exe('reg.exe'), ['query', key, '/v', name],
       { windowsHide: true, encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] });
     const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const m = new RegExp('^\\s*' + esc + '\\s+REG_[A-Z_]+\\s+(.*?)\\s*$', 'm').exec(out || '');
@@ -8283,7 +8525,7 @@ function regQueryValue(key, name) {
 }
 function regDeleteKey(key) {
   try {
-    require('child_process').execFileSync('reg.exe', ['delete', key, '/f'],
+    require('child_process').execFileSync(system32Exe('reg.exe'), ['delete', key, '/f'],
       { windowsHide: true, timeout: 10000, stdio: ['ignore', 'ignore', 'pipe'] });
     return true;
   } catch (e) {
@@ -8336,7 +8578,7 @@ function shortcutTargets(paths) {
   for (const p of existing) lines.push(`try { $o[${psQuote(p)}] = $W.CreateShortcut(${psQuote(p)}).TargetPath } catch { $o[${psQuote(p)}] = '' };`);
   lines.push('$o | ConvertTo-Json -Compress');
   try {
-    const raw = require('child_process').execFileSync('powershell.exe',
+    const raw = require('child_process').execFileSync(powershellExe(),
       ['-NoProfile', '-NonInteractive', '-Command', lines.join(' ')],
       { encoding: 'utf8', windowsHide: true, timeout: 30000 });
     const j = JSON.parse(String(raw).replace(/^﻿/, '').trim() || '{}');
@@ -8433,7 +8675,7 @@ function installApp() {
   ];
   try {
     for (const [name, type, data] of vals) {
-      require('child_process').execFileSync('reg.exe',
+      require('child_process').execFileSync(system32Exe('reg.exe'),
         ['add', UNINSTALL_KEY, '/v', name, '/t', type, '/d', data, '/f'],
         { windowsHide: true, timeout: 10000, stdio: ['ignore', 'ignore', 'pipe'] });
     }
@@ -8880,8 +9122,9 @@ function summaryLines(s) {
   // from the local rollout snapshots, so they can be present on their own.
   const meterRows = [];
   const buckets = (s.meters && s.meters.enabled && Array.isArray(s.meters.buckets)) ? s.meters.buckets : [];
-  const fh = buckets.find((b) => b.key === 'five_hour');
-  const wk = buckets.find((b) => b.key === 'seven_day' || b.key === 'seven_day_overall');
+  // A window that rolled over since the reading (stale) has no current % to print.
+  const fh = buckets.find((b) => b.key === 'five_hour' && !b.stale);
+  const wk = buckets.find((b) => (b.key === 'seven_day' || b.key === 'seven_day_overall') && !b.stale);
   if (fh) meterRows.push(['5h', fh]);
   if (wk) meterRows.push(['weekly', wk]);
   const cx = (s.codexMeters && Array.isArray(s.codexMeters.buckets) ? s.codexMeters.buckets : [])

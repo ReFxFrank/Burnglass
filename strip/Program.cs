@@ -494,6 +494,22 @@ static class MeterScale
         double pct = limit > 0 && double.IsFinite(used) ? used * 100 / limit : 0;
         return (int)Math.Round(Math.Clamp(pct, 0, 100), MidpointRounding.AwayFromZero);
     }
+
+    /// The UNROUNDED "% used" of a progress line, for Tone: its "pct" when present (SummaryTransform
+    /// writes it), else used / limit as before (a payload saved by an older strip). The dashboard's
+    /// meterTone and the server's alerts compare the raw value, so the strip must too — 79.5% is
+    /// plain there, while its printed (rounded) 80 would have been amber here.
+    public static double LinePct(JsonElement line)
+    {
+        if (line.ValueKind == JsonValueKind.Object && line.TryGetProperty("pct", out var p)
+            && p.ValueKind == JsonValueKind.Number && p.TryGetDouble(out var pv) && double.IsFinite(pv))
+            return Math.Clamp(pv, 0, 100);
+        double used = line.ValueKind == JsonValueKind.Object && line.TryGetProperty("used", out var u)
+            && u.ValueKind == JsonValueKind.Number && u.TryGetDouble(out var uv) && double.IsFinite(uv) ? uv : 0;
+        double limit = line.ValueKind == JsonValueKind.Object && line.TryGetProperty("limit", out var l)
+            && l.ValueKind == JsonValueKind.Number && l.TryGetDouble(out var lv) && lv > 0 ? lv : 100;
+        return Math.Clamp(used * 100 / limit, 0, 100);
+    }
 }
 
 /// Transforms the server's /api/summary JSON into the providers[] schema the ported popover page and
@@ -605,6 +621,11 @@ static class SummaryTransform
             if (metersEnabled && meters.TryGetProperty("buckets", out var bks) && bks.ValueKind == JsonValueKind.Array)
                 foreach (var b in bks.EnumerateArray())
                 {
+                    // A window that rolled over since the reading (the server marks it stale — a
+                    // restored or rate-limited last-good row outlives its window) has no current %,
+                    // exactly like a stale Codex window below. With none left and a login problem,
+                    // the sign-in card shows.
+                    if (b.TryGetProperty("stale", out var cst) && cst.ValueKind == JsonValueKind.True) continue;
                     string key = b.TryGetProperty("key", out var kk) && kk.ValueKind == JsonValueKind.String ? kk.GetString() ?? "" : "";
                     double pct = Num(b, "pct");
                     long? resetsAt = Millis(b, "resetsAt");
@@ -716,14 +737,17 @@ static class SummaryTransform
             double today = daily.Count > 0 ? daily[^1].GetValueOrDefault(id) : 0;
             double week7 = 0;
             for (int d = Math.Max(0, daily.Count - 7); d < daily.Count; d++) week7 += daily[d].GetValueOrDefault(id);
+            // Raw amounts, NOT pre-rounded: the popover rounds to cents once, like the dashboard's
+            // money() and this transform's own Money() for the provider card. A 4-decimal round
+            // first turned 12.344996 into 12.345 → "$12.35" beside "$12.34" everywhere else.
             rows.Add(new JsonObject
             {
                 ["id"] = id,
                 ["label"] = SourceLabel(id, meta),
                 ["color"] = SourceSeries[i % SourceSeries.Length],
-                ["today"] = Math.Round(today, 4),
-                ["week7"] = Math.Round(week7, 4),
-                ["cost30"] = Math.Round(cost30.GetValueOrDefault(id), 4),
+                ["today"] = Finite(today),
+                ["week7"] = Finite(week7),
+                ["cost30"] = Finite(cost30.GetValueOrDefault(id)),
             });
         }
         return rows;
@@ -754,6 +778,9 @@ static class SummaryTransform
     // format.kind:"percent" is REQUIRED — StripForm only counts progress lines carrying it.
     // "projected" (additive) = the server's straight-line % used at the reset, for the dashboard's
     // projection hatch; absent until the server has observed the window long enough.
+    // "pct" (additive) = the UNROUNDED % used: tones are computed from it (MeterScale.LinePct), as
+    // the dashboard's meterTone and the server's alerts compare the raw value — a rounded 79.5 → 80
+    // turned amber here while the dashboard stayed plain. "used" stays the whole number printed.
     private static JsonObject Progress(string label, double usedPct, long? resetsAtMs, long periodMs, int? projectedUsed = null)
     {
         var o = new JsonObject
@@ -761,6 +788,7 @@ static class SummaryTransform
             ["label"] = label,
             ["type"] = "progress",
             ["used"] = (int)Math.Round(Math.Clamp(usedPct, 0, 100), MidpointRounding.AwayFromZero), // JS Math.round, as the dashboard
+            ["pct"] = Math.Clamp(Finite(usedPct), 0, 100),
             ["limit"] = 100,
             ["format"] = new JsonObject { ["kind"] = "percent" },
             ["periodDurationMs"] = periodMs,
@@ -842,6 +870,9 @@ static class SummaryTransform
     private static string Classify(string source) =>
         source == "codex" ? "codex" :
         AgentSources.Contains(source) ? source : "claude";
+
+    // JSON has no NaN/Infinity (System.Text.Json throws on them): anything non-finite becomes 0.
+    private static double Finite(double v) => double.IsFinite(v) ? v : 0;
 
     private static double Num(JsonElement el, string prop) =>
         el.TryGetProperty(prop, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetDouble(out var d) && double.IsFinite(d) ? d : 0;
@@ -1256,7 +1287,8 @@ static class UsageMerge
 
                 // Carry forward only meters that are still MEANINGFUL. A window whose
                 // resetsAt has passed has rolled over — the transformer dropped it on
-                // purpose (the server marks those buckets stale), and re-inserting it here
+                // purpose (the server marks those buckets stale, Claude's and Codex's
+                // alike, and ToUi skips them), and re-inserting it here
                 // would chain a dead percentage forward through every later refresh and
                 // across restarts, rendering "Resets in 1m" forever.
                 var carried = previousLines

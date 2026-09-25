@@ -3,7 +3,9 @@
 //   /usage-ok, /usage-401   fixed responses (meters.test.sh)
 //   /usage                  answers per the current mode (meters-cache.test.sh):
 //                           ok (the /usage-ok body) | 429 (+ Retry-After) | 500
-//   /mode?m=ok|429|500[&retry=<seconds>]   switch the /usage mode
+//                           | proto (the ok body plus top-level "__proto__"
+//                           and "constructor" keys, as raw JSON text)
+//   /mode?m=ok|429|500|proto[&retry=<seconds>]   switch the /usage mode
 //   /count                  {"hits": n} — requests seen on /usage* so far
 const http = require('http');
 const PORT = parseInt(process.argv[2], 10) || 4870;
@@ -59,10 +61,14 @@ http.createServer((q, s) => {
     return;
   }
   if (u.pathname.startsWith('/usage')) hits++;
-  if (u.pathname === '/usage-ok' || (u.pathname === '/usage' && mode === 'ok')) {
+  if (u.pathname === '/usage-ok' || (u.pathname === '/usage' && (mode === 'ok' || mode === 'proto'))) {
     if (auth !== 'Bearer sk-test-oauth-token') { s.writeHead(401); s.end('{"error":"bad token"}'); return; }
     s.writeHead(200, { 'Content-Type': 'application/json' });
-    s.end(okBody());
+    // JSON.parse turns a "__proto__" key into an OWN property (an object
+    // literal would set the prototype instead), so it is spliced in as text.
+    s.end(u.pathname === '/usage' && mode === 'proto'
+      ? '{"__proto__":{"utilization":85,"resets_at":null},"constructor":{"utilization":20,"resets_at":null},"prototype":{"utilization":30},' + okBody().slice(1)
+      : okBody());
     return;
   }
   if (u.pathname === '/usage' && mode === '429') {

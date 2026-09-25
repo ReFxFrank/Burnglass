@@ -208,9 +208,11 @@ code, .code {
 /* 8 px side padding + 8 px item padding: every rail row's content (nav icons,
    radios, checkboxes) starts 16 px in, level with the brand mark, and the
    source rows keep room for a label like "Claude Desktop" beside a
-   four-figure amount. The rail's own scrollbar (short windows with classic
-   scrollbars) is the thin one so it takes less of that room. The -webkit-
-   rules are only a fallback: engines with scrollbar-width/-color ignore them. */
+   four-figure amount — also while the rail scrolls (a short window, or a long
+   month list) with a classic scrollbar, which the 4 px source-row gaps leave
+   room for. That scrollbar is the thin one so it takes less of that room. The
+   -webkit- rules are only a fallback: engines with scrollbar-width/-color
+   ignore them. */
 .rail-in {
   position: sticky; top: 0; max-height: 100vh; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin;
   padding: var(--sp-4) var(--sp-2); display: flex; flex-direction: column; gap: var(--sp-5); min-height: 100vh;
@@ -279,7 +281,7 @@ code, .code {
 .cbox { width: 14px; height: 14px; border-radius: 4px; border: 1.5px solid var(--line-2); flex: none; display: grid; place-items: center; color: transparent; }
 .cbox.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 .srcrow { position: relative; }
-.srcrow .opt { gap: var(--sp-1h); } /* checkbox · swatch · label · amount: 6 px leaves the label room */
+.srcrow .opt { gap: var(--sp-1); } /* checkbox · swatch · label · amount: 4 px leaves the label room even beside the rail's thin scrollbar */
 .srcrow .only {
   position: absolute; right: 6px; top: 50%; transform: translateY(-50%); height: 20px; padding: 0 6px;
   border: 1px solid var(--line-2); border-radius: var(--r-xs); background: var(--panel-3); color: var(--text-2);
