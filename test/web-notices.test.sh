@@ -129,7 +129,7 @@ fs.writeFileSync(process.argv[1] + "/settings.json", JSON.stringify({
 }));
 ' "$CL"
   PULSE_HOME=$PH CLAUDE_DIR=$CL CODEX_DIR=$TMP/no-codex GEMINI_DIR=$TMP/no-gemini CONTINUE_DIR=$TMP/no-continue \
-  CLINE_DIR=$TMP/no-cline ROO_DIR=$TMP/no-roo PULSE_NO_TRAY_SPAWN=1 PULSE_NO_STRIP_SPAWN=1 PULSE_NO_OPENUSAGE_SPAWN=1 \
+  CLINE_DIR=$TMP/no-cline ROO_DIR=$TMP/no-roo PULSE_NO_TRAY_SPAWN=1 PULSE_NO_STRIP_SPAWN=1 \
   node "$SERVER" --port "$PORT" --no-update-check --no-open >"$TMP/srv.log" 2>&1 &
   SRV=$!
   for _ in $(seq 1 60); do curl -s -o /dev/null "http://127.0.0.1:$PORT/api/health" && break; sleep 0.2; done
@@ -438,6 +438,26 @@ const RAIL_PATCH = (j) => {
   ok(t && /release page/.test(t.text) && t.href === "https://github.com/ReFxFrank/Burnglass/releases", "System strip row: after the last attempt, the release page link (" + JSON.stringify(t) + ")");
   t = await stripRow({ status: "updated", version: "2.0.0-rc.2", at: Date.now(), attempts: 1, files: [] });
   ok(t && !/Couldn’t update/.test(t.text) && !/Update failed/.test(t.text), "System strip row: a successful refresh adds nothing");
+}
+
+// The OpenUsage launch is retired (Burnglass Strip replaced it): the System
+// integrations keep their Windows rows (startup / tray / strip) and never show
+// an OpenUsage row — not even for a payload that still carries the old key.
+{
+  const { ctx, page } = await open(1280, (j) => {
+    j.startup = { supported: true, enabled: false };
+    j.tray = { supported: true, enabled: false };
+    j.strip = { supported: true, enabled: false, path: null, refresh: null };
+    j.openusage = { supported: true, enabled: true, path: null };
+  });
+  const r = await page.evaluate(() => ({
+    names: [...document.querySelectorAll(".sec-system .tg .tg-n")].map((e) => e.textContent.trim()),
+    ou: /openusage/i.test(document.body.textContent),
+  }));
+  ok(r.names.includes("Start with Windows") && r.names.includes("Tray icon") && r.names.some((n) => /Strip$/.test(n))
+     && !r.names.some((n) => /openusage/i.test(n)) && !r.ou,
+     "System integrations: the Windows rows render, no OpenUsage row (" + JSON.stringify(r) + ")");
+  await ctx.close();
 }
 await browser.close();
 process.exit(fail);

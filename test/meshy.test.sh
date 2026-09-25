@@ -209,7 +209,7 @@ start_pulse() { # $1 = PULSE_HOME, $2 = meshy cache ms
   for i in $(seq 1 20); do curl -sf -m 2 "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1 || break; sleep 0.5; done
   PULSE_HOME=$1 CLAUDE_DIR=$CL CODEX_DIR=$TMP/nocodex \
   PULSE_MESHY_API=$API PULSE_MESHY_CACHE_MS=$2 PULSE_SUMMARY_MEMO_MS=0 \
-  PULSE_NO_TRAY_SPAWN=1 PULSE_NO_OPENUSAGE_SPAWN=1 PULSE_NO_STRIP_SPAWN=1 \
+  PULSE_NO_TRAY_SPAWN=1 PULSE_NO_STRIP_SPAWN=1 \
   PULSE_STARTUP_STUB=$TMP/startup.json \
   node "$ROOT/server.js" --port $PORT --no-update-check >>"$TMP/srv.log" 2>&1 &
   SRV=$!

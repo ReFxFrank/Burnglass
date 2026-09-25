@@ -80,7 +80,7 @@ start_srv() { # home port log [NAME=VALUE ...]
   local H=$1 P=$2 L=$3; shift 3
   env -u PULSE_HOME -u BURNGLASS_HOME -u PULSE_HISTORY_DIR -u PULSE_MODES_FILE \
     HOME="$H" CLAUDE_DIR="$CL" CODEX_DIR="$TMP/no-codex" \
-    BURNGLASS_NO_TRAY_SPAWN=1 BURNGLASS_NO_OPENUSAGE_SPAWN=1 BURNGLASS_NO_STRIP_SPAWN=1 \
+    BURNGLASS_NO_TRAY_SPAWN=1 BURNGLASS_NO_STRIP_SPAWN=1 \
     BURNGLASS_MESHY_API=http://127.0.0.1:9 BURNGLASS_SUMMARY_MEMO_MS=0 "$@" \
     node "$ROOT/server.js" --port "$P" --no-update-check >"$L" 2>&1 &
   SRV=$!

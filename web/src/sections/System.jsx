@@ -9,7 +9,7 @@
 //               daemon, packaged, update{status,latest,checkedAt,installSupported,releasesUrl,error},
 //               history{enabled,archivedDays}, meters{enabled,status,fetchedAt},
 //               discord{enabled,status,error,images{…6 slots}}, agentState,
-//               meshy{enabled,hasKey,status,fetchedAt}, tray/strip/openusage/startup{supported,enabled[,path]}
+//               meshy{enabled,hasKey,status,fetchedAt}, tray/strip/startup{supported,enabled[,path]}
 //   gfx         { mode, lite, set } → Graphics <Seg>
 //   theme       { pref, effective, set } → Theme <Seg>
 //   notify      { permission, request } → "Desktop alerts" row
@@ -21,7 +21,7 @@
 // /api/health until the version changes → reload), /api/meters/enable|disable,
 // /api/discord/enable|disable, /api/discord/images (JSON body, ONLY the edited
 // slots), /api/meshy/enable|disable (+ key in the BODY via MeshyKeyForm),
-// /api/tray/…, /api/strip/…, /api/openusage/…, /api/startup/enable|disable,
+// /api/tray/…, /api/strip/…, /api/startup/enable|disable,
 // /api/shutdown. Logs: lib.useLogs → GET /api/logs every 10 s.
 // =============================================================================
 import { useEffect, useId, useRef, useState } from 'react';
@@ -289,7 +289,6 @@ function Integrations({ data, notify, thresholds, ovr }) {
   const startup = data.startup || {};
   const tray = data.tray || {};
   const strip = data.strip || {};
-  const openusage = data.openusage || {};
 
   const actual = {
     meters: !!meters.enabled,
@@ -298,7 +297,6 @@ function Integrations({ data, notify, thresholds, ovr }) {
     startup: !!startup.enabled,
     tray: !!tray.enabled,
     strip: !!strip.enabled,
-    openusage: !!openusage.enabled,
   };
   // Drop an override once a poll agrees (or it expires).
   const sig = Object.keys(actual).map((k) => k + actual[k]).join(',') + data.generatedAt;
@@ -505,24 +503,6 @@ function Integrations({ data, notify, thresholds, ovr }) {
             }, 'Strip toggle failed: ')}
           >
             Taskbar strip companion with a popover dashboard.
-          </ToggleRow>
-        ) : null}
-
-        {openusage.supported ? (
-          <ToggleRow
-            title="OpenUsage launch"
-            on={on('openusage')}
-            status={on('openusage') && !openusage.path ? <Stat tone="warn">App not found</Stat> : onOff('openusage')}
-            busy={busy === 'openusage'}
-            note={noteFor('openusage')}
-            onToggle={(next) => toggle('openusage', next, (n, r) => {
-              if (!n) return 'OpenUsage auto-launch off. The app keeps running if open; quit it from its own menu.';
-              return r.openusage && r.openusage.path
-                ? `OpenUsage will start with ${BRAND}. Launching it now.`
-                : { text: 'On, but OpenUsageTray.exe was not found. Unzip OpenUsage anywhere and set "openusagePath" in ' + homePath(data, 'config.json') + '.', tone: 'warn' };
-            }, 'OpenUsage toggle failed: ')}
-          >
-            Starts OpenUsageTray.exe alongside {BRAND}. {BRAND} never installs, updates or closes it.
           </ToggleRow>
         ) : null}
 

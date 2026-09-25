@@ -292,7 +292,6 @@ function writeConfig(patch) {
   // memoized copy must never outlive a settings change.
   summaryMemo = { at: 0, payload: null };
   statuslineMemo = { at: 0, data: null };
-  openusageMemo = { at: 0, key: null, path: null };
   stripMemo = { at: 0, key: null, path: null };
   return next;
 }
@@ -441,7 +440,6 @@ function adoptHome(dir) {
   meshyStore = null;
   summaryMemo = { at: 0, payload: null };
   statuslineMemo = { at: 0, data: null };
-  openusageMemo = { at: 0, key: null, path: null };
   stripMemo = { at: 0, key: null, path: null };
 }
 function migrateHome() {
@@ -3713,7 +3711,6 @@ function buildSummary(sourceFilter, opts) {
   // Windows tray state — the Server panel shows the toggle only where the
   // feature exists.
   payload.tray = { supported: process.platform === 'win32', enabled: trayDesired !== null ? trayDesired : readConfig().tray === true };
-  payload.openusage = { supported: process.platform === 'win32', enabled: readConfig().openusage === true, path: findOpenUsage() };
   // refresh: the post-update strip refresh's outcome on this start (additive;
   // a failure also carries attempts / retriesLeft / retryAt / checking).
   payload.strip = { supported: process.platform === 'win32', enabled: readConfig().strip === true, path: findPulseStrip(), refresh: stripRefreshForPayload() };
@@ -6798,44 +6795,7 @@ function startTray(port) {
     console.warn('[burnglass] tray failed to start: ' + e.message);
   }
 }
-// ---- OPENUSAGE COMPANION (opt-in, Windows) -------------------------------
-// Launches CheesyPoofs346/openusage-windows (OpenUsageTray.exe — the taskbar
-// strip + popover) alongside Pulse instead of Pulse drawing its own taskbar
-// UI. Pulse only STARTS the app: it never installs, updates, or kills it,
-// and disable just stops future auto-launches. Config: `openusage: true` +
-// optional `openusagePath` (the app is portable — "unzip anywhere" — so
-// auto-detection probes a few conventional folders).
-// Memoized: payload.openusage calls this on every summary build, and the
-// configured path is arbitrary — a dead UNC path would otherwise sync-block
-// the server on each build. Busted by writeConfig alongside the other memos.
-let openusageMemo = { at: 0, key: null, path: null };
-function findOpenUsage() {
-  const c = readConfig();
-  const key = typeof c.openusagePath === 'string' ? c.openusagePath : '';
-  const now = Date.now();
-  if (openusageMemo.key === key && now - openusageMemo.at < 30000) return openusageMemo.path;
-  // statSync().isFile(), not existsSync: the natural mistake is configuring
-  // the unzipped FOLDER, which existsSync would happily accept and spawn.
-  const isFile = (p) => { try { return fs.statSync(p).isFile(); } catch { return false; } };
-  let resolved = null;
-  if (key) {
-    resolved = isFile(key) ? key : null; // an explicit path that is missing should NOT fall back
-  } else {
-    const home = os.homedir();
-    const local = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
-    const candidates = [
-      path.join(local, 'Programs', 'OpenUsage', 'OpenUsageTray.exe'),
-      path.join(home, 'OneDrive', 'Desktop', 'OpenUsage', 'OpenUsageTray.exe'),
-      path.join(home, 'Desktop', 'OpenUsage', 'OpenUsageTray.exe'),
-      path.join(home, 'Downloads', 'OpenUsage', 'OpenUsageTray.exe'),
-    ];
-    for (const p of candidates) {
-      if (isFile(p)) { resolved = p; break; }
-    }
-  }
-  openusageMemo = { at: now, key, path: resolved };
-  return resolved;
-}
+// ---- WINDOWS BUILTINS (tasklist / taskkill / reg / powershell) ------------
 // A Windows builtin by ABSOLUTE path under %SystemRoot%\System32. A bare
 // name is looked up in the CURRENT folder first (libuv's search_path, like
 // CreateProcess), and the server's cwd is wherever it was started — the exe's
@@ -6848,18 +6808,6 @@ function system32Exe(...parts) {
   return path.join(process.env.SystemRoot || process.env.windir || 'C:\\Windows', 'System32', ...parts);
 }
 function powershellExe() { return system32Exe('WindowsPowerShell', 'v1.0', 'powershell.exe'); }
-function openusageRunning(exe, cb) {
-  // tasklist ships with Windows — still zero runtime dependencies.
-  const name = path.basename(exe);
-  try {
-    require('child_process').execFile(system32Exe('tasklist.exe'), ['/FI', 'IMAGENAME eq ' + name, '/FO', 'CSV', '/NH'],
-      { windowsHide: true }, (err, out) => {
-        cb(!err && typeof out === 'string' && out.toLowerCase().includes(name.toLowerCase()));
-      });
-  } catch {
-    cb(false);
-  }
-}
 // Any of several image names running? One unfiltered tasklist (IMAGENAME
 // filters can't be OR-ed) — still a Windows builtin, still zero-dep.
 function imagesRunning(names, cb) {
@@ -6878,47 +6826,12 @@ function imagesRunning(names, cb) {
     cb(false);
   }
 }
-function launchOpenUsage() {
-  if (process.platform !== 'win32') return;
-  if (envv('NO_OPENUSAGE_SPAWN')) {
-    console.log('[burnglass] openusage spawn suppressed (BURNGLASS_NO_OPENUSAGE_SPAWN — test hook)');
-    return;
-  }
-  const exe = findOpenUsage();
-  if (!exe) {
-    console.warn('[burnglass] openusage: OpenUsageTray.exe not found — set "openusagePath" in ' + homeLabel('config.json') + ' (get it from github.com/CheesyPoofs346/openusage-windows/releases)');
-    return;
-  }
-  openusageRunning(exe, (running) => {
-    if (running) return; // already on the taskbar — never start a second one
-    try {
-      // OpenUsage's popover hard-codes a 100%-DPI window width (372px) while
-      // WebView2 zooms content by the monitor scale — on 125%/150% displays
-      // the popover clips. Forcing scale 1 for THIS process makes the whole
-      // window/content contract consistent (the author's intended look).
-      // Respect the var if the user already set their own.
-      const env = Object.assign({}, process.env);
-      if (!env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS) {
-        env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--force-device-scale-factor=1';
-      }
-      const child = require('child_process').spawn(exe, [],
-        { detached: true, stdio: 'ignore', cwd: path.dirname(exe), env });
-      // Same async-'error' trap as the tray: a bad/blocked exe must warn,
-      // not crash the server (and crash-loop every start via the config).
-      child.on('error', (e) => console.warn('[burnglass] openusage failed to start: ' + e.message));
-      child.unref();
-      console.log('[burnglass] openusage companion started (' + exe + ')');
-    } catch (e) {
-      console.warn('[burnglass] openusage failed to start: ' + e.message);
-    }
-  });
-}
 // ---- PULSE STRIP (opt-in, Windows) ---------------------------------------
 // Pulse's own taskbar strip + popover: pulse-strip.exe, a compiled companion
 // (strip/ in the repo — ported from openusage-windows under MIT, fed by this
-// server's /api/summary). Same launch discipline as the OpenUsage companion:
-// Pulse only STARTS it (dedupe via tasklist); disable stops future launches
-// and the strip exits itself when the statusline feed says stripEnabled off.
+// server's /api/summary). Pulse only STARTS it (dedupe via tasklist); disable
+// stops future launches and the strip exits itself when the statusline feed
+// says stripEnabled off.
 let stripMemo = { at: 0, key: null, path: null };
 function findPulseStrip() {
   const c = readConfig();
@@ -7679,7 +7592,7 @@ function readStartupEntry() {
     return { enabled: false, command: '' };
   }
 }
-// Memoized like findPulseStrip/findOpenUsage: payload.startup is built on every
+// Memoized like findPulseStrip: payload.startup is built on every
 // summary, and spawning reg.exe per build is not acceptable.
 let startupMemo = { at: 0, state: null };
 function startupState(force) {
@@ -7956,8 +7869,10 @@ function startServer(port, host, opts) {
       if (route === '/api/strip/enable' || route === '/api/strip/disable') {
         if (!allowMutation(req, res)) return;
         const on = route.endsWith('enable');
-        // Like openusage: NO path parameter — a spawn path must come from the
-        // user-gated config file, never from a loopback-reachable route.
+        // Deliberately NO path parameter: allowMutation proves loopback, not
+        // same-user — any local account can reach 127.0.0.1, so a spawn path
+        // must come from the user-gated config file (stripPath), never from a
+        // loopback-reachable route.
         writeConfig({ strip: on });
         console.log('[burnglass] strip ' + (on ? 'enabled' : 'disabled') + ' from the dashboard');
         // Enable launches now; disable is picked up by the strip's own
@@ -8035,7 +7950,7 @@ function startServer(port, host, opts) {
       if (route === '/api/startup/enable' || route === '/api/startup/disable') {
         if (!allowMutation(req, res)) return;
         const on = route.endsWith('enable');
-        // No path/command parameter, for the same reason as strip/openusage:
+        // No path/command parameter, for the same reason as strip:
         // what gets written into the Run key comes from THIS binary's own
         // path, never from anything a loopback caller supplies.
         const r = setStartup(on);
@@ -8045,22 +7960,6 @@ function startServer(port, host, opts) {
         res.end(JSON.stringify(r.ok
           ? { ok: true, startup: startupForPayload() }
           : { ok: false, error: r.error, startup: startupForPayload() }));
-        return;
-      }
-      if (route === '/api/openusage/enable' || route === '/api/openusage/disable') {
-        if (!allowMutation(req, res)) return;
-        const on = route.endsWith('enable');
-        // Deliberately NO path parameter: allowMutation proves loopback, not
-        // same-user — any local account can reach 127.0.0.1, and a spawn path
-        // must not be settable by a different user. openusagePath comes only
-        // from ~/.burnglass/config.json, which the OS user-gates.
-        writeConfig({ openusage: on });
-        console.log('[burnglass] openusage companion ' + (on ? 'enabled' : 'disabled') + ' from the dashboard');
-        // Enable launches it right now (Windows only); disable only stops
-        // future auto-launches — Pulse never kills the user's own app.
-        if (on && process.platform === 'win32' && boundLoopback) launchOpenUsage();
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, openusage: { supported: process.platform === 'win32', enabled: on, path: findOpenUsage() } }));
         return;
       }
       if (route === '/api/budget/set') {
@@ -8131,6 +8030,16 @@ function startServer(port, host, opts) {
             ? { ok: false, error: err.message, state: updateState }
             : { ok: true, state: updateState }));
         });
+        return;
+      }
+      // An /api path no handler above claimed (e.g. the retired
+      // /api/openusage/enable|disable) is a JSON 404 — not the SPA's
+      // index.html with a 200, which a POST caller (lib.postJson) would read
+      // as success. Every real route is matched above, so nothing a current
+      // or v1 companion calls lands here.
+      if (route.startsWith('/api/')) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'unknown API route' }));
         return;
       }
       // Everything else: the built frontend (SPA).
@@ -8211,10 +8120,8 @@ function startServer(port, host, opts) {
     // persisted preference (the dashboard toggle writes it), so a flag-only
     // spawn meant every restart silently lost the icon while payload.tray kept
     // reporting enabled:true — the toggle looked on with nothing on screen.
-    // Matches how openusage/strip launch from config on the next two lines.
+    // Matches how the strip launches from config just below.
     if (((opts && opts.tray) || readConfig().tray === true) && LOOPBACK_HOSTS.has(host)) startTray(port);
-    // OpenUsage companion (opt-in) — start the taskbar app alongside Burnglass.
-    if (readConfig().openusage === true && LOOPBACK_HOSTS.has(host)) launchOpenUsage();
     // Burnglass Strip (opt-in) — the own taskbar strip companion. On the
     // start right after a one-click update the strip exe is first brought up
     // to this release (refreshStripAfterUpdate — async, never blocks this
