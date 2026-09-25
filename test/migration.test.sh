@@ -461,7 +461,8 @@ stop_srv $SRV
 # ---------------------------------------------------------------- assertions
 node -e '
 const fs = require("fs"), path = require("path");
-const [T, SECRET] = process.argv.slice(1);
+const [T, SECRET, ROOT] = process.argv.slice(1);
+const V = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version;
 let fail = 0;
 const ok = (c, m) => { console.log((c ? "PASS" : "FAIL") + "  " + m); if (!c) fail = 1; };
 const J = (f) => { try { return JSON.parse(fs.readFileSync(path.join(T, f), "utf8")); } catch (_) { return null; } };
@@ -471,14 +472,14 @@ const stages = (h) => fs.readdirSync(path.join(T, h)).filter((n) => /^\.burnglas
 
 // ---- M1
 const m1 = J("m1.json") || {};
-ok(m1.brand === "Burnglass" && m1.version === "2.0.0", "M1: payload brand Burnglass v2.0.0 (" + m1.brand + " " + m1.version + ")");
+ok(m1.brand === "Burnglass" && m1.version === V, "M1: payload brand Burnglass v" + V + " (" + m1.brand + " " + m1.version + ")");
 ok(m1.home === path.join(T, "h1", ".burnglass"), "M1: fresh home is ~/.burnglass (" + m1.home + ")");
 ok(!exists("h1/.pulse"), "M1: no ~/.pulse is ever created");
 ok(exists("h1/.burnglass/server.json"), "M1: ~/.burnglass appears on the first write (server.json)");
 ok(m1.homeMigration === null, "M1: homeMigration null on a fresh install");
 ok(exists("h1/.burnglass/modes.jsonl") && /"sX"/.test(R("h1/.burnglass/modes.jsonl")), "M1: --mode-hook writes the new home");
 ok(!exists("h1b/.pulse") && !exists("h1b/.burnglass"), "M1: a short-lived --statusline creates no home at all");
-ok(/^burnglass v2\.0\.0$/m.test(R("version.txt")), "M1: --version says burnglass v2.0.0");
+ok(R("version.txt").split(/\r?\n/).includes("burnglass v" + V), "M1: --version says burnglass v" + V);
 const integ = m1.integrations || [];
 const sl = integ.find((i) => i.kind === "statusline"), hk = integ.find((i) => i.kind === "effort-hook");
 ok(sl && sl.exists === false && sl.target === "/nonexistent/gone/pulse-linux" && sl.legacyName === true,
@@ -508,9 +509,9 @@ ok(hist.length > 0 && hist.every((n) => same("history/" + n)), "M2: every histor
 ok(!fs.readdirSync(path.join(NB, "history")).some((n) => /\.tmp$/.test(n)), "M2: history *.tmp partials NOT copied");
 for (const n of ["pulse.log", "tray.ps1", "webview-strip", "bin", "strip-web", "burnglass.log"]) ok(!fs.existsSync(path.join(NB, n)), "M2: " + n + " not copied");
 const sj = JSON.parse(fs.readFileSync(path.join(NB, "server.json"), "utf8"));
-ok(sj.port === 5832 && sj.version === "2.0.0", "M2: new server.json is this server, not the stale copy");
+ok(sj.port === 5832 && sj.version === V, "M2: new server.json is this server, not the stale copy");
 const mk = J("marker-1.json") || {};
-ok(mk.from === LP_REAL && mk.by === "2.0.0" && Array.isArray(mk.copied) && mk.copied.includes("config.json") && mk.copied.some((c) => /^history\//.test(c)),
+ok(mk.from === LP_REAL && mk.by === V && Array.isArray(mk.copied) && mk.copied.includes("config.json") && mk.copied.some((c) => /^history\//.test(c)),
    "M2: marker records source, version and copied items");
 ok(Array.isArray(mk.skipped) && ["pulse.log", "server.json", "tray.ps1", "webview-strip", "bin", "strip-web"].every((n) => mk.skipped.includes(n)),
    "M2: marker lists the skipped names (" + (mk.skipped || []).join(",") + ")");
@@ -529,9 +530,9 @@ ok(secretFiles.length === 1 && secretFiles[0] === path.join(NB_REAL, "config.jso
    "M2: the Meshy key exists in exactly one file afterwards (" + secretFiles.join(",") + ")");
 ok(!R("m2.log").includes(SECRET), "M2: the Meshy key never reaches the server log");
 const lsj = JSON.parse(fs.readFileSync(path.join(LP, "server.json"), "utf8"));
-ok(lsj.port === 5832 && lsj.version === "2.0.0", "M2: legacy server.json mirrored for old strips/statuslines");
+ok(lsj.port === 5832 && lsj.version === V, "M2: legacy server.json mirrored for old strips/statuslines");
 const tray = fs.readFileSync(path.join(LP, "tray.ps1"), "utf8");
-ok(/\$myVer = .2\.0\.0./.test(tray) && /PulseTray5832/.test(tray) && tray.includes(path.join(NB_REAL, "burnglass.log")),
+ok(tray.includes("$myVer = \x27" + V + "\x27") && /PulseTray5832/.test(tray) && tray.includes(path.join(NB_REAL, "burnglass.log")),
    "M2: legacy tray.ps1 refreshed to v2 (frozen PulseTray mutex, new log path)");
 ok(!/app-icon|burnglass\.ico/i.test(tray) && /tray-base|\$PNG/.test(tray) && /crit = @\{/.test(tray), "M2: tray script embeds only the tray base/status icons (never the app icon)");
 const st = stages("h2");
@@ -683,11 +684,11 @@ const U = (f) => J(f) || {};
 ok(U("u1.json").status === "available" && U("u1.json").assetName === "burnglass-linux", "U1: new asset name preferred (" + U("u1.json").assetName + ", via the repo-rename 301)");
 ok(U("u2.json").assetName === "pulse-linux", "U1: falls back to the legacy asset name");
 ok(U("u6.json").assetName === "pulse-linux", "U1: an exe named pulse-linux pulls pulse-linux first");
-ok(U("u3.json").status === "uptodate", "U1: 2.0.0-rc.1 ranks BELOW the running 2.0.0 (" + U("u3.json").status + ")");
+ok(U("u3.json").status === "uptodate", "U1: 2.0.0-rc.1 is not offered over the running " + V + " (" + U("u3.json").status + ")");
 ok(U("u4.json").status === "available" && U("u4.json").latest === "2.0.1-rc.2", "U1: 2.0.1-rc.2 ranks above 2.0.0");
 ok(U("u5.json").status === "uptodate", "U1: v1.34.0 is not an update");
 process.exit(fail);
-' "$TMP" "$SECRET"
+' "$TMP" "$SECRET" "$ROOT"
 RES=$?
 echo "---- exit $RES"
 exit $RES

@@ -256,6 +256,10 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG }}
+          # Create the tag at the commit that was BUILT. Without this the action
+          # tags the default branch — an RC dispatched from a feature branch
+          # would get a tag (and source archive) pointing at older code.
+          target_commitish: ${{ github.sha }}
           prerelease: ${{ env.PRERELEASE == 'true' }}
           # '' = the API default (a normal release becomes latest, as before);
           # a prerelease is NEVER latest.
