@@ -5,8 +5,7 @@
    the dashboard exactly. */
 .mini { max-width: 380px; margin: 0 auto; padding: 12px 12px 24px; display: flex; flex-direction: column; gap: 10px; }
 .minitop { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
-.minibrand { display: inline-flex; align-items: center; gap: 6px; font-weight: var(--fw-semi); font-size: var(--fs-md); color: var(--text); }
-.minibrand .ic-sm { color: var(--accent); }
+.minibrand { display: inline-flex; align-items: center; gap: 6px; min-width: 0; } /* gap = 17/64 of the 24 px mark */
 .minifull { display: inline-flex; align-items: center; gap: 2px; font-size: var(--fs-xs); color: var(--text-3); white-space: nowrap; border-radius: var(--r-xs); }
 .minifull:hover { color: var(--text); }
 .minialert {
@@ -61,5 +60,8 @@
 .minitrend { display: flex; align-items: stretch; gap: 2px; height: 36px; border-bottom: 1px solid var(--axis); }
 .minitrend .mt-col { flex: 1; min-width: 2px; display: flex; align-items: flex-end; }
 .minitrend .mt-col:hover { background: var(--hover); }
-.minitrend i { display: block; width: 100%; border-radius: 2px 2px 0 0; background: var(--bar); }
+/* neutral days + today in the accent, as the dashboard's Codex tokens/day bars
+   (--bar sits too close to the accent to mark "today": 1.5:1 dark, 1.2:1 light).
+   --text-4 vs today: 3.4:1 both themes; vs the panel: 3.1:1 dark, 2.6:1 light. */
+.minitrend i { display: block; width: 100%; border-radius: 2px 2px 0 0; background: var(--text-4); }
 .minitrend i.today { background: var(--accent); }

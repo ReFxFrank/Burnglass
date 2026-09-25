@@ -10,13 +10,22 @@
 //
 // Replaces the old Unicode glyphs: ◧ → mini · ⏻ → power · ⇩ → download ·
 // ▾ → down · ⚠ → alert · ★ → star · ↓ → arrowdown · ⓘ → info · ▲▼ → caretup/caretdown.
+//
+// Brand (bottom of this file): <BrandMark> is the Burnglass "Glass" mark and
+// <Wordmark> the outlined Inter 620 wordmark — "Burn" in --text, "glass" in
+// --accent. <Icon name="brand"> is the one-colour silhouette for tight spots.
 // =============================================================================
+import { BRAND } from './lib.js';
+import markMaster from './brand/app-icon.svg';
+import mark24 from './brand/mark-small-24.svg';
 
 const F = { fill: 'currentColor', stroke: 'none' }; // for the few solid glyphs
 
 const PATHS = {
-  // brand + navigation
-  pulse: <path d="M1.5 8.5h3l1.6-4 3 8 1.9-5.2.9 1.2h2.6" strokeWidth="1.7" />,
+  // brand + navigation. `brand` = the one-colour mark (brand/mark-mono-16):
+  // lens · beam · focal dot. `pulse` is the pre-2.0 name, kept as an alias so a
+  // stray <Icon name="pulse"> draws the Burnglass mark, not the old heartbeat.
+  brand: <g {...F}><path d="M3.5.5L6 5.5v5l-2.5 5L1 10.5v-5z" /><path d="M5.5 6L10 7v2l-4.5 1z" /><circle cx="12" cy="8" r="3" /></g>,
   overview: <><rect x="2" y="2" width="5" height="5" rx="1.2" /><rect x="9" y="2" width="5" height="5" rx="1.2" /><rect x="2" y="9" width="5" height="5" rx="1.2" /><rect x="9" y="9" width="5" height="5" rx="1.2" /></>,
   gauge: <><path d="M2.3 12.2a6 6 0 1 1 11.4 0" /><path d="M8 10.5l2.8-3.3" /></>,
   chart: <><path d="M2 13.5h12" /><path d="M4 11V7.5M7 11V4M10 11V8M13 11V5.5" /></>,
@@ -61,6 +70,8 @@ const PATHS = {
   caretdown: <path d="M8 11.5l4.2-6.5H3.8z" {...F} />,
 };
 
+PATHS.pulse = PATHS.brand;
+
 const SIZE_CLASS = { 16: 'ic', 14: 'ic-sm', 12: 'ic-xs' };
 
 export function Icon({ name, size = 16, className, title, ...rest }) {
@@ -89,3 +100,55 @@ export function Icon({ name, size = 16, className, title, ...rest }) {
 }
 
 export default Icon;
+
+// =============================================================================
+// Brand — the Burnglass "Glass" identity (brand/final/BRAND.md).
+// =============================================================================
+
+// The mark on its dark tile, so it reads on both themes. It ships as an image
+// asset (Vite inlines it — no fetch): the brand is never recoloured, so its
+// fixed paints (ice lens, ember focal dot) live in the drawing, never in a UI
+// token. Size rule: 28 px and up use the master drawing; below that the
+// pixel-snapped 24 px drawing — a small size is never a scaled-down master.
+export function BrandMark({ size = 30, className }) {
+  return (
+    <img
+      className={'bmark' + (className ? ' ' + className : '')}
+      src={size >= 28 ? markMaster : mark24}
+      width={size}
+      height={size}
+      alt=""
+      aria-hidden="true"
+      draggable="false"
+    />
+  );
+}
+
+// Outlined Inter 620 wordmark (−0.018 em tracking baked in), font units, 2048 upm.
+// "Burn" is ink (.wm-i → --text), "glass" is the accent (.wm-g → --accent), so
+// it follows the theme. `cap` is the cap height in px; the lockup sets it to
+// 26/64 of the mark (30 px mark → 12.19 px). The box runs from the cap line to
+// the g's descender; `centered` adds equal room above so the cap band sits on
+// the box's vertical centre (a one-line lockup, e.g. #mini).
+const WM_BURN = 'M147 0V-1490H721Q883-1490 990-1439Q1097-1389 1151-1302Q1204-1215 1204-1104Q1204-1014 1169-949Q1134-884 1075-844Q1016-804 943-786V-771Q1023-768 1096-723Q1169-679 1216-599Q1262-519 1262-407Q1262-291 1206-199Q1150-107 1037-53Q924 0 754 0ZM421-229H708Q853-229 918-285Q983-341 983-429Q983-495 950-547Q918-600 858-630Q799-661 717-661H421ZM421-857H685Q755-857 810-882Q865-908 897-955Q929-1002 929-1067Q929-1152 869-1207Q809-1263 691-1263H421ZM1833 14Q1718 14 1632-35Q1545-85 1498-179Q1450-274 1450-407V-1118H1718V-450Q1718-339 1776-276Q1833-213 1934-213Q2002-213 2055-243Q2107-272 2138-329Q2168-385 2168-465V-1118H2436V0H2182L2179-277H2198Q2152-132 2060-59Q1969 14 1833 14ZM2671 0V-1118H2931V-929H2943Q2973-1028 3048-1081Q3122-1133 3218-1133Q3240-1133 3267-1131Q3294-1129 3313-1125V-880Q3296-886 3260-890Q3223-894 3189-894Q3117-894 3060-864Q3003-833 2971-779Q2939-725 2939-653V0ZM3738-653V0H3470V-1118H3724L3728-841H3708Q3754-985 3845-1058Q3936-1132 4073-1132Q4189-1132 4275-1083Q4361-1033 4408-939Q4456-845 4456-711V0H4188V-668Q4188-779 4131-842Q4073-905 3973-905Q3905-905 3852-875Q3799-846 3768-790Q3738-734 3738-653Z';
+const WM_GLASS = 'M5176 442Q5041 442 4941 408Q4841 373 4777 314Q4713 255 4686 180L4914 103Q4930 134 4961 166Q4992 198 5044 219Q5096 240 5176 240Q5295 240 5367 185Q5438 129 5438 11V-200H5416Q5396-158 5359-116Q5322-74 5260-45Q5198-16 5102-16Q4974-16 4870-77Q4766-137 4704-258Q4643-379 4643-562Q4643-747 4705-874Q4767-1001 4871-1066Q4976-1132 5104-1132Q5202-1132 5266-1099Q5330-1067 5368-1020Q5407-973 5427-932H5440V-1118H5703V1Q5703 150 5635 248Q5567 346 5448 394Q5329 442 5176 442ZM5179-226Q5263-226 5321-266Q5379-307 5409-382Q5439-458 5439-564Q5439-669 5409-747Q5379-825 5321-869Q5263-913 5179-913Q5093-913 5035-867Q4977-822 4947-743Q4917-665 4917-564Q4917-462 4947-386Q4977-310 5035-268Q5094-226 5179-226ZM6206-1490V0H5939V-1490ZM6754 23Q6648 23 6563-15Q6478-54 6429-129Q6380-204 6380-314Q6380-408 6415-470Q6450-532 6511-570Q6571-607 6648-626Q6724-645 6805-654Q6903-664 6963-673Q7024-681 7052-699Q7081-717 7081-754V-759Q7081-813 7059-850Q7037-888 6994-907Q6952-927 6889-927Q6826-927 6779-908Q6733-888 6703-857Q6673-826 6660-789L6412-837Q6444-936 6513-1001Q6582-1067 6678-1099Q6775-1132 6889-1132Q6970-1132 7051-1113Q7132-1094 7200-1050Q7267-1006 7308-932Q7349-858 7349-748V0H7093V-154H7082Q7057-106 7013-66Q6969-25 6905-1Q6841 23 6754 23ZM6824-174Q6903-174 6961-205Q7018-236 7050-288Q7082-340 7082-401V-531Q7069-521 7040-512Q7010-503 6973-496Q6937-490 6901-485Q6866-480 6841-476Q6783-469 6737-450Q6691-432 6665-400Q6639-368 6639-318Q6639-271 6663-239Q6687-207 6729-190Q6771-174 6824-174ZM8011 22Q7881 22 7781-15Q7681-52 7617-123Q7553-195 7534-296L7784-342Q7807-261 7865-221Q7923-181 8017-181Q8111-181 8166-218Q8221-255 8221-311Q8221-358 8184-389Q8147-420 8071-436L7880-477Q7721-511 7643-589Q7565-667 7565-791Q7565-895 7622-972Q7679-1048 7782-1090Q7884-1132 8019-1132Q8147-1132 8240-1096Q8332-1060 8389-995Q8447-930 8469-842L8230-796Q8211-854 8161-894Q8111-933 8023-933Q7942-933 7887-898Q7833-863 7833-807Q7833-760 7869-728Q7904-697 7988-679L8181-639Q8340-605 8418-530Q8495-455 8495-337Q8495-230 8434-149Q8372-68 8263-23Q8153 22 8011 22ZM9104 22Q8974 22 8874-15Q8774-52 8710-123Q8647-195 8627-296L8878-342Q8900-261 8958-221Q9016-181 9110-181Q9204-181 9259-218Q9314-255 9314-311Q9314-358 9277-389Q9241-420 9164-436L8974-477Q8814-511 8736-589Q8658-667 8658-791Q8658-895 8715-972Q8772-1048 8875-1090Q8977-1132 9112-1132Q9240-1132 9333-1096Q9425-1060 9483-995Q9540-930 9562-842L9323-796Q9304-854 9254-894Q9205-933 9116-933Q9035-933 8980-898Q8926-863 8926-807Q8926-760 8962-728Q8997-697 9082-679L9274-639Q9433-605 9511-530Q9589-455 9589-337Q9589-230 9527-149Q9465-68 9356-23Q9247 22 9104 22Z';
+const WM_W = 9672, WM_CAP = 1490, WM_DESC = 442;
+
+export function Wordmark({ cap = 12.1875, centered = false, label = BRAND, className }) {
+  const top = centered ? -(WM_CAP + WM_DESC) : -WM_CAP;
+  const vh = WM_DESC - top;
+  const k = cap / WM_CAP;
+  return (
+    <svg
+      className={'wm' + (className ? ' ' + className : '')}
+      viewBox={`0 ${top} ${WM_W} ${vh}`}
+      width={+(WM_W * k).toFixed(2)}
+      height={+(vh * k).toFixed(2)}
+      role="img"
+      aria-label={label}
+    >
+      <path className="wm-i" d={WM_BURN} />
+      <path className="wm-g" d={WM_GLASS} />
+    </svg>
+  );
+}
