@@ -11,7 +11,16 @@
   workflow still counts as one). Idle → the line disappears and the
   activity is one line again. Friends can see presence, so
   `{"discordShowModel": false}` turns the line off. New `payload.activeNow`
-  = `{provider, model, effort, ultracode, sessions}`.
+  = `{provider, model, effort, ultracode, sessions}`. The same holds for
+  Codex: rollouts of spawned agents, the auto-reviewer and `/review` are
+  recognised as subagents (`session_meta.source.subagent` /
+  `parent_thread_id`), helper calls never count as a session, and legacy
+  (< 0.144) subagent rollouts — which carried only their own thread id —
+  now group under their parent session, as current Codex does itself. During
+  a long workflow whose main thread has been quiet for over 15 minutes while
+  its subagents work, the line keeps the main model. Dated snapshot ids read
+  cleanly ("GPT-5", not "GPT-5 2025 08 07"). The Server panel's description
+  of what presence shows now lists the new line.
 - **Animated presence images.** Discord animates a GIF / animated WebP only
   when it's given as an https **link** (uploaded Art Assets are always
   stills). `discordClaudeImage` / `discordCodexImage` / `discordLargeImage`

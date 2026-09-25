@@ -256,7 +256,7 @@ export function ServerPanel({ data, onStopped, gfx, delay = 0.36 }) {
           className="btn ghost"
           onClick={onToggleDiscord}
           disabled={busy === 'discord'}
-          title="Shows your usage (today + all-time tokens/spend, window meters) as a Discord activity. Visible to anyone who can see your Discord profile."
+          title="Shows your usage (today / 7-day / all-time tokens and spend, plus the model, effort and live session count while you work) as a Discord activity. Visible to anyone who can see your Discord profile."
         >
           {busy === 'discord' ? 'Saving…' : (data.discord && data.discord.enabled
             ? 'Discord presence: on' + (data.discord.status === 'ok' ? '' : ' (' + data.discord.status + ')')
@@ -332,10 +332,11 @@ export function ServerPanel({ data, onStopped, gfx, delay = 0.36 }) {
         only to api.anthropic.com and chatgpt.com.
       </div>
       <div className="sub" style={{ margin: '-4px 0 4px' }}>
-        <b style={{ color: 'var(--text-2)' }}>Discord presence</b> (opt-in) shows your live usage — today’s and
-        all-time tokens/spend — as an activity on your Discord profile, via the desktop app’s local socket
-        (nothing sent over the network by Pulse). Works out of the box: just flip it on with Discord running.
-        It’s public to anyone who can see your profile.
+        <b style={{ color: 'var(--text-2)' }}>Discord presence</b> (opt-in) shows your live usage — today’s, 7-day and
+        all-time tokens/spend, plus the model, effort and live session count while you work — as an activity
+        on your Discord profile, via the desktop app’s local socket (nothing sent over the network by Pulse).
+        Works out of the box: just flip it on with Discord running. It’s public to anyone who can see your
+        profile; <code>{'{"discordShowModel": false}'}</code> in config hides the model line.
       </div>
       {data.meshy && (
         <div className="sub" style={{ margin: '-4px 0 4px' }}>

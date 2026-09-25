@@ -1319,6 +1319,8 @@ function parseCodexFile(filePath) {
   const entries = [];
   const sessionMeta = {};
   let sid = '';
+  let groupSid = ''; // session the rollout's usage belongs to (see session_meta)
+  let isSub = false; // a subagent rollout (spawned agent, auto-reviewer, /review)
   let project = '';
   let model = 'gpt-unknown';
   let effort = null;
@@ -1342,6 +1344,16 @@ function parseCodexFile(filePath) {
 
     if (rec.type === 'session_meta') {
       sid = p.session_id || p.id || sid;
+      // Subagent rollouts (spawn_agent threads, the auto-reviewer, /review):
+      // source {subagent: …} and/or parent_thread_id. Current Codex already
+      // gives them the ROOT's session_id; legacy ones (< 0.144) only carry
+      // their own thread id, so group them under the parent — one session,
+      // like Claude Code subagents. `sid` stays the file's own identity for
+      // the replay-safe dedup key.
+      const src = p.source && typeof p.source === 'object' ? p.source.subagent : null;
+      isSub = !!(src || p.parent_thread_id || p.thread_source === 'subagent');
+      const parentId = p.parent_thread_id || (src && src.thread_spawn && src.thread_spawn.parent_thread_id) || '';
+      groupSid = p.session_id || (isSub && parentId) || sid;
       project = p.cwd || project;
       if (sid && !sessionMeta[sid]) sessionMeta[sid] = { firstUserText: '', project };
       continue;
@@ -1411,8 +1423,9 @@ function parseCodexFile(filePath) {
         cacheWrite1h: 0,
         cacheRead: cached,
         webSearches: 0,
-        sessionId: sid || path.basename(filePath, '.jsonl'),
+        sessionId: groupSid || sid || path.basename(filePath, '.jsonl'),
         project,
+        sidechain: isSub, // never the "what you're running" model (activeNow)
         // Parse-time effort lives in its own immutable field; annotateModes
         // seeds from it every pass, so e.effort stays a pure per-pass output
         // (cached entries are re-annotated on every request).
@@ -2308,6 +2321,9 @@ function aggregate(entries, sessionMeta, desktopTitles, now, modesBySession, ult
   // Which provider is in active use right now — the newest activity within the
   // last 15 minutes — for the Discord presence logo. null == idle.
   const ACTIVE_MS = 15 * 60 * 1000;
+  // How far back activeNow looks for a live session's MAIN-thread entry when
+  // only its subagents wrote inside ACTIVE_MS (a long-running workflow).
+  const ACTIVE_MAIN_LOOKBACK_MS = 24 * 60 * 60 * 1000;
   let activeProvider = null;
   if (asc.length && now - asc[asc.length - 1].ts <= ACTIVE_MS) {
     // Only Claude Code / Codex have dedicated Discord art. The other agents
@@ -2324,17 +2340,31 @@ function aggregate(entries, sessionMeta, desktopTitles, now, modesBySession, ult
   let activeNow = null;
   if (activeProvider) {
     const cutoff = now - ACTIVE_MS;
+    const provOf = (e) => (e.source === 'codex' ? 'codex' : nonClaudeEntry(e) ? null : 'claude');
+    // Helper calls are neither "what you're using" nor a session of yours:
+    // advisor sub-inferences, Codex's background auto-reviewer (its own
+    // rollout — legacy Codex even gave it its own session id), synthetic rows.
+    const helper = (e) => e.advisor || e.model === 'codex-auto-review' || HIDDEN_MODELS.has(e.model);
     const sessions = new Set();
-    let main = null, fallback = null;
-    for (let i = asc.length - 1; i >= 0 && asc[i].ts >= cutoff; i--) {
+    let main = null, fallback = null, i = asc.length - 1;
+    for (; i >= 0 && asc[i].ts >= cutoff; i--) {
       const e = asc[i];
+      if (helper(e)) continue;
       if (e.sessionId) sessions.add(e.sessionId);
-      const prov = e.source === 'codex' ? 'codex' : nonClaudeEntry(e) ? null : 'claude';
-      // Helper calls are not "what you're using": advisor sub-inferences and
-      // Codex's background auto-reviewer.
-      if (prov !== activeProvider || e.advisor || e.model === 'codex-auto-review' || HIDDEN_MODELS.has(e.model)) continue;
+      if (provOf(e) !== activeProvider) continue;
       if (!fallback) fallback = e;
       if (!main && !e.sidechain) main = e;
+    }
+    // A long workflow: the main thread dispatched it and waits while only
+    // subagents write, so its newest entry is older than the window — but the
+    // session is live. Keep showing the main model (bounded look-back) rather
+    // than falling to a Haiku explorer.
+    if (!main && fallback) {
+      const floor = cutoff - ACTIVE_MAIN_LOOKBACK_MS;
+      for (; i >= 0 && asc[i].ts >= floor; i--) {
+        const e = asc[i];
+        if (!e.sidechain && !helper(e) && provOf(e) === activeProvider && sessions.has(e.sessionId)) { main = e; break; }
+      }
     }
     const pick = main || fallback;
     if (pick) {
@@ -4816,11 +4846,13 @@ function fmtTok(v) {
 // Human model name for the presence line: claude-opus-5-5 → "Opus 5.5",
 // claude-3-5-sonnet-20241022 → "Sonnet 3.5", gpt-6-sol → "GPT-6 Sol",
 // gpt-5.3-codex → "GPT-5.3 Codex", glm-5.1 → "GLM-5.1". Partner-cloud forms
-// are canonicalized first; anything unrecognised is shown as-is.
+// are canonicalized first and date stamps (Anthropic -YYYYMMDD, OpenAI
+// -YYYY-MM-DD) and -latest dropped; anything unrecognised is shown as-is.
 function prettyModelName(model) {
   if (!model) return '';
   const cap = (w) => w.charAt(0).toUpperCase() + w.slice(1);
-  let m = canonicalClaudeModel(canonicalOpenAIModel(String(model))).replace(/\[1m\]$/, '').replace(/-\d{8}$/, '');
+  let m = canonicalClaudeModel(canonicalOpenAIModel(String(model))).replace(/\[1m\]$/, '')
+    .replace(/-(?:\d{8}|\d{4}-\d{2}-\d{2}|latest)$/, '');
   if (m.startsWith('claude-')) {
     const parts = m.slice(7).split('-');
     const fam = parts.filter((p) => /^[a-z]/.test(p) && !/^v\d+$/.test(p));
