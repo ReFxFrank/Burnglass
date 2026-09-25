@@ -1,33 +1,52 @@
 name: Release
 
-# Push a version tag to build single-file executables and publish a GitHub
-# Release with them attached:
-#   git tag v1.0.0 && git push origin v1.0.0
+# Build the single-file executables and publish a GitHub Release with them.
+# Normally dispatched (Actions tab -> Release -> Run workflow, or the API) with
+# a `tag` input, which also creates the tag; a pushed v* tag works too.
+#
+# Prereleases: a tag with a '-' in it (v2.0.0-rc.1) - or the `prerelease`
+# input - publishes a PRERELEASE that is never marked latest. That matters:
+# every installed copy checks /releases/latest, so an RC published as a normal
+# release would be offered to the whole installed base as an update.
 on:
   push:
     tags: ['v*']
-  # Manual trigger (Actions tab → Release → Run workflow) — creates the tag too.
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (e.g. v1.0.0)'
+        description: 'Release tag (e.g. v2.0.0, or v2.0.0-rc.1 for a prerelease)'
         required: true
-        default: 'v1.0.0'
+        default: 'v2.0.0'
+      prerelease:
+        description: 'Publish as a prerelease (never marked latest). Tags containing "-" always are.'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write
+
+env:
+  TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  PRERELEASE: ${{ (github.event_name == 'workflow_dispatch' && inputs.prerelease) || contains(github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name, '-') }}
 
 jobs:
   build:
     strategy:
       matrix:
         include:
+          # `legacy` = the asset name Pulse <= 1.34 self-updaters look for.
+          # Every 2.x release ships a byte-identical copy under it - without
+          # it the installed v1 base can no longer update in one click.
           - os: windows-latest
-            artifact: pulse.exe
+            artifact: burnglass.exe
+            legacy: pulse.exe
           - os: ubuntu-latest
-            artifact: pulse-linux
+            artifact: burnglass-linux
+            legacy: pulse-linux
           - os: macos-latest
-            artifact: pulse-macos
+            artifact: burnglass-macos
+            legacy: pulse-macos
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -35,6 +54,18 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+
+      # The self-updater compares the release tag with the version the binary
+      # reports; a mismatch would offer the same "update" forever.
+      - name: Tag matches package.json
+        shell: bash
+        run: |
+          ver="$(node -p "require('./package.json').version")"
+          if [ "${TAG#v}" != "$ver" ]; then
+            echo "::error::tag $TAG does not match package.json version $ver"
+            exit 1
+          fi
+          echo "version $ver, prerelease=$PRERELEASE"
 
       - name: Build frontend
         run: |
@@ -46,76 +77,119 @@ jobs:
 
       - name: Smoke test
         shell: bash
-        run: ./dist-exe/${{ matrix.artifact }} --help
+        run: |
+          ./dist-exe/${{ matrix.artifact }} --help
+          out="$(./dist-exe/${{ matrix.artifact }} --version)"
+          echo "$out"
+          case "$out" in
+            *"${TAG#v}"*) ;;
+            *) echo "::error::--version printed '$out', expected it to contain ${TAG#v}"; exit 1 ;;
+          esac
 
-      # Upload the OS binary BEFORE the optional Windows extras below. The
-      # release job is `needs: build`, so anything that fails after this point
-      # would otherwise take the whole release down with it.
+      # DO NOT REMOVE: Pulse <= 1.34 installs update themselves by fetching
+      # exactly pulse.exe / pulse-linux / pulse-macos from /releases/latest.
+      - name: Legacy-name alias for Pulse <= 1.34 self-updaters
+        shell: bash
+        run: |
+          cp "dist-exe/${{ matrix.artifact }}" "dist-exe/${{ matrix.legacy }}"
+          cmp "dist-exe/${{ matrix.artifact }}" "dist-exe/${{ matrix.legacy }}"
+          ls -la dist-exe
+
+      # Upload the OS binary (and its alias) BEFORE the optional Windows
+      # extras below. The release job is `needs: build`, so anything that fails
+      # after this point would otherwise take the whole release down with it.
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: dist-exe/${{ matrix.artifact }}
+          path: |
+            dist-exe/${{ matrix.artifact }}
+            dist-exe/${{ matrix.legacy }}
           if-no-files-found: error
 
-      # Pulse Strip: the Windows taskbar companion (strip/, C# — ported from
+      # Burnglass Strip: the Windows taskbar companion (strip/, C# - ported from
       # openusage-windows under MIT), published as its own single-file exe.
       - uses: actions/setup-dotnet@v4
         if: matrix.os == 'windows-latest'
         with:
           dotnet-version: '9.0.x'
 
-      - name: Build Pulse Strip (Windows companion)
+      - name: Build Burnglass Strip (Windows companion)
         if: matrix.os == 'windows-latest'
         shell: bash
         run: |
-          dotnet publish strip/PulseStrip.csproj -c Release -r win-x64 --self-contained true \
+          # File/product version = the release (2.0.0-rc.1 -> FileVersion 2.0.0.0,
+          # ProductVersion 2.0.0-rc.1).
+          ver="${TAG#v}"
+          prefix="${ver%%-*}"
+          suffix=""
+          if [ "$ver" != "$prefix" ]; then suffix="${ver#*-}"; fi
+          dotnet publish strip/BurnglassStrip.csproj -c Release -r win-x64 --self-contained true \
             -p:PublishSingleFile=true \
             -p:IncludeNativeLibrariesForSelfExtract=true \
             -p:DebugType=none \
+            -p:VersionPrefix="$prefix" \
+            -p:VersionSuffix="$suffix" \
             -o dist-strip
-          ls -la dist-strip/pulse-strip.exe
+          ls -la dist-strip/burnglass-strip.exe
+          # Same bytes under the v1 name, for anyone who drops the strip next
+          # to an old pulse.exe (a v1 server only looks for pulse-strip.exe).
+          cp dist-strip/burnglass-strip.exe dist-strip/pulse-strip.exe
+          cmp dist-strip/burnglass-strip.exe dist-strip/pulse-strip.exe
 
       - uses: actions/upload-artifact@v4
         if: matrix.os == 'windows-latest'
         with:
-          name: pulse-strip.exe
-          path: dist-strip/pulse-strip.exe
+          name: burnglass-strip.exe
+          path: |
+            dist-strip/burnglass-strip.exe
+            dist-strip/pulse-strip.exe
           if-no-files-found: error
 
-      # PulseSetup.exe: an Inno Setup wrapper around the two Windows binaries
-      # above (build/installer.iss). Per-user install into
-      # %LOCALAPPDATA%\Programs\Pulse — no admin, same layout `--install` uses.
+      # BurnglassSetup.exe: an Inno Setup wrapper around the two Windows
+      # binaries above (build/installer.iss). Per-user install, no admin; an
+      # upgrade stays in the folder the Pulse install already used.
       # Must run after BOTH the SEA build and the strip publish, since it packs
-      # dist-exe\pulse.exe and dist-strip\pulse-strip.exe.
+      # dist-exe\burnglass.exe and dist-strip\burnglass-strip.exe.
       # The three OS binaries are already uploaded above, so these extras are
-      # best-effort: a broken installer build should cost us PulseSetup.exe,
+      # best-effort: a broken installer build should cost us BurnglassSetup.exe,
       # not the entire release (the release job is `needs: build`).
       - name: Install Inno Setup
         if: matrix.os == 'windows-latest'
         continue-on-error: true
         run: choco install innosetup -y --no-progress
 
-      - name: Build installer (PulseSetup.exe)
+      - name: Build installer (BurnglassSetup.exe)
         if: matrix.os == 'windows-latest'
         continue-on-error: true
         shell: pwsh
         run: |
-          $tag = "${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
-          $version = $tag -replace '^v', ''
+          $version = $env:TAG -replace '^v', ''
+          # VersionInfoVersion must be numeric (a.b.c[.d]); a prerelease keeps
+          # its full string only in AppVersion.
+          $num = ($version -split '[-+]')[0]
+          if ($num -notmatch '^\d+(\.\d+){0,3}$') { throw "cannot derive a numeric version from '$version'" }
+          $url = "${{ github.server_url }}/${{ github.repository }}"
           # choco installs Inno to Program Files and does not shim ISCC, so
           # look there first and only fall back to PATH.
           $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
           if (-not (Test-Path $iscc)) { $iscc = 'iscc' }
-          & $iscc "/DMyAppVersion=$version" build\installer.iss
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Get-Item dist-installer\PulseSetup.exe
+          $defs = @("/DMyAppVersion=$version", "/DMyAppVersionNum=$num", "/DMyAppURL=$url")
+          & $iscc @defs build\installer.iss
+          if ($LASTEXITCODE -ne 0) {
+            # Only an icon problem should be retried without the icon; anything
+            # else fails the same way twice and costs just this asset.
+            Write-Output "::warning title=installer::ISCC failed ($LASTEXITCODE); retrying without SetupIconFile"
+            & $iscc @defs "/DNoSetupIcon=1" build\installer.iss
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          Get-Item dist-installer\BurnglassSetup.exe
 
       - uses: actions/upload-artifact@v4
         if: matrix.os == 'windows-latest'
         continue-on-error: true
         with:
-          name: PulseSetup.exe
-          path: dist-installer/PulseSetup.exe
+          name: BurnglassSetup.exe
+          path: dist-installer/BurnglassSetup.exe
           if-no-files-found: error
 
   release:
@@ -127,64 +201,152 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # Belt and braces for the legacy aliases: present, and the same bytes as
+      # their new-name twins. A release without them strands every v1 install.
+      - name: Verify legacy aliases
+        shell: bash
+        run: |
+          cd dist
+          ls -la
+          fail=0
+          for pair in "burnglass.exe pulse.exe" "burnglass-linux pulse-linux" "burnglass-macos pulse-macos"; do
+            # shellcheck disable=SC2086 # intentional split of "new legacy"
+            set -- $pair
+            if [ ! -f "$1" ] || [ ! -f "$2" ]; then
+              echo "::error::missing $1 or its legacy alias $2"; fail=1; continue
+            fi
+            cmp "$1" "$2" || { echo "::error::$2 is not byte-identical to $1"; fail=1; }
+          done
+          if [ -f burnglass-strip.exe ] || [ -f pulse-strip.exe ]; then
+            cmp burnglass-strip.exe pulse-strip.exe || { echo "::error::pulse-strip.exe is not byte-identical to burnglass-strip.exe"; fail=1; }
+          fi
+          [ -f BurnglassSetup.exe ] || echo "::warning::BurnglassSetup.exe is missing (the installer build is best-effort)"
+          if [ "$PRERELEASE" != "true" ] && [[ "$TAG" == *-* ]]; then
+            echo "::error::tag $TAG has a '-' but is not being published as a prerelease"; fail=1
+          fi
+          exit $fail
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          tag_name: ${{ env.TAG }}
+          prerelease: ${{ env.PRERELEASE == 'true' }}
+          # '' = the API default (a normal release becomes latest, as before);
+          # a prerelease is NEVER latest.
+          make_latest: ${{ env.PRERELEASE == 'true' && 'false' || '' }}
           files: |
-            dist/PulseSetup.exe
+            dist/BurnglassSetup.exe
+            dist/burnglass.exe
+            dist/burnglass-linux
+            dist/burnglass-macos
+            dist/burnglass-strip.exe
             dist/pulse.exe
             dist/pulse-linux
             dist/pulse-macos
             dist/pulse-strip.exe
           generate_release_notes: true
           body: |
-            **Pulse** — a local, zero-dependency usage dashboard for Claude Code, OpenAI Codex, Gemini
-            CLI, Continue, Cline and Roo Code (plus your own JSONL usage logs). Spend by model, source,
-            effort and project, official account limits, alerts, budgets, a Claude Code status line,
-            and optional Discord presence — all from the logs already on your machine.
+            **Burnglass** (formerly **Pulse**) is a local, zero-dependency usage dashboard for Claude
+            Code, OpenAI Codex, Gemini CLI, Continue, Cline and Roo Code, plus your own JSONL usage
+            logs. It shows spend by model, source, effort and project, official account limits,
+            alerts, budgets, a Claude Code status line, and optional Discord presence. Everything
+            comes from the logs already on your machine.
 
             ### Download
-            - **Windows (easiest):** `PulseSetup.exe` — a normal installer. It installs for the
-              current user only (`%LOCALAPPDATA%\Programs\Pulse`, **no admin needed**), adds Start
-              Menu and optional Desktop shortcuts, an Add/Remove Programs entry, and offers two
-              opt-in checkboxes: **start Pulse when you sign in** (silent, no browser popup) and
-              **include Pulse Strip**. Uninstalling removes all of it and **keeps your settings and
-              usage history** in `%USERPROFILE%\.pulse`.
-            - **Windows (portable):** `pulse.exe` — no installer, double-click it; Pulse runs in the
-              background (no console window) and the dashboard opens at http://localhost:4747. Logs,
-              updates and Stop live in the dashboard's **Server panel**.
-            - **Windows taskbar strip (optional):** `pulse-strip.exe` — bundled as a checkbox in the
-              installer; with the portable exe, put it next to `pulse.exe`. Either way, flip **Pulse
-              Strip** on in the Server panel: provider % left + spend right on the taskbar, click for
-              a popover with meters, spend and trends. Ported from
-              [openusage-windows](https://github.com/CheesyPoofs346/openusage-windows) (MIT) and fed
-              by your local Pulse server.
-            - **Linux:** `pulse-linux` — `chmod +x pulse-linux && ./pulse-linux`
-            - **macOS (Apple Silicon):** `pulse-macos` — `chmod +x pulse-macos && xattr -d com.apple.quarantine pulse-macos; ./pulse-macos`
-              (the `xattr` clears Gatekeeper's quarantine on the unsigned binary)
+            | You have | Get |
+            |---|---|
+            | Windows, want an installer | `BurnglassSetup.exe`: per-user install (**no admin**), Start Menu and optional Desktop shortcuts, an Add/Remove Programs entry, and opt-in checkboxes to **start Burnglass when you sign in** (silent, no browser popup) and to **include Burnglass Strip**. Uninstalling removes all of it and **keeps your settings and usage history**. |
+            | Windows, portable | `burnglass.exe`: no installer. Double-click it; Burnglass runs in the background and opens the dashboard at http://localhost:4747. Logs, updates and Stop are in the dashboard's **Server panel**. |
+            | Windows taskbar strip (optional) | `burnglass-strip.exe`: a checkbox in the installer; with the portable exe, put it next to `burnglass.exe`. Then turn on **Burnglass Strip** in the Server panel. Ported from [openusage-windows](https://github.com/CheesyPoofs346/openusage-windows) (MIT). |
+            | Linux | `burnglass-linux`: `chmod +x burnglass-linux && ./burnglass-linux` |
+            | macOS (Apple Silicon) | `burnglass-macos`: `chmod +x burnglass-macos && xattr -d com.apple.quarantine burnglass-macos; ./burnglass-macos` (the `xattr` clears Gatekeeper's quarantine on the unsigned binary) |
+
+            `pulse.exe`, `pulse-linux`, `pulse-macos` and `pulse-strip.exe` are **the same files under
+            their old names** (CI checks that the bytes match). They are there so installed Pulse 1.x
+            copies can update themselves in one click. You don't need to download them.
+
+            ### Upgrading from Pulse
+            - **One click:** Pulse 1.x offers this release in its Server panel. The update replaces the
+              exe **in place, under its old name**, so your Claude Code status line and effort hook,
+              Start-with-Windows entry, shortcuts and pinned taskbar icon keep working.
+            - **Installer:** running `BurnglassSetup.exe` over a PulseSetup or `pulse.exe --install`
+              install upgrades it **in the same folder** (`%LOCALAPPDATA%\Programs\Pulse`). You get
+              `burnglass.exe`, a `pulse.exe` twin kept for existing hooks, Burnglass shortcuts in place
+              of the Pulse ones, and a single Add/Remove Programs entry. A fresh install goes to
+              `%LOCALAPPDATA%\Programs\Burnglass`.
+            - **Your data:** on its first start Burnglass **copies** your settings and history from
+              `~/.pulse` to `~/.burnglass`. The old `~/.pulse` folder stays where it is as a backup and
+              is never deleted. (The one edit Burnglass makes there: it removes the Meshy API key from
+              the old copy, so a key you later revoke doesn't linger.)
+            - `PULSE_*` environment variables still work; `BURNGLASS_*` ones win when both are set.
 
             ### These binaries are unsigned
-            Pulse ships without a code-signing certificate, so Windows SmartScreen will warn on
-            `PulseSetup.exe`, `pulse.exe` and `pulse-strip.exe` — click **More info → Run anyway**.
-            The installer does not change that; every asset is built in the open by the workflow in
-            this repo, and the sha256 of each is shown in the asset list.
+            Burnglass ships without a code-signing certificate, so Windows SmartScreen will warn on
+            `BurnglassSetup.exe`, `burnglass.exe` and `burnglass-strip.exe`. Click **More info → Run
+            anyway**. Every asset is built in the open by the workflow in this repository, and the
+            sha256 of each is shown in the asset list.
 
-            Pulse updates itself: when a new release is out, the header shows an update pill and the
-            Server panel installs it in one click (sha256-verified). Double-clicking a newer
-            `pulse.exe` over a running old one takes over automatically.
+            Burnglass updates itself. When a new release is out, the header shows an update pill and
+            the Server panel installs it in one click (sha256-verified). Double-clicking a newer
+            `burnglass.exe` over a running old one takes over automatically.
 
             ### Local and private
-            Pulse binds to `127.0.0.1` and reads your agents' logs (`~/.claude`, `~/.codex`, and Gemini
-            CLI / Continue / Cline / Roo Code when present) strictly read-only. Its own files live in
-            `~/.pulse`; the only things it writes elsewhere are ones you ask for (the installer, the
-            "start with Windows" entry, Desktop shortcuts, and a self-update replacing its own
-            executable). Usage data never leaves your machine.
+            Burnglass binds to `127.0.0.1` and reads your agents' logs (`~/.claude`, `~/.codex`, and
+            Gemini CLI / Continue / Cline / Roo Code when present) strictly read-only. Its own files live
+            in `~/.burnglass`. The only things it writes elsewhere are ones you ask for: the installer,
+            the "start with Windows" entry, Desktop shortcuts, and a self-update replacing its own
+            executable. Usage data never leaves your machine.
             Network calls: the GitHub version check and public download/star counters (on by default;
             `--no-update-check` disables both) and, only if you turn them on, the account meters
             (`api.anthropic.com`, `chatgpt.com`) and Meshy credits (`api.meshy.ai`). Discord presence
             (opt-in) talks only to the Discord desktop app's local socket.
 
-            See the [README](https://github.com/ReFxFrank/Pulse-Usage-Monitor#readme) for every feature
-            and the [CHANGELOG](https://github.com/ReFxFrank/Pulse-Usage-Monitor/blob/main/CHANGELOG.md)
+            See the [README](${{ github.server_url }}/${{ github.repository }}#readme) for every feature
+            and the [CHANGELOG](${{ github.server_url }}/${{ github.repository }}/blob/main/CHANGELOG.md)
             for what changed.
+
+      # A prerelease must never become /releases/latest (that is what every
+      # installed copy's update check reads). Verify what GitHub actually
+      # recorded, and demote the release on the spot if it is wrong.
+      - name: Verify prerelease is not latest
+        if: env.PRERELEASE == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rel="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG")"
+          id="$(jq -r .id <<<"$rel")"
+          pre="$(jq -r .prerelease <<<"$rel")"
+          latest="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || true)"
+          echo "release $TAG: prerelease=$pre; latest is ${latest:-<none>}"
+          if [ "$pre" != "true" ] || [ "$latest" = "$TAG" ]; then
+            echo "::error::$TAG was published as a normal/latest release - demoting it to a prerelease"
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$id" -F prerelease=true -f make_latest=false >/dev/null
+            exit 1
+          fi
+
+      # The release page's digests are what the v1 updater verifies against:
+      # each legacy asset must carry the same sha256 as its new-name twin.
+      - name: Verify published digests
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          assets="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq '.assets[] | [.name, (.digest // "")] | @tsv')"
+          echo "$assets"
+          echo "asset count: $(grep -c . <<<"$assets")"
+          fail=0
+          for pair in "burnglass.exe pulse.exe" "burnglass-linux pulse-linux" "burnglass-macos pulse-macos" "burnglass-strip.exe pulse-strip.exe"; do
+            # shellcheck disable=SC2086 # intentional split of "new legacy"
+            set -- $pair
+            a="$(awk -F'\t' -v n="$1" '$1==n{print $2}' <<<"$assets")"
+            b="$(awk -F'\t' -v n="$2" '$1==n{print $2}' <<<"$assets")"
+            if [ "$1" = burnglass-strip.exe ] && [ -z "$a$b" ]; then continue; fi
+            if [ -z "$a" ] || [ -z "$b" ]; then
+              echo "::warning::no digest recorded for $1 or $2 yet"; continue
+            fi
+            [ "$a" = "$b" ] || { echo "::error::$2 digest $b != $1 digest $a"; fail=1; }
+          done
+          exit $fail

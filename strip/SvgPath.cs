@@ -1,11 +1,11 @@
 // Ported from CheesyPoofs346/openusage-windows (tray/) under the MIT License,
 // Copyright (c) 2026 Robin Ebers. Renamed per that project's trademark policy;
-// adapted to be fed by Pulse's local /api/summary. See strip/LICENSE-openusage.
+// adapted to be fed by Burnglass's (formerly Pulse's) local /api/summary. See strip/LICENSE-openusage.
 
 using System.Drawing.Drawing2D;
 using System.Globalization;
 
-namespace PulseStrip;
+namespace BurnglassStrip;
 
 // Minimal SVG path (`d` attribute) → GraphicsPath, supporting M/L/H/V/C/S/Q/T/Z (absolute + relative,
 // implicit repeats). Enough for the single-path provider marks in web/icons/*.svg — a direct port of

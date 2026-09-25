@@ -1,6 +1,6 @@
 // Ported from CheesyPoofs346/openusage-windows (tray/) under the MIT License,
 // Copyright (c) 2026 Robin Ebers. Renamed per that project's trademark policy;
-// adapted to be fed by Pulse's local /api/summary. See strip/LICENSE-openusage.
+// adapted to be fed by Burnglass's (formerly Pulse's) local /api/summary. See strip/LICENSE-openusage.
 
 using System.Drawing.Drawing2D;
 using System.Drawing.Text;
@@ -9,7 +9,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 
-namespace PulseStrip;
+namespace BurnglassStrip;
 
 // The macOS "menu-bar pin" strip, recreated on the Windows taskbar. A borderless, per-pixel-alpha
 // (layered) always-on-top window that draws the pinned provider metrics directly onto the taskbar —
@@ -36,7 +36,7 @@ sealed class StripForm : Form
     private bool _flipping;
     private float _flipProgress;
 
-    /// Whether the strip currently has any provider metrics to show (vs. the "Pulse" resting state).
+    /// Whether the strip currently has any provider metrics to show (vs. the "Burnglass" resting state).
     public bool HasCells => _cells.Count > 0;
 
     private int _anchorRight;   // the strip grows leftward from this x (kept near the tray)
@@ -48,9 +48,10 @@ sealed class StripForm : Form
     private bool _moved;
 
     private const int Height_ = 40;
-    private static readonly string PosFile = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-        ".pulse", "strip.json");
+    private const string RestingText = "Burnglass";
+    // State lives in the app home (AppPaths): reads fall back to the Pulse-era copy, writes never
+    // touch it.
+    private const string PosName = "strip.json";
 
     public StripForm()
     {
@@ -191,22 +192,21 @@ sealed class StripForm : Form
             ? "$" + (n / 1000).ToString(n / 1000 >= 100 ? "0" : "0.0", CultureInfo.InvariantCulture) + "K"
             : "$" + n.ToString("0", CultureInfo.InvariantCulture);
 
-    private static readonly string CacheFile = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".pulse", "strip_cells.json");
+    private const string CacheName = "strip_cells.json";
 
     private void SaveCache()
     {
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(CacheFile)!);
-            File.WriteAllText(CacheFile, JsonSerializer.Serialize(_cells));
+            Directory.CreateDirectory(AppPaths.Home);
+            File.WriteAllText(AppPaths.PathOf(CacheName), JsonSerializer.Serialize(_cells));
         }
         catch { }
     }
 
     private static List<Cell> LoadCache()
     {
-        try { return JsonSerializer.Deserialize<List<Cell>>(File.ReadAllText(CacheFile)) ?? new(); }
+        try { return JsonSerializer.Deserialize<List<Cell>>(File.ReadAllText(AppPaths.ReadPath(CacheName))) ?? new(); }
         catch { return new(); }
     }
 
@@ -269,7 +269,11 @@ sealed class StripForm : Form
 
         int total = leftPad;
         for (int i = 0; i < _cells.Count; i++) total += gGlyph + gGap + (int)Math.Ceiling(widths[i]) + cellPad;
-        if (_cells.Count == 0) total = 120;
+        // Resting state (no data yet): the product name, measured so a high-DPI render never clips it.
+        using var fRest = new Font("Segoe UI", 8.5f, FontStyle.Regular);
+        if (_cells.Count == 0)
+            total = Math.Max((int)MathF.Round(120 * k),
+                2 * leftPad + (int)Math.Ceiling(mg.MeasureString(RestingText, fRest, 999, sf).Width));
 
         using var bmp = new Bitmap(Math.Max(total, 1), h);
         using (var g = Graphics.FromImage(bmp))
@@ -286,10 +290,7 @@ sealed class StripForm : Form
             using var b2 = new SolidBrush(c2);
 
             if (_cells.Count == 0)
-            {
-                using var fb = new Font("Segoe UI", 8.5f, FontStyle.Regular);
-                g.DrawString("Pulse", fb, b2, leftPad, h / 2f - 8 * k, sf);
-            }
+                g.DrawString(RestingText, fRest, b2, leftPad, h / 2f - 8 * k, sf);
 
             int x = leftPad;
             for (int i = 0; i < _cells.Count; i++)
@@ -349,7 +350,7 @@ sealed class StripForm : Form
     }
 
     // ---- positioning ----
-    private void LoadPosition()
+    private void LoadPosition(bool useSaved = true)
     {
         var scr = Screen.PrimaryScreen!;
         int taskbarH = scr.Bounds.Height - scr.WorkingArea.Height;
@@ -359,9 +360,10 @@ sealed class StripForm : Form
         _y = scr.Bounds.Bottom - taskbarH + (taskbarH - hs) / 2;
         try
         {
-            if (File.Exists(PosFile))
+            string posFile = AppPaths.ReadPath(PosName);
+            if (useSaved && File.Exists(posFile))
             {
-                using var doc = JsonDocument.Parse(File.ReadAllText(PosFile));
+                using var doc = JsonDocument.Parse(File.ReadAllText(posFile));
                 var r = doc.RootElement;
                 if (r.TryGetProperty("right", out var pr)) _anchorRight = pr.GetInt32();
                 if (r.TryGetProperty("y", out var py)) _y = py.GetInt32();
@@ -378,16 +380,18 @@ sealed class StripForm : Form
     {
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(PosFile)!);
-            File.WriteAllText(PosFile, $"{{\"right\":{_anchorRight},\"y\":{_y}}}");
+            Directory.CreateDirectory(AppPaths.Home);
+            File.WriteAllText(AppPaths.PathOf(PosName), $"{{\"right\":{_anchorRight},\"y\":{_y}}}");
         }
         catch { }
     }
 
+    // Back to the default spot, persisted by WRITING it rather than deleting the saved file: with the
+    // Pulse-era fallback a delete would just bring the old ~/.pulse position back, and nothing under
+    // ~/.pulse is ever deleted.
     public void ResetPosition()
     {
-        try { if (File.Exists(PosFile)) File.Delete(PosFile); } catch { }
-        _posLoaded = false; LoadPosition(); Render();
+        _posLoaded = false; LoadPosition(useSaved: false); SavePosition(); Render();
     }
 
     private void KeepOnTop()

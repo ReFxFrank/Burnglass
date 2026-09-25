@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Burnglass Strip (formerly Pulse Strip): the taskbar strip + popover,
+       ported from CheesyPoofs346/openusage-windows (MIT, (c) 2026 Robin Ebers)
+       and fed by Burnglass's local /api/summary instead of the upstream Swift
+       engine. Build-time component only — server.js stays zero-dependency.
+       Published as burnglass-strip.exe (CI also ships the same bytes as
+       pulse-strip.exe for Pulse 1.x layouts). -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>burnglass-strip</AssemblyName>
+    <RootNamespace>BurnglassStrip</RootNamespace>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <!-- Explorer / Task Manager identity. The exe icon is the app icon; the
+         strip itself never paints it (brand rule: the taskbar/tray surfaces
+         must not show the ember dot as if it were a status). -->
+    <ApplicationIcon>..\build\brand\burnglass.ico</ApplicationIcon>
+    <Product>Burnglass Strip</Product>
+    <AssemblyTitle>Burnglass Strip</AssemblyTitle>
+    <Company>ReFxFrank</Company>
+    <Copyright>Copyright (c) 2026 ReFxFrank. Portions (c) 2026 Robin Ebers (openusage-windows, MIT).</Copyright>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2792.45" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The popover UI ships INSIDE the single-file exe (extracted to
+         <home>/strip-web at startup, see AppPaths) so the release asset is one
+         file. A web/ folder next to the exe still wins for development. -->
+    <EmbeddedResource Include="web\**\*">
+      <LogicalName>web/%(RecursiveDir)%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+</Project>
