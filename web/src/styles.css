@@ -1,5 +1,5 @@
 /* =============================================================================
-   Pulse · "Command Center" — tokens, base, frame and shared primitives.
+   Burnglass · "Command Center" — tokens, base, frame and shared primitives.
    Section styles live in src/sections/<Name>.css, scoped under .sec-<id>;
    primitives are defined here once and never redefined per section.
 
@@ -8,6 +8,13 @@
    <html data-theme="light"> forces it (lib.js applyTheme / useTheme).
    Rules: every colour is a token; no backdrop-filter; nothing loops;
    html.lite and prefers-reduced-motion remove transitions and animations.
+
+   Brand: the "Glass" identity (brand/final/tokens.css + BRAND.md). One job per
+   colour — the ice accent family is INTERACTIVE + BRAND (buttons, focus, nav,
+   radios/checks, meters, magnitude bars; the --q/--ef ramps are its tints).
+   Amber/red stay reserved for status (--warn/--crit), sources keep --s1…--s6
+   and providers --fam-*. The ember orange lives ONLY inside the logo mark
+   (src/brand/*.svg) — it is never a UI token, series, badge or state.
    ============================================================================= */
 
 :root {
@@ -43,6 +50,9 @@
 
   /* ---- motion (hover/focus only; nothing loops) -------------------------------- */
   --dur-1: 120ms; --dur-2: 200ms; --ease: cubic-bezier(.2, .7, .2, 1);
+
+  /* ---- brand paints: the logo mark ONLY — never UI state, series or text ------ */
+  --brand-ice: #4cd4f7; --brand-ember: #f9601f; --brand-tile: #0d2a36;
 }
 
 /* ---- DARK (default) ------------------------------------------------------------- */
@@ -52,19 +62,20 @@
   --panel-2: #171a22;   --panel-3: #1e212b;   --hover: #1a1d26;
   --line: #22252f;      --line-2: #2e323e;
   --text: #edeff5;      --text-2: #b4b8c6;    --text-3: #8d92a4;   --text-4: #5f6475;
-  --accent: #8f80ff;    --accent-hi: #a698ff; --accent-soft: #211e3d; --accent-line: #4a4196; --on-accent: #0c0b16;
+  /* accent = the brand's ice (OKLCH hue 219): interaction + brand, never a data series */
+  --accent: #4cd4f7;    --accent-hi: #93e6ff; --accent-soft: #062732; --accent-line: #0f586e; --on-accent: #01121a;
   --good: #34c47c;      --good-soft: #0f2419; --good-line: #1d4a31;
   --warn: #f2aa3c;      --warn-soft: #251c0c; --warn-line: #5a4318;
   --crit: #f47171;      --crit-soft: #2a1314; --crit-line: #5e2527;
   /* categorical — sources only (validated: adjacent CVD ΔE ≥ 8.4, ≥3:1 on panel) */
   --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300;
-  /* sequential violet — heatmap + single-series magnitude */
-  --q1: #1f1d38; --q2: #2b2757; --q3: #3b3480; --q4: #4f44aa; --q5: #6758d2; --q6: #8676f2; --q7: #ab9fff;
-  --bar: #7a6bf0;       --bar-track: #1c1e29;
+  /* sequential ice — heatmap + single-series magnitude (OKLCH L .27 → .86) */
+  --q1: #092b35; --q2: #094151; --q3: #0a5c71; --q4: #117995; --q5: #2099ba; --q6: #3cbbe1; --q7: #85e0ff;
+  --bar: #33aed1;       --bar-track: #1c1e29;
   /* effort — ordinal ramp, low → max */
-  --ef1: #4c42a3; --ef2: #6457cc; --ef3: #8272ee; --ef4: #a497ff; --ef5: #cdc6ff; --ef-def: #4a4f5e;
+  --ef1: #276d81; --ef2: #2b90ac; --ef3: #3ab5d6; --ef4: #69d6f7; --ef5: #c1effe; --ef-def: #4a4f5e;
   /* meters */
-  --m-track: #202232; --m-fill: #8f80ff;
+  --m-track: #18252c; --m-fill: #4cd4f7;
   /* chart chrome */
   --grid: #1d2029; --axis: #2e323e;
   /* provider marks */
@@ -92,15 +103,15 @@
     --panel-2: #f6f7f9; --panel-3: #eceef3;   --hover: #f0f1f5;
     --line: #e0e3e9;    --line-2: #cdd1da;
     --text: #0f1118;    --text-2: #414755;    --text-3: #5b6172;   --text-4: #9aa0ae;
-    --accent: #5a45de;  --accent-hi: #4a36cc; --accent-soft: #eeebfe; --accent-line: #c8c0fa; --on-accent: #ffffff;
+    --accent: #034d73;  --accent-hi: #053d5e; --accent-soft: #e6f5fe; --accent-line: #afd4eb; --on-accent: #ffffff;
     --good: #0f7d4a;    --good-soft: #e4f4ea; --good-line: #a9dcbd;
     --warn: #9a5800;    --warn-soft: #fdf3e1; --warn-line: #efcf94;
     --crit: #c02d2d;    --crit-soft: #fde8e8; --crit-line: #f1baba;
     --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300;
-    --q1: #efedfd; --q2: #dcd7fb; --q3: #c1b8f7; --q4: #a193f0; --q5: #7f6de6; --q6: #5f4bd8; --q7: #3f2db4;
-    --bar: #6d5ae6;     --bar-track: #eef0f4;
-    --ef1: #c6bef7; --ef2: #a193f0; --ef3: #7f6de6; --ef4: #5f4bd8; --ef5: #3f2db4; --ef-def: #b9bdc8;
-    --m-track: #e8e6f6; --m-fill: #6450e3;
+    --q1: #e2f4fa; --q2: #bfe3f1; --q3: #93cde1; --q4: #64b3cd; --q5: #3498b6; --q6: #147c98; --q7: #015d74;
+    --bar: #11597e;     --bar-track: #eef0f4;
+    --ef1: #a7d7e8; --ef2: #6ab7d1; --ef3: #3498b6; --ef4: #0d7995; --ef5: #015a71; --ef-def: #b9bdc8;
+    --m-track: #dfecf1; --m-fill: #034d73;
     --grid: #eceef2; --axis: #d3d7df;
     --fam-claude: #c96442; --fam-openai: #0e8f6f; --fam-google: #2f6fe0;
     --fam-deepseek: #3d59f0; --fam-glm: #0b8aa6; --fam-meta: #0659c8; --fam-xai: #4a4f5c;
@@ -118,15 +129,15 @@
   --panel-2: #f6f7f9; --panel-3: #eceef3;   --hover: #f0f1f5;
   --line: #e0e3e9;    --line-2: #cdd1da;
   --text: #0f1118;    --text-2: #414755;    --text-3: #5b6172;   --text-4: #9aa0ae;
-  --accent: #5a45de;  --accent-hi: #4a36cc; --accent-soft: #eeebfe; --accent-line: #c8c0fa; --on-accent: #ffffff;
+  --accent: #034d73;  --accent-hi: #053d5e; --accent-soft: #e6f5fe; --accent-line: #afd4eb; --on-accent: #ffffff;
   --good: #0f7d4a;    --good-soft: #e4f4ea; --good-line: #a9dcbd;
   --warn: #9a5800;    --warn-soft: #fdf3e1; --warn-line: #efcf94;
   --crit: #c02d2d;    --crit-soft: #fde8e8; --crit-line: #f1baba;
   --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300;
-  --q1: #efedfd; --q2: #dcd7fb; --q3: #c1b8f7; --q4: #a193f0; --q5: #7f6de6; --q6: #5f4bd8; --q7: #3f2db4;
-  --bar: #6d5ae6;     --bar-track: #eef0f4;
-  --ef1: #c6bef7; --ef2: #a193f0; --ef3: #7f6de6; --ef4: #5f4bd8; --ef5: #3f2db4; --ef-def: #b9bdc8;
-  --m-track: #e8e6f6; --m-fill: #6450e3;
+  --q1: #e2f4fa; --q2: #bfe3f1; --q3: #93cde1; --q4: #64b3cd; --q5: #3498b6; --q6: #147c98; --q7: #015d74;
+  --bar: #11597e;     --bar-track: #eef0f4;
+  --ef1: #a7d7e8; --ef2: #6ab7d1; --ef3: #3498b6; --ef4: #0d7995; --ef5: #015a71; --ef-def: #b9bdc8;
+  --m-track: #dfecf1; --m-fill: #034d73;
   --grid: #eceef2; --axis: #d3d7df;
   --fam-claude: #c96442; --fam-openai: #0e8f6f; --fam-google: #2f6fe0;
   --fam-deepseek: #3d59f0; --fam-glm: #0b8aa6; --fam-meta: #0659c8; --fam-xai: #4a4f5c;
@@ -196,10 +207,20 @@ code, .code {
   position: sticky; top: 0; max-height: 100vh; overflow-y: auto; overscroll-behavior: contain;
   padding: var(--sp-4) var(--sp-3); display: flex; flex-direction: column; gap: var(--sp-5); min-height: 100vh;
 }
-.brand { display: flex; align-items: center; gap: 10px; padding: 0 var(--sp-1); min-width: 0; }
-.logo { width: 30px; height: 30px; border-radius: 8px; background: var(--accent); color: var(--on-accent); display: grid; place-items: center; flex: none; }
-.brand-name { font-size: var(--fs-md); font-weight: var(--fw-semi); letter-spacing: -.01em; line-height: 18px; }
+/* ---- brand lockup (rail + mobile header): 30 px mark · wordmark over a sub-line.
+   Lockup ratios (BRAND.md): gap = 17/64 of the mark (8 px), cap = 26/64 (12.19 px). */
+.brand { display: flex; align-items: center; gap: 8px; padding: 0 var(--sp-1); min-width: 0; }
+.bmark { display: block; flex: none; user-select: none; }
+.wm { display: block; flex: none; overflow: visible; }
+.wm .wm-i { fill: var(--text); }
+.wm .wm-g { fill: var(--accent); }
+.brand-name { margin: 0; line-height: 0; }
+.brand-name .wm { margin: 1px 0 3px; }
 .brand-sub { font-size: var(--fs-2xs); line-height: var(--lh-2xs); color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* whole-page state glyph (stopped / unreachable); the loading state shows the mark */
+.state-ic { width: 40px; height: 40px; border-radius: var(--r-md); display: grid; place-items: center; flex: none; background: var(--panel-2); border: 1px solid var(--line-2); color: var(--text-2); }
+.state-ic.warn { background: var(--warn-soft); border-color: var(--warn-line); color: var(--warn); }
+.state-ic .ic { width: 20px; height: 20px; }
 
 .nav { display: flex; flex-direction: column; gap: 1px; }
 .nav a { display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 var(--sp-2); border-radius: var(--r-sm); color: var(--text-2); font-weight: var(--fw-med); transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease); }

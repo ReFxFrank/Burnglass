@@ -17,7 +17,7 @@ import {
   readSourceFilter, writeSourceFilter, readPeriod, writePeriod,
   fireAlertNotifications, requestAlertPermission, notifyPermission,
 } from './lib.js';
-import { Icon } from './icons.jsx';
+import { Icon, BrandMark, Wordmark } from './icons.jsx';
 import { Btn, IconBtn, Pill, Sheet, StopButton, WarnBar, Empty, Swatch, Est, Seg, Panel, Section, cx } from './ui.jsx';
 import { MiniOverview } from './mini.jsx';
 
@@ -187,12 +187,12 @@ export default function App() {
   }
   if (!data) {
     return error ? (
-      <PageState icon="alert" title="Can’t reach the server">
+      <PageState icon="alert" tone="warn" title="Can’t reach the server">
         Is the {BRAND} server running? Start it by double-clicking <code>{EXE_NAME}</code> (or <code>node server.js</code> from source).
         <span className="paths" style={{ display: 'block', marginTop: 8 }}>{error}</span>
       </PageState>
     ) : (
-      <PageState icon="pulse" title="Reading your Claude Code history…">
+      <PageState icon="brand" title="Reading your Claude Code history…">
         The first read can take a few seconds on a large history.
       </PageState>
     );
@@ -344,10 +344,10 @@ function Rail({ data, periods, period, onPeriod, srcFilter, onFilter, colorMap, 
     <aside className="rail" aria-label="Navigation and filters">
       <div className="rail-in">
         <div className="brand">
-          <span className="logo"><Icon name="pulse" /></span>
+          <BrandMark size={30} />
           <div className="mh-brand">
-            <div className="brand-name">{BRAND}</div>
-            <div className="brand-sub">Usage monitor · <span className="mono">v{data.version}</span></div>
+            <div className="brand-name"><Wordmark label={BRAND} /></div>
+            <div className="brand-sub">Every agent’s burn · <span className="mono">v{data.version}</span></div>
           </div>
         </div>
 
@@ -617,9 +617,9 @@ function MobileHeader({ data, error, period, srcSummary, multiSource, onOpen }) 
     <>
       <header className="mhead">
         <div className="mh-row">
-          <span className="logo"><Icon name="pulse" /></span>
+          <BrandMark size={30} />
           <div className="mh-brand">
-            <h1 className="brand-name">{BRAND}</h1>
+            <h1 className="brand-name"><Wordmark label={BRAND} /></h1>
             <div className="brand-sub">v{data.version} · updated {hm(data.generatedAt)}</div>
           </div>
           <span className="sp" />
@@ -690,11 +690,15 @@ function Footer({ data }) {
 }
 
 // ---- whole-page states (no payload yet / stopped) -------------------------------------------------
-function PageState({ icon, title, children }) {
+// icon="brand" shows the Burnglass mark (loading); any other icon sits in a
+// neutral tile, or an amber one with tone="warn" (the server can't be reached).
+function PageState({ icon, tone, title, children }) {
   return (
     <div className="boot">
       <div className="boot-in">
-        <span className="logo" aria-hidden="true"><Icon name={icon} /></span>
+        {icon === 'brand'
+          ? <BrandMark size={40} />
+          : <span className={cx('state-ic', tone)} aria-hidden="true"><Icon name={icon} /></span>}
         <h2>{title}</h2>
         <p className="hint">{children}</p>
       </div>

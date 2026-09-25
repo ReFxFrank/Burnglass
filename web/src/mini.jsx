@@ -4,7 +4,7 @@ import {
   shortDate, srcLabel, tokens, useTick,
 } from './lib.js';
 import { MeterBar, Seg, Tip, cx } from './ui.jsx';
-import { Icon } from './icons.jsx';
+import { Icon, BrandMark, Wordmark } from './icons.jsx';
 import { FamilyMark } from './logos.jsx';
 import './mini.css';
 
@@ -155,7 +155,8 @@ export function MiniOverview({ data }) {
   return (
     <div className="mini">
       <div className="minitop">
-        <span className="minibrand"><Icon name="pulse" size={14} />{BRAND}</span>
+        {/* one-line lockup: the pixel-snapped 24 px mark + wordmark (cap 24·26/64 px, ≈13.4 px type) */}
+        <span className="minibrand"><BrandMark size={24} /><Wordmark cap={9.75} centered label={BRAND} /></span>
         <a className="minifull" href="#">Full dashboard<Icon name="right" size={12} /></a>
       </div>
       {alerts.length > 0 && (
