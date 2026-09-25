@@ -16,7 +16,10 @@
  * leaves this machine. NETWORK CALLS, EXHAUSTIVELY — every one of them is
  * either opt-out or opt-in, and none of them sends anything about you:
  *   - api.github.com — version check + community-reach counters (PUBLIC repo
- *     numbers read IN, nothing sent OUT). Opt-out: --no-update-check.
+ *     numbers read IN, nothing sent OUT), and — on the start right after a
+ *     one-click update, packaged Windows exe only — that release's strip
+ *     asset (the Burnglass Strip is refreshed to the server's version).
+ *     Opt-out for all of it: --no-update-check.
  *   - api.anthropic.com — Claude account limit meters. Opt-in.
  *   - chatgpt.com — Codex account token totals. Opt-in.
  *   - api.meshy.ai — Meshy 3D credit balance + task credit usage. Opt-in
@@ -3711,7 +3714,8 @@ function buildSummary(sourceFilter, opts) {
   // feature exists.
   payload.tray = { supported: process.platform === 'win32', enabled: trayDesired !== null ? trayDesired : readConfig().tray === true };
   payload.openusage = { supported: process.platform === 'win32', enabled: readConfig().openusage === true, path: findOpenUsage() };
-  payload.strip = { supported: process.platform === 'win32', enabled: readConfig().strip === true, path: findPulseStrip() };
+  // refresh: the post-update strip refresh's outcome on this start (additive).
+  payload.strip = { supported: process.platform === 'win32', enabled: readConfig().strip === true, path: findPulseStrip(), refresh: stripRefreshForPayload() };
   // Run at startup: registry-backed (not config), memoized so this costs
   // nothing per build.
   payload.startup = startupForPayload();
@@ -4004,6 +4008,9 @@ function seaAsset(key) {
 //   - install (packaged builds, user-clicked): download the platform asset,
 //     verify its sha256 digest from the API, swap executables via rename
 //     (a running exe can be renamed, just not deleted), relaunch, exit.
+//   - after that relaunch (--after-update, packaged Windows only): the SAME
+//     release's strip asset, when a managed Burnglass Strip is out of date
+//     (see refreshStripAfterUpdate beside the strip code).
 // Any failure leaves the current install untouched and points at the
 // releases page instead. No usage data is ever transmitted.
 //
@@ -4298,6 +4305,8 @@ function relaunchAfterUpdate(exePath) {
 // After an update the previous exe sits renamed aside — remove it once it is
 // no longer locked (called at startup; failures are retried on the next run).
 function cleanupOldExecutable() {
+  // The strip's aside copies from refreshStripAfterUpdate (own gate).
+  try { cleanupStripLeftovers(); } catch (_) { /* never fatal */ }
   if (!seaApi) return;
   const oldPath = process.execPath + '.old';
   try {
@@ -6668,8 +6677,9 @@ function findPulseStrip() {
     // New name first at every spot, then the v1 name (upgraders put
     // pulse-strip.exe beside pulse.exe or in ~/.pulse/bin — the 105 MB bin/
     // folder is deliberately NOT copied by the migration, so it is looked up
-    // in place).
-    const exeDir = path.dirname(process.execPath);
+    // in place; after a one-click update refreshStripAfterUpdate puts a
+    // current burnglass-strip.exe in <home>/bin, which wins over it).
+    const exeDir = stripExeDir();
     const legacy = legacyCompatHome();
     const candidates = [
       path.join(exeDir, 'burnglass-strip.exe'), // beside the packaged exe
@@ -6688,8 +6698,11 @@ function findPulseStrip() {
   return resolved;
 }
 function launchPulseStrip() {
-  if (process.platform !== 'win32') return;
-  if (envv('NO_STRIP_SPAWN')) {
+  // BURNGLASS_STRIP_PROC_STUB (test hook, see stripProcStub) records the
+  // launch instead of spawning, on any platform.
+  const stub = stripProcStub();
+  if (process.platform !== 'win32' && !stub) return;
+  if (envv('NO_STRIP_SPAWN') && !stub) {
     console.log('[burnglass] strip spawn suppressed (BURNGLASS_NO_STRIP_SPAWN — test hook)');
     return;
   }
@@ -6698,6 +6711,7 @@ function launchPulseStrip() {
     console.warn('[burnglass] strip: burnglass-strip.exe not found — download it from the Burnglass release next to your server binary, or set "stripPath" in ' + homeLabel('config.json'));
     return;
   }
+  if (stub) { stubStripLaunch(stub, exe); return; }
   // Dedupe on BOTH image names: an old pulse-strip.exe still on the taskbar
   // means don't start burnglass-strip.exe (the frozen PulseStrip_SingleInstance
   // mutex would bounce it anyway, but this avoids the flash).
@@ -6716,6 +6730,446 @@ function launchPulseStrip() {
       console.warn('[burnglass] strip failed to start: ' + e.message);
     }
   });
+}
+
+// ---- STRIP REFRESH AFTER UPDATE (Windows, packaged exe) --------------------
+// A one-click update swaps only the SERVER exe, so every strip user kept the
+// strip they once dropped in (a v1.34 user updated to v2 still ran the v1.34
+// pulse-strip.exe). On the start right after an update (--after-update, which
+// the v1.34 and v2 updaters pass to the relaunched exe) the strip exe is
+// brought up to THIS release:
+//   - only a packaged Windows exe, only when update checks are allowed (the
+//     SAME updateCheck / --no-update-check gate as checkForUpdate, and the
+//     same PUBLIC GitHub release data — nothing about the user is sent), and
+//     never when config.stripPath names a strip the user manages;
+//   - managed targets = strip exes that EXIST beside the server exe (each
+//     refreshed under its OWN name — shortcuts, pins and a v1 layout point at
+//     it) and in <home>/bin. Never the dev strip/dist-strip, and never a file
+//     inside ~/.pulse (hard rule 3b: nothing there is renamed or replaced): a
+//     strip found only in ~/.pulse/bin gets a FRESH burnglass-strip.exe in
+//     <home>/bin instead, which findPulseStrip prefers;
+//   - the release is looked up BY TAG (v<PULSE_VERSION>), so the strip only
+//     ever moves to the version the server now runs. The asset named like
+//     the target wins, else its byte-identical alias; no sha256 digest →
+//     skipped (fail closed); a local file with the same sha256 is left alone;
+//   - ONE verified download (size + sha256, sane minimum size) per distinct
+//     digest, then per target installUpdate's rename-aside swap
+//     (<t>.download → <t>, the previous bytes kept as <t>.old until the next
+//     start's cleanup) with rollback — a running strip can be renamed, not
+//     overwritten;
+//   - a server-managed strip (config.strip === true, loopback bind) that is
+//     running is stopped (taskkill) and relaunched from the new file. On such
+//     a start the listen callback hands its usual strip launch to this code,
+//     so the strip is launched exactly once, after the files are in place.
+// Never fatal and never blocking: every failure is logged, reported in
+// payload.strip.refresh, and the server runs on.
+//
+// Test hooks (envv — BURNGLASS_* or PULSE_*; the real after-update condition
+// is the --after-update flag itself, which a suite passes on the command line):
+//   BURNGLASS_STRIP_REFRESH_FORCE=1   treat this process as the packaged
+//       Windows exe for the strip refresh + leftover cleanup (the win32 and
+//       packaged gates only; after-update, updateCheck and stripPath still
+//       apply)
+//   BURNGLASS_STRIP_EXE_DIR=<dir>     the folder treated as "beside the
+//       server exe" (findPulseStrip and the refresh)
+//   BURNGLASS_STRIP_RELEASE_API=<url> GitHub API root for the release-by-tag
+//       lookup (default https://api.github.com)
+//   BURNGLASS_STRIP_PROC_STUB=<dir>   replaces tasklist/taskkill/spawn for the
+//       strip: <dir>/running present = a strip runs; a stop appends the
+//       taskkill argv to <dir>/kills.log and removes `running` (kept when
+//       <dir>/sticky exists — a strip that will not die); a launch appends
+//       "launch <exe>" (or "already-running <exe>") to <dir>/launches.log
+const STRIP_NAMES = ['burnglass-strip.exe', 'pulse-strip.exe'];
+// The real strip is a ~100 MB self-contained .NET exe; anything this small is
+// an error page or a truncated file, whatever its digest says.
+const STRIP_MIN_BYTES = 2 * 1024 * 1024;
+const STRIP_DOWNLOAD_MAX_MS = 10 * 60 * 1000;
+const STRIP_STOP_WAIT_MS = 5000;
+const STRIP_RELAUNCH_DELAY_MS = 1500;
+let stripRefreshState = null; // payload.strip.refresh
+
+function stripExeDir() { return envv('STRIP_EXE_DIR') || path.dirname(process.execPath); }
+function stripProcStub() { return envv('STRIP_PROC_STUB') || ''; }
+function stripRefreshPlatformOk() {
+  return !!envv('STRIP_REFRESH_FORCE') || (process.platform === 'win32' && !!seaApi);
+}
+function stripReleaseUrl() {
+  const root = String(envv('STRIP_RELEASE_API') || 'https://api.github.com').replace(/\/+$/, '');
+  return root + '/repos/' + UPDATE_REPO + '/releases/tags/' + encodeURIComponent('v' + PULSE_VERSION);
+}
+// The real path of p, even when p (or its last few parts) does not exist yet:
+// the nearest existing ancestor is resolved (links and junctions followed)
+// and the rest re-appended. Compared case-insensitively on Windows.
+function realishPath(p) {
+  let cur = path.resolve(String(p));
+  const rest = [];
+  for (;;) {
+    try {
+      const r = fs.realpathSync.native(cur);
+      const full = rest.length ? path.join(r, ...rest.reverse()) : r;
+      return process.platform === 'win32' ? full.toLowerCase() : full;
+    } catch (_) { /* walk up */ }
+    const up = path.dirname(cur);
+    if (up === cur) { const r = path.resolve(String(p)); return process.platform === 'win32' ? r.toLowerCase() : r; }
+    rest.push(path.basename(cur));
+    cur = up;
+  }
+}
+// Is p the legacy ~/.pulse or inside it, by real path (a <home> that IS
+// ~/.pulse — pre-migration, degraded, pinned there, or linked to it — counts)?
+function insideLegacyHome(p) {
+  const L = realishPath(legacyHomePath()), P = realishPath(p);
+  return P === L || P.startsWith(L.endsWith(path.sep) ? L : L + path.sep);
+}
+function setStripRefresh(status, extra) {
+  stripRefreshState = Object.assign({ status, at: Date.now(), version: PULSE_VERSION }, extra || {});
+  summaryMemo = { at: 0, payload: null }; // payload.strip carries it
+}
+function stripRefreshForPayload() {
+  const s = stripRefreshState;
+  if (!s) return null;
+  return Object.assign({}, s, s.files ? { files: s.files.map((f) => Object.assign({}, f)) } : {});
+}
+// Payload/marker-safe error text: fs errors become "CODE (syscall)" (their
+// messages carry full paths); everything else is our own or a network
+// message, capped.
+function stripErrText(e) {
+  if (!e) return 'unknown error';
+  if (e.code && e.syscall) return e.code + ' (' + e.syscall + ')';
+  return String(e.message || e).slice(0, 200);
+}
+
+// Which files to refresh: { targets: [{path, name, where, fresh}], reason? }.
+function stripRefreshTargets() {
+  const spots = [
+    { dir: stripExeDir(), where: 'exe-folder' },
+    { dir: path.join(appHome(), 'bin'), where: 'home-bin' },
+  ];
+  const targets = [], seen = new Set();
+  let legacyBeside = false; // a strip beside the server exe, inside ~/.pulse
+  let legacyHomeBin = false;
+  for (const s of spots) {
+    for (const name of STRIP_NAMES) {
+      const p = path.join(s.dir, name);
+      if (!isFileAt(p)) continue;
+      const id = realishPath(p);
+      if (seen.has(id)) continue; // the server exe living in <home>/bin
+      seen.add(id);
+      if (insideLegacyHome(p)) {
+        if (s.where === 'exe-folder') legacyBeside = true; else legacyHomeBin = true;
+        continue;
+      }
+      targets.push({ path: p, name, where: s.where, fresh: false });
+    }
+  }
+  if (targets.length) return { targets };
+  // A strip beside a server exe that itself lives in ~/.pulse would still win
+  // findPulseStrip's order over a fresh <home>/bin copy — nothing useful to do.
+  if (legacyBeside) return { targets, reason: 'the strip sits next to the server inside the old Pulse folder, which is never modified' };
+  const legacy = legacyCompatHome();
+  const inLegacyBin = legacyHomeBin || (legacy && STRIP_NAMES.some((n) => isFileAt(path.join(legacy, 'bin', n))));
+  // (reasons land in the payload: no paths in them)
+  if (!inLegacyBin) return { targets, reason: 'no Burnglass Strip next to the server or in the data folder\'s bin folder' };
+  const binDir = path.join(appHome(), 'bin');
+  if (insideLegacyHome(binDir)) {
+    // Pre-migration / degraded (retried next start) or pinned there.
+    return { targets, reason: 'the data folder is the old Pulse folder, which is never modified — its strip is left as it is' };
+  }
+  return { targets: [{ path: path.join(binDir, 'burnglass-strip.exe'), name: 'burnglass-strip.exe', where: 'home-bin', fresh: true }] };
+}
+
+function sha256File(p) {
+  return new Promise((resolve, reject) => {
+    const h = crypto.createHash('sha256');
+    let s;
+    try { s = fs.createReadStream(p); } catch (e) { return reject(e); }
+    s.on('data', (d) => h.update(d));
+    s.on('error', reject);
+    s.on('end', () => resolve(h.digest('hex')));
+  });
+}
+function fetchText(u) {
+  return new Promise((resolve, reject) => fetchUrl(u, {}, (err, body) => (err ? reject(err) : resolve(body))));
+}
+// Stream asset → dest, verifying size + sha256 (+ the minimum size). Settles
+// only once dest is CLOSED, so the caller can unlink a rejected file at once
+// (Windows refuses to delete a file that is still open).
+function downloadStripAsset(asset, dest) {
+  return new Promise((resolve, reject) => {
+    fetchUrl(asset.url, { asStream: true, timeoutMs: 300000 }, (err, res) => {
+      if (err) return reject(err);
+      let out;
+      try { out = fs.createWriteStream(dest); } catch (e) { try { res.destroy(); } catch (_) {} return reject(e); }
+      const hash = crypto.createHash('sha256');
+      const deadline = Date.now() + STRIP_DOWNLOAD_MAX_MS;
+      let bytes = 0, failure = null;
+      const abort = (e) => {
+        if (!failure) failure = e || new Error('download failed');
+        try { res.destroy(); } catch (_) {}
+        try { out.destroy(); } catch (_) {}
+      };
+      res.on('data', (d) => {
+        hash.update(d);
+        bytes += d.length;
+        if (asset.size > 0 && bytes > asset.size) abort(new Error(`size mismatch (more than ${asset.size} bytes)`));
+        else if (Date.now() > deadline) abort(new Error('download took too long'));
+      });
+      res.on('error', abort);
+      res.on('aborted', () => abort(new Error('download interrupted')));
+      res.on('close', () => { if (!res.complete) abort(new Error('download interrupted')); });
+      out.on('error', abort);
+      out.on('close', () => {
+        if (failure) return reject(failure);
+        if (bytes < STRIP_MIN_BYTES) return reject(new Error(`download too small (${bytes} bytes)`));
+        if (asset.size > 0 && bytes !== asset.size) return reject(new Error(`size mismatch (got ${bytes}, expected ${asset.size})`));
+        if (hash.digest('hex') !== asset.digest) return reject(new Error('sha256 mismatch — refusing to install'));
+        resolve(bytes);
+      });
+      res.pipe(out);
+    });
+  });
+}
+// installUpdate's swap, per strip file: previous .old out of the way, the
+// current file aside to .old, the verified download into place — rolled back
+// when the last rename fails. A fresh target has nothing to set aside.
+function swapStripFile(t, dl) {
+  if (t.fresh) { fs.renameSync(dl, t.path); return; }
+  const old = t.path + '.old';
+  try { fs.unlinkSync(old); } catch (_) { /* none, or still locked (then the next rename fails) */ }
+  fs.renameSync(t.path, old);
+  try {
+    fs.renameSync(dl, t.path);
+  } catch (e) {
+    try { fs.renameSync(old, t.path); } catch (_) {} // roll back
+    throw e;
+  }
+}
+
+async function runStripRefresh(targets) {
+  const finish = (status, extra) => {
+    setStripRefresh(status, extra);
+    return stripRefreshState;
+  };
+  const label = (t) => t.name + (t.where === 'home-bin' ? ' (' + homeLabel('bin') + ')' : ' (next to the server)');
+  let body;
+  try {
+    body = await fetchText(stripReleaseUrl());
+  } catch (e) {
+    if (e && e.status === 404) return finish('skipped', { reason: 'no v' + PULSE_VERSION + ' release on GitHub' });
+    return finish('failed', { error: 'release lookup failed: ' + stripErrText(e) });
+  }
+  let rel = null;
+  try { rel = JSON.parse(body); } catch (_) {}
+  const assets = rel && Array.isArray(rel.assets) ? rel.assets : null;
+  if (!assets) return finish('failed', { error: 'release lookup failed: unexpected API response' });
+  const digestOf = (a) => {
+    const m = typeof a.digest === 'string' ? /^sha256:([0-9a-f]{64})$/i.exec(a.digest.trim()) : null;
+    return m ? m[1].toLowerCase() : null;
+  };
+  let anyStripAsset = false;
+  const plan = [];
+  for (const t of targets) {
+    const order = [t.name, ...STRIP_NAMES.filter((n) => n !== t.name)];
+    const cands = order.map((n) => assets.find((x) => x && x.name === n)).filter(Boolean);
+    if (cands.length) anyStripAsset = true;
+    // Own name first, else the byte-identical alias — whichever carries a
+    // digest (its bytes are verified against ITS digest either way).
+    const a = cands.find((x) => digestOf(x) && (x.browser_download_url || x.url));
+    if (a) {
+      plan.push({ t, asset: { name: a.name, url: a.browser_download_url || a.url, digest: digestOf(a), size: Number(a.size) > 0 ? Number(a.size) : 0 } });
+    }
+  }
+  if (!plan.length) {
+    return finish('skipped', {
+      reason: anyStripAsset ? 'the release\'s strip asset has no sha256 digest — not replaced (download it manually: ' + RELEASES_PAGE + ')'
+        : 'release v' + PULSE_VERSION + ' has no strip asset',
+    });
+  }
+  const files = [], errors = [];
+  const record = (t, result) => files.push({ file: t.name, where: t.where, result });
+  const needed = [];
+  for (const p of plan) {
+    if (p.t.fresh) { needed.push(p); continue; }
+    try {
+      if ((await sha256File(p.t.path)) === p.asset.digest) {
+        record(p.t, 'current');
+        console.log('[burnglass] strip refresh: ' + label(p.t) + ' is already v' + PULSE_VERSION);
+      } else {
+        needed.push(p);
+      }
+    } catch (e) {
+      record(p.t, 'failed');
+      errors.push(p.t.name + ': ' + stripErrText(e));
+    }
+  }
+  let swapped = 0;
+  // One download per distinct digest (the burnglass-/pulse- pair shares one).
+  const groups = new Map();
+  for (const p of needed) {
+    if (!groups.has(p.asset.digest)) groups.set(p.asset.digest, []);
+    groups.get(p.asset.digest).push(p);
+  }
+  for (const group of groups.values()) {
+    const asset = group[0].asset;
+    const stage = group[0].t.path + '.download';
+    try {
+      if (group[0].t.fresh) fs.mkdirSync(path.dirname(group[0].t.path), { recursive: true });
+      console.log(`[burnglass] strip refresh: downloading ${asset.name} v${PULSE_VERSION}…`);
+      const bytes = await downloadStripAsset(asset, stage);
+      console.log(`[burnglass] strip refresh: verified ${asset.name} (${(bytes / 1048576).toFixed(1)} MB, sha256 ok)`);
+    } catch (e) {
+      try { fs.unlinkSync(stage); } catch (_) {}
+      for (const p of group) record(p.t, 'failed');
+      errors.push(asset.name + ': ' + stripErrText(e));
+      console.warn('[burnglass] strip refresh: download of ' + asset.name + ' failed: ' + ((e && e.message) || e) + ' — the current strip is kept');
+      continue;
+    }
+    // Every copy is staged BEFORE the first swap moves the staged download.
+    const ready = [{ p: group[0], dl: stage }];
+    for (const p of group.slice(1)) {
+      const dl = p.t.path + '.download';
+      try {
+        await fs.promises.copyFile(stage, dl);
+        ready.push({ p, dl });
+      } catch (e) {
+        try { fs.unlinkSync(dl); } catch (_) {}
+        record(p.t, 'failed');
+        errors.push(p.t.name + ': ' + stripErrText(e));
+      }
+    }
+    for (const { p, dl } of ready) {
+      try {
+        swapStripFile(p.t, dl);
+        swapped++;
+        record(p.t, p.t.fresh ? 'created' : 'updated');
+        console.log('[burnglass] strip refresh: ' + (p.t.fresh ? 'placed ' : 'updated ') + label(p.t) + ' → v' + PULSE_VERSION);
+      } catch (e) {
+        try { fs.unlinkSync(dl); } catch (_) {}
+        record(p.t, 'failed');
+        errors.push(p.t.name + ': ' + stripErrText(e));
+        console.warn('[burnglass] strip refresh: could not replace ' + label(p.t) + ': ' + ((e && e.message) || e) + ' — the current strip is kept');
+      }
+    }
+  }
+  if (swapped) stripMemo = { at: 0, key: null, path: null }; // a new <home>/bin copy may win now
+  const st = errors.length ? finish('failed', { error: errors.join('; ').slice(0, 400), files })
+    : finish(swapped ? 'updated' : 'current', { files });
+  return Object.assign({ swapped }, st);
+}
+
+// Entry point (listen callback). Calls done(result) exactly once — at once
+// when there is nothing to refresh on this start (result null, or a skip),
+// else after the refresh settles; result.swapped > 0 when a file changed.
+function refreshStripAfterUpdate(opts, done) {
+  done = once(done || (() => {}));
+  if (!IS_AFTER_UPDATE || !stripRefreshPlatformOk()) return done(null);
+  const skip = (reason) => {
+    setStripRefresh('skipped', { reason });
+    console.log('[burnglass] strip refresh skipped: ' + reason);
+    return done(stripRefreshState);
+  };
+  if (!opts || !opts.updateCheck) return skip('update checks are off (--no-update-check / "updateCheck": false)');
+  const c = readConfig();
+  if (typeof c.stripPath === 'string' && c.stripPath) return skip('"stripPath" is set — a strip at a path you chose is never replaced');
+  let found;
+  try { found = stripRefreshTargets(); } catch (e) {
+    setStripRefresh('failed', { error: stripErrText(e) });
+    console.warn('[burnglass] strip refresh failed: ' + ((e && e.message) || e));
+    return done(stripRefreshState);
+  }
+  if (!found.targets.length) return skip(found.reason);
+  console.log('[burnglass] strip refresh: checking ' + found.targets.map((t) => t.name).join(', ') + ' against release v' + PULSE_VERSION);
+  runStripRefresh(found.targets).then((st) => {
+    if (st.status === 'failed') console.warn('[burnglass] strip refresh failed: ' + st.error);
+    else if (st.status === 'skipped') console.log('[burnglass] strip refresh skipped: ' + st.reason);
+    return st;
+  }, (e) => {
+    setStripRefresh('failed', { error: stripErrText(e) });
+    console.warn('[burnglass] strip refresh failed: ' + ((e && e.message) || e));
+    return stripRefreshState;
+  }).then((st) => done(st))
+    // A throw in the launch that follows must not become an unhandled
+    // rejection (which ends the process on Node >= 15).
+    .catch((e) => console.warn('[burnglass] strip relaunch after the refresh failed: ' + ((e && e.message) || e)));
+}
+
+// After the refresh (or at once when it did not apply): a server-managed
+// strip starts once. When files were swapped and the OLD strip still runs, it
+// is stopped first (the mutex would bounce the new one) and waited for.
+function launchStripAfterRefresh(res) {
+  if (!res || !(res.swapped > 0)) return launchPulseStrip();
+  const relaunch = () => { stripMemo = { at: 0, key: null, path: null }; launchPulseStrip(); };
+  stripRunning((running) => {
+    if (!running) return relaunch();
+    console.log('[burnglass] strip refresh: restarting the running strip on v' + PULSE_VERSION);
+    stopStrips(() => waitStripsGone(Date.now() + STRIP_STOP_WAIT_MS, (gone) => {
+      if (!gone) console.warn('[burnglass] strip refresh: the old strip did not exit within ' + (STRIP_STOP_WAIT_MS / 1000) + ' s — it runs the new version from its next start');
+      // The killed strip's WebView2 browser processes wind down on their own
+      // (they watch their host) and the new strip opens the SAME WebView2
+      // profile folder — give them a moment, like the installer's Sleep
+      // after StopRunning.
+      setTimeout(relaunch, gone ? STRIP_RELAUNCH_DELAY_MS : 0);
+    }));
+  });
+}
+function stripRunning(cb) {
+  const stub = stripProcStub();
+  if (stub) return cb(isFileAt(path.join(stub, 'running')));
+  imagesRunning(STRIP_NAMES, cb);
+}
+function stopStrips(cb) {
+  cb = once(cb);
+  const args = ['/F', '/IM', STRIP_NAMES[0], '/IM', STRIP_NAMES[1]];
+  const stub = stripProcStub();
+  if (stub) {
+    try { fs.appendFileSync(path.join(stub, 'kills.log'), JSON.stringify(args) + '\n'); } catch (_) {}
+    if (!isFileAt(path.join(stub, 'sticky'))) { try { fs.unlinkSync(path.join(stub, 'running')); } catch (_) {} }
+    return cb();
+  }
+  // taskkill.exe from System32 by absolute path (a copy beside the exe or in
+  // the cwd must not be picked up); argv array, never a shell string. Its exit
+  // status is ignored — "not found" for the image that was not running is
+  // normal; waitStripsGone is the real check. Deliberately NO /T: a browser
+  // the strip opened ("Open dashboard") can be its child process, and a tree
+  // kill would close the user's browser.
+  const exe = path.join(process.env.SystemRoot || process.env.windir || 'C:\\Windows', 'System32', 'taskkill.exe');
+  try {
+    require('child_process').execFile(exe, args, { windowsHide: true, timeout: 15000 }, () => cb());
+  } catch (_) { cb(); }
+}
+function waitStripsGone(deadline, cb) {
+  stripRunning((running) => {
+    if (!running) return cb(true);
+    if (Date.now() >= deadline) return cb(false);
+    setTimeout(() => waitStripsGone(deadline, cb), 250);
+  });
+}
+function stubStripLaunch(stub, exe) {
+  const running = isFileAt(path.join(stub, 'running'));
+  try { fs.appendFileSync(path.join(stub, 'launches.log'), (running ? 'already-running ' : 'launch ') + exe + '\n'); } catch (_) {}
+  if (!running) { try { fs.writeFileSync(path.join(stub, 'running'), exe); } catch (_) {} }
+}
+// Start-up cleanup (from cleanupOldExecutable): the aside copies a refresh
+// left in the managed folders — never inside ~/.pulse, never for a stripPath
+// the user manages.
+function cleanupStripLeftovers() {
+  if (!stripRefreshPlatformOk()) return;
+  const c = readConfig();
+  if (typeof c.stripPath === 'string' && c.stripPath) return;
+  for (const dir of [stripExeDir(), path.join(appHome(), 'bin')]) {
+    if (insideLegacyHome(dir)) continue;
+    for (const n of STRIP_NAMES) {
+      for (const ext of ['.old', '.download']) {
+        const p = path.join(dir, n + ext);
+        try {
+          if (isFileAt(p)) {
+            fs.unlinkSync(p);
+            if (ext === '.old') console.log('[burnglass] removed previous strip version (' + n + ext + ')');
+          }
+        } catch (_) { /* still locked — next start */ }
+      }
+    }
+  }
 }
 
 // ---- RUN AT STARTUP (opt-in, Windows) -------------------------------------
@@ -7064,7 +7518,7 @@ function startServer(port, host, opts) {
         // statusline poll (stripEnabled:false -> it exits itself).
         if (on && process.platform === 'win32' && boundLoopback) launchPulseStrip();
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, strip: { supported: process.platform === 'win32', enabled: on, path: findPulseStrip() } }));
+        res.end(JSON.stringify({ ok: true, strip: { supported: process.platform === 'win32', enabled: on, path: findPulseStrip(), refresh: stripRefreshForPayload() } }));
         return;
       }
       if (route === '/api/meshy/enable' || route === '/api/meshy/disable') {
@@ -7311,8 +7765,24 @@ function startServer(port, host, opts) {
     if (((opts && opts.tray) || readConfig().tray === true) && LOOPBACK_HOSTS.has(host)) startTray(port);
     // OpenUsage companion (opt-in) — start the taskbar app alongside Burnglass.
     if (readConfig().openusage === true && LOOPBACK_HOSTS.has(host)) launchOpenUsage();
-    // Burnglass Strip (opt-in) — the own taskbar strip companion.
-    if (readConfig().strip === true && LOOPBACK_HOSTS.has(host)) launchPulseStrip();
+    // Burnglass Strip (opt-in) — the own taskbar strip companion. On the
+    // start right after a one-click update the strip exe is first brought up
+    // to this release (refreshStripAfterUpdate — async, never blocks this
+    // callback) and the launch happens ONCE, after it: a strip launched now
+    // would be the old one, only to be stopped again. Any other start calls
+    // back at once, so the launch is unchanged. Config is re-read then — a
+    // dashboard toggle during a long download wins.
+    const stripLoopback = LOOPBACK_HOSTS.has(host);
+    const afterStripRefresh = once((res) => {
+      if (readConfig().strip === true && stripLoopback) launchStripAfterRefresh(res);
+      else if (res && res.swapped > 0) console.log('[burnglass] strip refresh: the strip runs v' + PULSE_VERSION + ' from its next start');
+    });
+    try {
+      refreshStripAfterUpdate({ updateCheck: !!(opts && opts.updateCheck) }, afterStripRefresh);
+    } catch (e) { // never let it take the rest of this callback down
+      console.warn('[burnglass] strip refresh failed: ' + ((e && e.message) || e));
+      afterStripRefresh(null);
+    }
     if (LOOPBACK_HOSTS.has(host)) {
       console.log(`  open: http://localhost:${port}\n`);
     } else {
@@ -8587,7 +9057,8 @@ function main() {
     console.log('  --no-daemon       (Windows exe) keep running in this console window');
     console.log('                    instead of backgrounding');
     console.log('  --no-update-check disable the GitHub version check and community counters');
-    console.log('                    (Burnglass\'s only default-on network calls; also:');
+    console.log('                    (and the strip refresh after a one-click update —');
+    console.log('                    Burnglass\'s only default-on network calls; also:');
     console.log('                    BURNGLASS_NO_UPDATE_CHECK=1 or {"updateCheck":false} in');
     console.log('                    ' + homeLabel('config.json') + ')');
     console.log('  --version         print the version and exit');
