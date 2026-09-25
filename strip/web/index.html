@@ -1,36 +1,42 @@
 <!DOCTYPE html>
 <!--
-  Pulse Strip popover UI.
+  Burnglass Strip popover UI (formerly Pulse Strip).
   Adapted from openusage-windows (https://github.com/rebers/openusage) tray/web/index.html,
   MIT License, Copyright (c) 2026 Robin Ebers. See strip/LICENSE-openusage.
-  Restyled for Pulse (dark-only theme); OpenUsage name/logo removed per its trademark policy.
+  Restyled for Burnglass (dark-only, the "Glass" palette); OpenUsage name/logo removed per its
+  trademark policy.
 -->
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Pulse</title>
+<title>Burnglass</title>
 <style>
-/* ---- Pulse design tokens (dark-only; mirrors web/src/styles.css) ---- */
+/* ---- Burnglass design tokens (dark-only). Surfaces, ink and status are the dashboard's
+   Command Center dark set; the accent family is the "Glass" ice-cyan (brand tokens.css).
+   Amber/red mean status only; the ember orange lives in the logo mark, never here. ---- */
 :root{
   --font: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
 
-  --tray:#141318;                 /* popover panel */
-  --card:#1e1d26;                 /* cards */
-  --track:#2a2938;                /* meter track */
-  --segbg:#171620;                /* segmented control trough */
+  --tray:#0a0b0f;                 /* popover page (--bg); the host's Backdrop matches it */
+  --card:#12141a;                 /* cards (--panel) */
+  --card-line:#22252f;            /* card edge (--line) */
+  --track:#18252c;                /* meter track (--m-track) */
+  --segbg:#171a22;                /* segmented control trough (--panel-2) */
+  --hover:#1a1d26;
   --hair:rgba(255,255,255,.08);
 
-  --text:#f4f3fa;
-  --text2:#b9b6cc;
-  --text3:#78748f;
+  --text:#edeff5;
+  --text2:#b4b8c6;
+  --text3:#8d92a4;
 
-  --accent:#9b8cff;
-  --good:#22b892;                 /* meter fill, used < 60% */
-  --warn:#e0a132;                 /* meter fill, used >= 60% */
-  --bad:#f27878;                  /* meter fill, used >= 85% */
-  --seg-on-bg:#38354a;
-  --seg-on-shadow:0 1px 2px rgba(0,0,0,.4);
+  --accent:#4cd4f7;               /* Glass ice */
+  --fill:#4cd4f7;                 /* meter fill (--m-fill), used < 80% */
+  --bar:#33aed1;                  /* magnitude bars (--bar) */
+  --warn:#f2aa3c;                 /* meter fill, used >= 80% */
+  --bad:#f47171;                  /* meter fill, used >= 95% (--crit) */
+  --seg-on-bg:#1e212b;            /* --panel-3 */
+  --seg-on-shadow:0 1px 2px rgba(0,0,0,.35);
 
   /* density */
   --pad-h:14px;                   /* row horizontal padding */
@@ -53,14 +59,14 @@ html,body{background:var(--tray);color:var(--text);font-family:var(--font);
 #app{padding:12px var(--pad-h) 10px}
 
 /* ---------- Total Spend card ---------- */
-.spend{background:var(--card);border-radius:var(--radius);padding:12px 14px 14px;margin-bottom:var(--section-gap)}
+.spend{background:var(--card);border:1px solid var(--card-line);border-radius:var(--radius);padding:12px 14px 14px;margin-bottom:var(--section-gap)}
 .spend-head{display:flex;align-items:center;gap:5px;margin-bottom:12px}
 .spend-title{font-size:15px;font-weight:600}
 .info{width:14px;height:14px;border-radius:50%;color:var(--text2);flex:0 0 auto}
 .spend-head .spacer{flex:1}
 .iconbtn{width:22px;height:22px;color:var(--text2);cursor:default;display:flex;align-items:center;justify-content:center}
 
-.seg{position:relative;display:flex;background:var(--segbg);border-radius:9px;padding:2px;margin-bottom:14px;
+.seg{position:relative;display:flex;background:var(--segbg);border:1px solid var(--card-line);border-radius:9px;padding:2px;margin-bottom:14px;
   touch-action:none;user-select:none;-webkit-user-select:none}
 .seg-thumb{position:absolute;top:2px;left:0;bottom:2px;width:33%;border-radius:7px;background:var(--seg-on-bg);
   box-shadow:var(--seg-on-shadow);z-index:0;will-change:transform;
@@ -99,7 +105,7 @@ html,body{background:var(--tray);color:var(--text);font-family:var(--font);
 .mark-fallback{border-radius:50%;display:flex;align-items:center;justify-content:center;
   color:#fff;font-size:10px;font-weight:700;line-height:1;opacity:1}
 
-.card{background:var(--card);border-radius:var(--radius);padding:var(--card-gutter) 0}
+.card{background:var(--card);border:1px solid var(--card-line);border-radius:var(--radius);padding:var(--card-gutter) 0}
 
 /* meter (bounded) row */
 .mrow{padding:var(--bar-row-pad) var(--pad-h)}
@@ -125,7 +131,7 @@ html,body{background:var(--tray);color:var(--text);font-family:var(--font);
 .chrow .tl{font-size:12px;font-weight:600;margin-bottom:6px;display:flex}
 .chrow .tl .note{margin-left:auto;font-weight:400;color:var(--text2)}
 .spark{display:flex;align-items:flex-end;gap:2px;height:18px}
-.spark .b{flex:1;background:var(--accent);border-radius:1px;min-height:1px;opacity:.85}
+.spark .b{flex:1;background:var(--bar);border-radius:1px;min-height:1px}
 
 /* expand caret */
 .caret{display:flex;align-items:center;justify-content:center;color:var(--text2);padding:5px 0;cursor:default}
@@ -151,17 +157,22 @@ body.opening #app{animation:popopen .44s cubic-bezier(.16,1,.3,1)}
 
 /* errored provider (e.g. token invalidated) */
 .errsec .sec-name{color:var(--text)}
-.errcard{background:var(--card);border-radius:var(--radius);padding:10px var(--pad-h);display:flex;gap:9px;align-items:flex-start}
+.errcard{background:var(--card);border:1px solid var(--card-line);border-radius:var(--radius);padding:10px var(--pad-h);display:flex;gap:9px;align-items:flex-start}
 .errcard .warn{color:var(--warn);flex:0 0 auto;margin-top:1px}
 .errcard .msg{font-size:12px;color:var(--text2);line-height:1.35}
 .errcard .msg b{color:var(--text);font-weight:600}
 
-/* footer: dashboard link */
+/* footer: brand + dashboard link */
 .footer{display:flex;align-items:center;gap:6px;padding:8px var(--pad-h) 4px;margin-top:4px}
 .footer .spacer{flex:1}
+.brand{display:flex;align-items:center;gap:6px;min-width:0}
+.brand img{width:16px;height:16px;flex:0 0 auto;display:block}
+/* Wordmark: "Burn" in ink, "glass" in the accent (brand rule 4). */
+.brand .wm{font-size:13px;font-weight:620;letter-spacing:-.018em;color:var(--text)}
+.brand .wm em{font-style:normal;color:var(--accent)}
 .footer .dash{border:0;background:transparent;color:var(--text2);font-family:inherit;font-size:12px;
   font-weight:600;padding:4px 8px;border-radius:7px;cursor:default}
-.footer .dash:hover{background:var(--track);color:var(--accent)}
+.footer .dash:hover{background:var(--hover);color:var(--accent)}
 </style>
 </head>
 <body>
@@ -170,8 +181,8 @@ body.opening #app{animation:popopen .44s cubic-bezier(.16,1,.3,1)}
 "use strict";
 
 /* ---------- theme ---------- */
-// Pulse is dark-only. The host may still call window.setTheme — keep it as a harmless no-op so
-// host calls never throw. No light theme, no toggle, no persistence.
+// The popover is dark-only. The host may still call window.setTheme — keep it as a harmless no-op
+// so host calls never throw. No light theme, no toggle, no persistence.
 window.setTheme = function(){};
 
 // Called by the host each time the popover is shown, to replay the spring-open.
@@ -202,13 +213,15 @@ function mark(node, providerId){ // monochrome provider glyph via CSS mask, or l
   }
 }
 
-// Provider/source colors for glyph fallbacks and the spend donut/legend (Pulse palette).
+// Provider/source colors for glyph fallbacks and the spend donut/legend: the dashboard's provider
+// marks (--fam-*) for the big three, its categorical source series (--s1..s6) for the rest. Never
+// the accent (that is interaction/brand, not a data series) and never the logo's ember.
 const BRAND = {
-  claude:"#d97757", codex:"#10a37f", gemini:"#22b892",
-  cline:"#f27878", roo:"#e77c46", continue:"#b3a5ff",
-  cli:"#4a9bf5", "claude-desktop":"#9b8cff", unknown:"#8886a0"
+  claude:"#d97757", codex:"#19b38d", gemini:"#5b95f5",
+  cline:"#d55181", roo:"#c98500", continue:"#3987e5",
+  cli:"#3987e5", "claude-desktop":"#d97757", unknown:"#8a8f98"
 };
-const SERIES = ["#9b8cff","#22b892","#e0a132","#4a9bf5","#f27878","#e77c46"];
+const SERIES = ["#3987e5","#d95926","#199e70","#c98500","#d55181","#008300"];
 const brandColor = (id,i)=> BRAND[id] || SERIES[i%SERIES.length];
 
 function money(n){ // compact center label: $13.4K, $2.5K, $91.15
@@ -237,10 +250,11 @@ function meterRow(line){
   const remainFrac = 1 - usedFrac;                       // meter shows remaining (Left style)
   const remainPct = Math.round(remainFrac*100);
 
-  // Severity by USED percentage (Pulse thresholds — same as the tray badge):
-  // used >= 85% -> bad, >= 60% -> warn, else good.
+  // Severity by USED percentage, on the dashboard's default alert thresholds (80 / 95) — the same
+  // ones its meters, the tray and the limit notifications use: used >= 95% -> crit, >= 80% -> warn,
+  // else the plain meter fill.
   const usedPct = usedFrac*100;
-  const color = usedPct>=85 ? "var(--bad)" : usedPct>=60 ? "var(--warn)" : "var(--good)";
+  const color = usedPct>=95 ? "var(--bad)" : usedPct>=80 ? "var(--warn)" : "var(--fill)";
 
   const row=el("div","mrow");
   const lbl=el("div","lbl");
@@ -487,7 +501,7 @@ function renderApp(providers, errors){
   const ids=new Set((providers||[]).map(p=>p.providerId));
   const errs=actionableErrors(errors, ids);
   if((!providers || providers.length===0) && errs.length===0){
-    const e=el("div","empty"); e.textContent="No usage yet — Pulse is watching your local logs."; app.appendChild(e); return;
+    const e=el("div","empty"); e.textContent="No usage yet — Burnglass is watching your local logs."; app.appendChild(e); return;
   }
   if(hasSpend(providers)) app.appendChild(spendCard(providers));
   for(const p of providers) app.appendChild(providerSection(p));
@@ -497,11 +511,27 @@ function renderApp(providers, errors){
 
 function footer(){
   const f=el("div","footer");
+  f.appendChild(brandMark());
   f.appendChild(el("div","spacer"));
-  const d=el("button","dash"); d.textContent="Open dashboard →"; d.title="Open the Pulse dashboard";
+  const d=el("button","dash"); d.textContent="Open dashboard →"; d.title="Open the Burnglass dashboard";
   d.onclick=()=>{ try{ window.chrome.webview.postMessage({open:"dashboard"}); }catch(e){} };
   f.appendChild(d);
   return f;
+}
+
+// The logo: the per-size pixel-snapped mark files (never one file scaled by a non-integer factor —
+// the WebView picks by device pixel ratio) + the wordmark.
+function brandMark(){
+  const b=el("span","brand");
+  const img=el("img");
+  img.src="icons/burnglass-16.svg";
+  img.srcset="icons/burnglass-16.svg 1x, icons/burnglass-20.svg 1.25x, icons/burnglass-24.svg 1.5x, icons/burnglass-32.svg 2x";
+  img.width=16; img.height=16; img.alt="";
+  b.appendChild(img);
+  const wm=el("span","wm"); wm.textContent="Burn";
+  const g=el("em"); g.textContent="glass"; wm.appendChild(g);
+  b.appendChild(wm);
+  return b;
 }
 
 // Entry point the host calls: renderData(<array or {providers,errors}>)

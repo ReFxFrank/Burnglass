@@ -1,6 +1,6 @@
 // Ported from CheesyPoofs346/openusage-windows (tray/) under the MIT License,
 // Copyright (c) 2026 Robin Ebers. Renamed per that project's trademark policy;
-// adapted to be fed by Pulse's local /api/summary. See strip/LICENSE-openusage.
+// adapted to be fed by Burnglass's (formerly Pulse's) local /api/summary. See strip/LICENSE-openusage.
 
 using System.Drawing.Drawing2D;
 using System.Globalization;
@@ -12,11 +12,11 @@ using System.Text.Json.Nodes;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 
-namespace PulseStrip;
+namespace BurnglassStrip;
 
-// Pulse Strip host for Windows. A borderless strip painted onto the taskbar band; a left-click pops a
-// borderless, rounded WebView2 window (web/index.html) rendering the popover UI, fed by the running
-// Pulse server's local HTTP API instead of the upstream Swift engine.
+// Burnglass Strip host for Windows. A borderless strip painted onto the taskbar band; a left-click pops
+// a borderless, rounded WebView2 window (web/index.html) rendering the popover UI, fed by the running
+// Burnglass server's local HTTP API instead of the upstream Swift engine.
 static class Program
 {
     [STAThread]
@@ -25,7 +25,7 @@ static class Program
         ApplicationConfiguration.Initialize();
 
         // Headless end-to-end check: show the popover, fetch + render real data, write what the
-        // WebView actually rendered to %TEMP%\pulse_strip_selftest.json, then exit. Verifies the full
+        // WebView actually rendered to %TEMP%\burnglass_strip_selftest.json, then exit. Verifies the full
         // path (window → HTTP API → transform → DOM) without a human clicking the strip.
         if (args.Contains("--selftest"))
         {
@@ -52,13 +52,15 @@ static class Program
             int at = Array.IndexOf(args, "--striptest");
             string stripJson = (at >= 0 && at + 1 < args.Length && File.Exists(args[at + 1]))
                 ? File.ReadAllText(args[at + 1])
-                : (PulseApi.FetchSummary() is string s ? SummaryTransform.ToUi(s) : "[]");
+                : (ServerApi.FetchSummary() is string s ? SummaryTransform.ToUi(s) : "[]");
             strip.SetData(stripJson);
-            strip.RenderToFile(Path.Combine(Path.GetTempPath(), "pulse_striptest_usage.png"), showPrice: false);
-            strip.RenderToFile(Path.Combine(Path.GetTempPath(), "pulse_striptest_price.png"), showPrice: true);
+            strip.RenderToFile(Path.Combine(Path.GetTempPath(), "burnglass_striptest_usage.png"), showPrice: false);
+            strip.RenderToFile(Path.Combine(Path.GetTempPath(), "burnglass_striptest_price.png"), showPrice: true);
             return;
         }
 
+        // FROZEN name (predates the rename): a Pulse-era pulse-strip.exe and a new burnglass-strip.exe
+        // must exclude each other, or both would paint the taskbar.
         using var mutex = new Mutex(true, "PulseStrip_SingleInstance", out bool isNew);
         if (!isNew) return; // already running
 
@@ -80,7 +82,7 @@ static class Program
 //      data feed. It is transformed once (SummaryTransform) and the SAME providers[] payload feeds
 //      both the strip cells (StripForm.SetData extracts progress % + "Last 30 Days" spend) and the
 //      popover page, exactly like upstream's single shared Cli.Fetch. Opening the popover is a
-//      foreground fetch, so Pulse refreshes its account meters per its own cache and what the user
+//      foreground fetch, so the server refreshes its account meters per its own cache and what the user
 //      sees matches Claude Code's /usage panel.
 sealed class AppHost : IDisposable
 {
@@ -100,7 +102,7 @@ sealed class AppHost : IDisposable
         _popover = new PopoverForm { OnOpenDashboard = OpenDashboard };
         _strip = new StripForm
         {
-            IsDark = () => true, // Pulse is dark-only; no theme toggle
+            IsDark = () => true, // the strip is dark-only; no theme toggle
             OnClick = OpenPopover,
             OnRefresh = () => RefreshAll(),
             OnQuit = Quit,
@@ -140,7 +142,7 @@ sealed class AppHost : IDisposable
         {
             System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
             {
-                FileName = PulseApi.BaseUrl() + "/",
+                FileName = ServerApi.BaseUrl() + "/",
                 UseShellExecute = true
             });
         }
@@ -158,7 +160,7 @@ sealed class AppHost : IDisposable
     {
         Task.Run(() =>
         {
-            string? summary = PulseApi.FetchSummary();
+            string? summary = ServerApi.FetchSummary();
             if (summary is null) return; // degrade to last-good; the statusline heartbeat owns failure counting
             string ui = SummaryTransform.ToUi(summary);
             string merged = UsageMerge.Merge(_lastJson, ui);
@@ -176,9 +178,9 @@ sealed class AppHost : IDisposable
         });
     }
 
-    // Heartbeat against the cheap statusline feed. Unreachable server (missing ~/.pulse/server.json
-    // or dead port) → retry every 30s with the strip resting on last-good cells (a fresh install with
-    // no cache shows the "Pulse" resting state); 40 consecutive failures → clean exit.
+    // Heartbeat against the cheap statusline feed. Unreachable server (no live server.json, or a dead
+    // port) → retry every 30s with the strip resting on last-good cells (a fresh install with no cache
+    // shows the "Burnglass" resting state); 40 consecutive failures → clean exit.
     // stripEnabled:false in the feed (the dashboard toggle turned the strip off) → clean exit.
     private void StatusTick()
     {
@@ -186,7 +188,7 @@ sealed class AppHost : IDisposable
         _statusBusy = true;
         Task.Run(() =>
         {
-            string? s = PulseApi.FetchStatusline();
+            string? s = ServerApi.FetchStatusline();
             try
             {
                 _strip.BeginInvoke(() =>
@@ -219,22 +221,25 @@ sealed class AppHost : IDisposable
         });
     }
 
-    private static readonly string LastPayloadFile = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".pulse", "strip-ui.json");
+    private const string LastPayloadName = "strip-ui.json";
 
     private static void SaveLastPayload(string json)
     {
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(LastPayloadFile)!);
-            File.WriteAllText(LastPayloadFile, json);
+            Directory.CreateDirectory(AppPaths.Home);
+            File.WriteAllText(AppPaths.PathOf(LastPayloadName), json);
         }
         catch { }
     }
 
     private static string LoadLastPayload()
     {
-        try { return SafeJson(File.Exists(LastPayloadFile) ? File.ReadAllText(LastPayloadFile) : "[]"); }
+        try
+        {
+            string file = AppPaths.ReadPath(LastPayloadName);
+            return SafeJson(File.Exists(file) ? File.ReadAllText(file) : "[]");
+        }
         catch { return "[]"; }
     }
 
@@ -256,32 +261,140 @@ sealed class AppHost : IDisposable
     public void Dispose() { _refresh.Dispose(); _status.Dispose(); _strip.Dispose(); _popover.Dispose(); }
 }
 
-/// Talks to the running Pulse server over loopback. Discovery via ~/.pulse/server.json {port,host};
+/// Where the strip keeps its state. Burnglass 2.0 moved the server's home from ~/.pulse to
+/// ~/.burnglass (a one-time COPY the server makes on its first start; ~/.pulse stays as a backup).
+/// Resolution mirrors the server's:
+///   1. BURNGLASS_HOME, else its permanent alias PULSE_HOME — verbatim, never mixed with ~/.pulse
+///      (the server passes BURNGLASS_HOME when it launches the strip);
+///   2. ~/.burnglass when it exists;
+///   3. ~/.pulse when THAT exists — a Pulse 1.x server, or one that has not migrated yet. Creating
+///      ~/.burnglass here instead would make the server skip its one-time copy of the user's data;
+///   4. ~/.burnglass on a machine that has neither.
+/// Nothing under ~/.pulse is ever deleted by the strip.
+static class AppPaths
+{
+    public static readonly string LegacyHome;
+    public static readonly string NewHome;
+    public static readonly string Home;
+    /// Home came from an environment variable: use it alone.
+    public static readonly bool Pinned;
+
+    static AppPaths()
+    {
+        string profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        LegacyHome = Path.Combine(profile, ".pulse");
+        NewHome = Path.Combine(profile, ".burnglass");
+        string? env = Environment.GetEnvironmentVariable("BURNGLASS_HOME");
+        if (string.IsNullOrWhiteSpace(env)) env = Environment.GetEnvironmentVariable("PULSE_HOME");
+        if (!string.IsNullOrWhiteSpace(env))
+        {
+            Home = env;
+            Pinned = true;
+        }
+        else if (Directory.Exists(NewHome)) Home = NewHome;
+        else if (Directory.Exists(LegacyHome)) Home = LegacyHome;
+        else Home = NewHome;
+    }
+
+    public static bool HomeIsLegacy => !Pinned && SamePath(Home, LegacyHome);
+
+    /// Where a state file is written.
+    public static string PathOf(string name) => Path.Combine(Home, name);
+
+    /// Where a small state file is read from: the home's own copy, else — until the strip has written
+    /// one there — the Pulse-era copy in ~/.pulse (read only; never modified from here).
+    public static string ReadPath(string name)
+    {
+        string own = PathOf(name);
+        if (Pinned || HomeIsLegacy) return own;
+        try
+        {
+            if (File.Exists(own)) return own;
+            string legacy = Path.Combine(LegacyHome, name);
+            return File.Exists(legacy) ? legacy : own;
+        }
+        catch { return own; }
+    }
+
+    /// Homes whose server.json may describe the running server, best first.
+    public static IEnumerable<string> ServerJsonCandidates()
+    {
+        var seen = new List<string>();
+        foreach (var dir in Pinned ? new[] { Home } : new[] { Home, NewHome, LegacyHome })
+        {
+            if (seen.Any(d => SamePath(d, dir))) continue;
+            seen.Add(dir);
+            yield return Path.Combine(dir, "server.json");
+        }
+    }
+
+    public static bool SamePath(string a, string b)
+    {
+        try
+        {
+            return string.Equals(Path.GetFullPath(a).TrimEnd('\\', '/'), Path.GetFullPath(b).TrimEnd('\\', '/'),
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return string.Equals(a, b, StringComparison.OrdinalIgnoreCase); }
+    }
+}
+
+/// Talks to the running server over loopback. Discovery via <home>/server.json {port,host,pid,startedAt};
 /// contract: never throw, null on any failure, per-call timeouts (5s statusline / 30s summary).
-static class PulseApi
+static class ServerApi
 {
     private const int DefaultPort = 4747;
     private static readonly HttpClient Http = new(); // no global timeout — per-call CTS below
 
-    private static string PulseHome => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".pulse");
+    private sealed record ServerFile(string Host, int Port, bool Alive, double StartedAt);
+
+    // server.json is only ever (re)written, never removed, so a stale one outlives its server — and
+    // during the Pulse → Burnglass switch there can be one in each home (a v1 server writes ~/.pulse, a
+    // v2 one ~/.burnglass). Use the file whose pid is still alive; among those (or if none is), the
+    // most recently started. Reading a stale file first would point the strip at a dead port.
+    private static ServerFile? Discover()
+    {
+        ServerFile? best = null;
+        foreach (var file in AppPaths.ServerJsonCandidates())
+        {
+            try
+            {
+                if (!File.Exists(file)) continue;
+                using var doc = JsonDocument.Parse(File.ReadAllText(file));
+                var r = doc.RootElement;
+                if (r.ValueKind != JsonValueKind.Object) continue;
+                int port = r.TryGetProperty("port", out var p) && p.ValueKind == JsonValueKind.Number && p.TryGetInt32(out var pv) && pv > 0 && pv < 65536 ? pv : DefaultPort;
+                string host = r.TryGetProperty("host", out var h) && h.ValueKind == JsonValueKind.String
+                    && h.GetString() is string hs && hs.Length > 0 ? hs : "127.0.0.1";
+                bool alive = r.TryGetProperty("pid", out var pidEl) && pidEl.ValueKind == JsonValueKind.Number
+                    && pidEl.TryGetInt32(out var pid) && PidAlive(pid);
+                double started = r.TryGetProperty("startedAt", out var sa) && sa.ValueKind == JsonValueKind.Number
+                    && sa.TryGetDouble(out var sv) ? sv : File.GetLastWriteTimeUtc(file).Subtract(DateTime.UnixEpoch).TotalMilliseconds;
+                var cand = new ServerFile(host, port, alive, started);
+                if (best is null || (cand.Alive && !best.Alive) || (cand.Alive == best.Alive && cand.StartedAt > best.StartedAt))
+                    best = cand;
+            }
+            catch { /* unreadable / half-written file: try the next one */ }
+        }
+        return best;
+    }
+
+    private static bool PidAlive(int pid)
+    {
+        if (pid <= 0) return false;
+        try
+        {
+            using var proc = System.Diagnostics.Process.GetProcessById(pid);
+            return true;
+        }
+        catch { return false; }
+    }
 
     public static string BaseUrl()
     {
-        string host = "127.0.0.1";
-        int port = DefaultPort;
-        try
-        {
-            var file = Path.Combine(PulseHome, "server.json");
-            if (File.Exists(file))
-            {
-                using var doc = JsonDocument.Parse(File.ReadAllText(file));
-                var r = doc.RootElement;
-                if (r.TryGetProperty("port", out var p) && p.TryGetInt32(out var pv) && pv > 0) port = pv;
-                if (r.TryGetProperty("host", out var h) && h.GetString() is string hs && hs.Length > 0) host = hs;
-            }
-        }
-        catch { }
+        var found = Discover();
+        string host = found?.Host ?? "127.0.0.1";
+        int port = found?.Port ?? DefaultPort;
         if (host == "0.0.0.0" || host == "::") host = "127.0.0.1";
         if (host.Contains(':') && !host.StartsWith('[')) host = "[" + host + "]"; // bare IPv6
         return $"http://{host}:{port}";
@@ -308,7 +421,7 @@ static class PulseApi
     }
 }
 
-/// Transforms Pulse's /api/summary JSON into the providers[] schema the ported popover page and
+/// Transforms the server's /api/summary JSON into the providers[] schema the ported popover page and
 /// StripForm consume (ui-schema.md). Sources are classified: 'codex' → Codex; gemini/cline/roo/
 /// continue → their own providers; everything else (cli, claude-desktop, unknown, …) → Claude.
 /// Never throws — any parse trouble yields an empty wrapper.
@@ -410,7 +523,7 @@ static class SummaryTransform
             {
                 ["providerId"] = "claude",
                 ["displayName"] = "Claude",
-                ["message"] = "No Claude Code session found — sign in with Claude Code and Pulse picks it up."
+                ["message"] = "No Claude Code session found — sign in with Claude Code and Burnglass picks it up."
             });
         }
 
@@ -423,7 +536,7 @@ static class SummaryTransform
                 if (b.TryGetProperty("stale", out var stl) && stl.ValueKind == JsonValueKind.True) continue;
                 double pct = Num(b, "pct");
                 long? resetsAt = Millis(b, "resetsAt");
-                // Label-driven, not key-driven: Pulse's codex_primary bucket IS the weekly
+                // Label-driven, not key-driven: the server's codex_primary bucket IS the weekly
                 // window (label "Codex · weekly") — keying on the name mislabeled it "Session".
                 string raw = b.TryGetProperty("label", out var lb) ? (lb.GetString() ?? "") : "";
                 string label;
@@ -582,9 +695,9 @@ sealed class PopoverForm : Form
     private int W => (int)MathF.Round(WidthCss * Dpi);
     private int Margin_ => (int)MathF.Round(MarginCss * Dpi);
 
-    // Pulse popover backdrop (pulse-theme.md): the page's own dark panel color, so the spring-open
-    // never flashes a mismatched box. Pulse is dark-only — no theme machinery.
-    private static readonly Color Backdrop = Color.FromArgb(0x14, 0x13, 0x18);
+    // Popover backdrop = the page's own background (--tray in web/index.html, the Command Center
+    // dark --bg #0a0b0f), so the spring-open never flashes a mismatched box. Dark-only.
+    private static readonly Color Backdrop = Color.FromArgb(0x0a, 0x0b, 0x0f);
 
     private readonly bool _sampleShots;
 
@@ -631,8 +744,7 @@ sealed class PopoverForm : Form
 
     private async Task InitWebAsync()
     {
-        var userData = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".pulse", "webview-strip");
+        var userData = AppPaths.PathOf("webview-strip");
         Directory.CreateDirectory(userData);
         var env = await CoreWebView2Environment.CreateAsync(null, userData);
         await _web.EnsureCoreWebView2Async(env);
@@ -651,16 +763,16 @@ sealed class PopoverForm : Form
 
         // Serve the web/ folder over a virtual host so the SVG icon masks resolve cleanly.
         // A web/ folder next to the exe wins (dev builds); otherwise the UI embedded in the
-        // single-file exe is extracted to ~/.pulse/strip-web (Pulse's only writable location).
+        // single-file exe is extracted to <home>/strip-web (the app's only writable location).
         var webDir = ResolveWebDir();
-        core.SetVirtualHostNameToFolderMapping("pulse.local", webDir,
+        core.SetVirtualHostNameToFolderMapping("burnglass.local", webDir,
             CoreWebView2HostResourceAccessKind.Allow);
 
         core.WebMessageReceived += OnWebMessage;
         core.NavigationCompleted += async (_, _) =>
         {
             _ready = true;
-            // Pulse is dark-only; guarded in case the ported page drops setTheme entirely.
+            // Dark-only; guarded in case the ported page drops setTheme entirely.
             try { await core.ExecuteScriptAsync("window.setTheme && window.setTheme('dark')"); } catch { }
             if (_sampleShots) { await CaptureSampleShots(); return; }
             if (_selfTest) { ShowPopover(); return; }
@@ -671,7 +783,7 @@ sealed class PopoverForm : Form
         // index.html after an update, so a new build's UI silently never appears.
         var indexPath = Path.Combine(webDir, "index.html");
         long version = File.Exists(indexPath) ? File.GetLastWriteTimeUtc(indexPath).Ticks : DateTime.UtcNow.Ticks;
-        core.Navigate($"https://pulse.local/index.html?v={version}");
+        core.Navigate($"https://burnglass.local/index.html?v={version}");
     }
 
     private static string ResolveWebDir() => WebAssets.Dir;
@@ -787,14 +899,13 @@ sealed class PopoverForm : Form
     }
 
     /// Render the page's built-in demo payload to a PNG for the README, sized to the full content so
-    /// nothing is cut off. Never touches real provider data. Dark-only (Pulse has no light theme).
+    /// nothing is cut off. Never touches real provider data. Dark-only (the popover has no light theme).
     private async Task CaptureSampleShots()
     {
         var core = _web.CoreWebView2;
-        // ~/.pulse is the only location Pulse writes to — never beside the exe
+        // The home is the only location the app writes to — never beside the exe
         // (which may be Program Files, or the read-only single-file extraction dir).
-        var outDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".pulse", "shots");
+        var outDir = AppPaths.PathOf("shots");
         Directory.CreateDirectory(outDir);
 
         await core.ExecuteScriptAsync("window.setTheme && window.setTheme('dark')");
@@ -826,7 +937,7 @@ sealed class PopoverForm : Form
         if (!_ready) { _pendingShow = true; return; }
         Task.Run(() =>
         {
-            string? summary = PulseApi.FetchSummary();
+            string? summary = ServerApi.FetchSummary();
             string payload = summary is null ? "[]" : SummaryTransform.ToUi(summary);
             try { BeginInvoke(() => Inject(payload)); } catch { }
         });
@@ -836,7 +947,7 @@ sealed class PopoverForm : Form
     {
         if (_web.CoreWebView2 == null) return;
         // Re-serialize through the JSON parser before it becomes part of a script
-        // string: a truncated write or a planted ~/.pulse/strip-ui.json would
+        // string: a truncated write or a planted <home>/strip-ui.json would
         // otherwise be concatenated straight into an eval. Then report height (CSS px).
         string safe = AppHost.SafeJson(payload);
         string script =
@@ -854,10 +965,10 @@ sealed class PopoverForm : Form
                 "height:document.body.scrollHeight,textLen:document.body.innerText.length})");
             try
             {
-                File.WriteAllText(Path.Combine(Path.GetTempPath(), "pulse_strip_selftest.json"),
+                File.WriteAllText(Path.Combine(Path.GetTempPath(), "burnglass_strip_selftest.json"),
                     probe ?? "null");
                 // Capture what the WebView actually paints, so the popover can be inspected headlessly.
-                var png = Path.Combine(Path.GetTempPath(), "pulse_strip_selftest.png");
+                var png = Path.Combine(Path.GetTempPath(), "burnglass_strip_selftest.png");
                 using (var fs = File.Create(png))
                 {
                     await _web.CoreWebView2.CapturePreviewAsync(
@@ -960,7 +1071,7 @@ static class UsageMerge
 
                 // Carry forward only meters that are still MEANINGFUL. A window whose
                 // resetsAt has passed has rolled over — the transformer dropped it on
-                // purpose (Pulse marks those buckets stale), and re-inserting it here
+                // purpose (the server marks those buckets stale), and re-inserting it here
                 // would chain a dead percentage forward through every later refresh and
                 // across restarts, rendering "Resets in 1m" forever.
                 var carried = previousLines
@@ -1001,19 +1112,21 @@ static class WebAssets
     public static string IconsDir => Path.Combine(Dir, "icons");
 
     // Dev layout (web/ beside the exe) wins; the shipped single-file exe extracts its embedded
-    // web/** resources to ~/.pulse/strip-web on every launch (tiny — overwrite keeps it current
+    // web/** resources to <home>/strip-web on every launch (tiny — overwrite keeps it current
     // across updates without a version dance).
     private static string Resolve()
     {
         var local = Path.Combine(AppContext.BaseDirectory, "web");
         try { if (File.Exists(Path.Combine(local, "index.html"))) return local; } catch { }
-        var target = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".pulse", "strip-web");
+        var target = AppPaths.PathOf("strip-web");
         try
         {
             // Clean slate: a stale file from an older build would otherwise linger
-            // beside the new ones and be served over the virtual host.
-            try { if (Directory.Exists(target)) Directory.Delete(target, recursive: true); } catch { }
+            // beside the new ones and be served over the virtual host. Not in the
+            // Pulse-era home, where nothing is ever deleted — there the files are
+            // just overwritten in place (index.html only references what ships).
+            if (!AppPaths.HomeIsLegacy)
+                try { if (Directory.Exists(target)) Directory.Delete(target, recursive: true); } catch { }
             var asm = System.Reflection.Assembly.GetExecutingAssembly();
             foreach (var name in asm.GetManifestResourceNames())
             {
