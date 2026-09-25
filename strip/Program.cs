@@ -941,12 +941,13 @@ sealed class PopoverForm : Form
         // reflows mid-animation; a new content height resizes it in a single step (SetContentHeight).
         _web.Dock = DockStyle.Fill;
         Controls.Add(_web);
-        // Click-away close. Ignored until the window is actually on screen, and for a brief moment
-        // after (the show can fire a spurious deactivation) — never for the whole animation: that once
-        // swallowed a real click-away and the popover then never closed at all.
+        // Click-away close (the rules live in PopoverDismiss): at once, unless the window is not on
+        // screen yet or it is within 250 ms of Show() (the show can fire a spurious deactivation).
+        // Such an early one is remembered, and WatchFocus closes the popover as soon as the rise is
+        // over if another application holds the foreground — so a click-away is never swallowed.
         Deactivate += (_, _) =>
         {
-            if (_revealed && (DateTime.UtcNow - _shownAt).TotalMilliseconds > 250) Hide();
+            if (_dismiss.Deactivated(NowMs, _revealed)) Hide();
         };
 
         _revealFallback = new System.Windows.Forms.Timer { Interval = RevealFallbackMs };
@@ -1104,7 +1105,6 @@ sealed class PopoverForm : Form
         _revealFallback.Stop();
         _revealed = false;
         _opening = true;
-        _hadFocus = false;
         _motion = !_selfTest && AnimationsEnabled();
         _workArea = Screen.FromPoint(Cursor.Position).WorkingArea;
         _finalBounds = ComputeFinalBounds();
@@ -1113,7 +1113,7 @@ sealed class PopoverForm : Form
 
         bool prime = _ready && !_selfTest && _web.CoreWebView2 != null;
         _cloaked = prime && !_cloakUnreliable && SetCloak(true);
-        _shownAt = DateTime.UtcNow;
+        _dismiss.Shown(NowMs);
         Show();
         TopMost = true;
         Activate();
@@ -1173,10 +1173,10 @@ sealed class PopoverForm : Form
         _revealed = true;
         _revealFallback.Stop();
         if (_cloaked) { SetCloak(false); _cloaked = false; }
-        _shownAt = DateTime.UtcNow;
         // Activation normally took at Show(); if Windows refused it for the cloaked window, take it
-        // now (still inside the click's foreground grant) — click-away closing depends on it.
-        if (GetForegroundWindow() != Handle) { Activate(); NativeActivate(); }
+        // now (still inside the click's foreground grant) — click-away closing depends on it. The
+        // click-away guard keeps counting from Show() unless this has to re-activate (PopoverDismiss).
+        if (_dismiss.Revealed(NowMs, GetForegroundWindow() == Handle)) { Activate(); NativeActivate(); }
         if (_slideOffset > 0) StartSlide(gen);
         else { PlaceWindow(_finalBounds.Y); _opening = false; }
         if (_ready && _web.CoreWebView2 != null) PlayOpen(_motion);
@@ -1501,25 +1501,80 @@ sealed class PopoverForm : Form
     private void NativeActivate() => SetForegroundWindow(Handle);
 
     private readonly System.Windows.Forms.Timer _focusWatch;
-    private DateTime _shownAt;
-    private bool _hadFocus;
+    private readonly PopoverDismiss _dismiss = new();
+    private static double NowMs => Environment.TickCount64; // monotonic, like PopoverDismiss wants
 
-    /// Hide once focus has actually moved to a different application. Waits until the popover has held
-    /// focus at least once, so it can never slam shut during the open animation.
+    /// Hide once focus has actually moved to a different application — after the popover held it, or
+    /// after a click-away the Deactivate guard held back (PopoverDismiss). Waits for the open motion
+    /// to finish, so it can never slam shut mid-rise.
     private void WatchFocus()
     {
         if (!Visible) { _focusWatch.Stop(); return; }
-        if (!_revealed || _opening) return;
-
         IntPtr foreground = GetForegroundWindow();
-        if (foreground == Handle) { _hadFocus = true; return; }
-
+        bool self = foreground == Handle, own = false;
         // Our own other windows (the strip, its context menu) must not close it — the strip's own
         // click handler owns that.
-        GetWindowThreadProcessId(foreground, out uint pid);
-        if (pid == (uint)Environment.ProcessId) return;
+        if (!self)
+        {
+            GetWindowThreadProcessId(foreground, out uint pid);
+            own = pid == (uint)Environment.ProcessId;
+        }
+        if (_dismiss.Poll(_revealed && !_opening, self, own)) Hide();
+    }
+}
 
-        if (_hadFocus) Hide();
+/// When a click-away closes the popover: the decisions behind PopoverForm's Deactivate handler and its
+/// WatchFocus safety net, free of window calls so test/packaging.test.sh can play open timelines
+/// against them. Times are milliseconds on one monotonic clock.
+///  - A Deactivate closes at once, except before the window is revealed (still cloaked) or within
+///    GuardMs of Show() — the show can fire a spurious deactivation. Such an early one is REMEMBERED.
+///  - The guard counts from Show(): revealing (un-cloaking, 30-140 ms later) does not restart it — that
+///    once swallowed every click-away between 250 ms and reveal + 250 ms, and the popover then stayed
+///    open with no focus. Only a reveal that has to take the foreground back restarts it (that
+///    activation can fire its own spurious deactivation).
+///  - The focus poll (every 250 ms) acts only once the open motion is over: our own window has the
+///    foreground -> it held focus; another application's -> close if the popover held focus before,
+///    or if a click-away was held back. Our own other windows (the strip, its menu) never close it.
+sealed class PopoverDismiss
+{
+    public const double GuardMs = 250;
+
+    private double _guardFrom;
+    private bool _hadFocus;   // the popover has held the foreground during this open
+    private bool _lostEarly;  // a deactivation arrived while the guard (or the cloak) held it back
+
+    /// ShowPopover: a new open starts.
+    public void Shown(double now)
+    {
+        _guardFrom = now;
+        _hadFocus = false;
+        _lostEarly = false;
+    }
+
+    /// Reveal: true when the popover must take the foreground back (Windows refused it for the cloaked
+    /// window, or it was lost while cloaked); the guard then restarts from here.
+    public bool Revealed(double now, bool foregroundIsSelf)
+    {
+        if (foregroundIsSelf) return false;
+        _guardFrom = now;
+        return true;
+    }
+
+    /// The form's Deactivate: true = close now.
+    public bool Deactivated(double now, bool revealed)
+    {
+        if (revealed && now - _guardFrom > GuardMs) return true;
+        _lostEarly = true;
+        return false;
+    }
+
+    /// The focus poll: true = close now. `settled` = revealed and the rise has finished.
+    public bool Poll(bool settled, bool foregroundIsSelf, bool foregroundIsOwnProcess)
+    {
+        if (!settled) return false;
+        if (foregroundIsSelf) { _hadFocus = true; _lostEarly = false; return false; }
+        if (foregroundIsOwnProcess) return false;
+        return _hadFocus || _lostEarly;
     }
 }
 

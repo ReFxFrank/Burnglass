@@ -25,6 +25,12 @@
 #    fully visible, fresh data mid-open never fades in twice, fills are
 #    backwards-only, and the host's window-slide curve (OpenMotion, compiled
 #    from Program.cs) equals the page's --ease-decel as Chromium evaluates it.
+#    The popover's click-away rules (PopoverDismiss, compiled from Program.cs)
+#    are played against open timelines wired like PopoverForm: a click on
+#    another app closes it however soon after the reveal it comes (the 250 ms
+#    guard counts from Show, and a held-back click-away is closed by the focus
+#    poll once the rise is over), while no click-away, or our own strip/menu
+#    taking the foreground, never closes it.
 # 2. release.yml: test/packaging/release-workflow.py (python3 + PyYAML).
 #
 # Overrides, for proving a regression against an older tree:
@@ -119,7 +125,7 @@ if ! node - "$STRIP_DIR/Program.cs" "$H" <<'JS'
 const fs = require('fs'), path = require('path');
 const src = fs.readFileSync(process.argv[2], 'utf8');
 function cut(name, optional) {
-  const m = new RegExp('^static class ' + name + '\\b', 'm').exec(src);
+  const m = new RegExp('^(?:static |sealed )?class ' + name + '\\b', 'm').exec(src);
   if (!m) { if (optional) return null; throw new Error('no static class ' + name); }
   let i = src.indexOf('{', m.index), depth = 0;
   for (; i < src.length; i++) {
@@ -142,6 +148,9 @@ if (ms && st) fs.writeFileSync(path.join(process.argv[3], 'ExtractedUi.cs'), hea
 // The popover's open-motion curve (the host's window slide); optional like the above.
 const om = cut('OpenMotion', true);
 if (om) fs.writeFileSync(path.join(process.argv[3], 'ExtractedMotion.cs'), head + om + '\n');
+// The popover's click-away rules (PopoverForm's Deactivate + WatchFocus); optional like the above.
+const pd = cut('PopoverDismiss', true);
+if (pd) fs.writeFileSync(path.join(process.argv[3], 'ExtractedDismiss.cs'), head + pd + '\n');
 JS
 then
   fail "could not extract AppPaths/WebAssets from $STRIP_DIR/Program.cs"
@@ -241,8 +250,77 @@ static class UiHarness
                 Console.WriteLine(a + "=" + ((double)ease.Invoke(null, new object[] { double.Parse(a, inv) })!).ToString("R", inv));
             return 0;
         }
-        Console.WriteLine("usage: transform <file> | tones <json> <pct>... | used <used> <limit> | linetone <json> <line>... | ease <t>...");
+        // `dismiss <case>...`: DismissHarness (compiled only when Program.cs has PopoverDismiss).
+        if (args.Length >= 2 && args[0] == "dismiss")
+        {
+            var dh = Type.GetType("BurnglassStrip.DismissHarness");
+            if (dh == null) { Console.WriteLine("NO-DISMISS"); return 0; }
+            return (int)dh.GetMethod("Run")!.Invoke(null, new object[] { args })!;
+        }
+        Console.WriteLine("usage: transform <file> | tones <json> <pct>... | used <used> <limit> | linetone <json> <line>... | ease <t>... | dismiss <case>...");
         return 2;
+    }
+}
+CS
+fi
+if [ -f "$H/ExtractedDismiss.cs" ]; then
+  cat > "$H/DismissHarness.cs" <<'CS'
+using System.Globalization;
+
+namespace BurnglassStrip;
+
+// `dismiss <case>...` plays one popover open per case against PopoverDismiss, wired the way
+// PopoverForm wires it, in 1 ms steps, and prints "<case>=closed@<ms>" or "<case>=open" (5 s).
+// Show at 0: the popover takes the foreground (refused=1: Windows refused it). The focus poll ticks
+// every 250 ms from Show. Reveal at r (default 90): un-cloaked; when the popover is not the
+// foreground it takes it back - and gets it unless the user has clicked elsewhere meanwhile. The
+// rise lasts s ms (default 190; 0 = no motion). Then, at their times: a = the user clicks another
+// application, own = our own other window (the strip's menu) takes the foreground, back = the user
+// clicks the popover again. Leaving the popover fires a Deactivate unless nodeact=1 (the window
+// never gets one: the focus poll alone must close it).
+static class DismissHarness
+{
+    enum Fg { Self, Own, Other }
+
+    public static int Run(string[] args)
+    {
+        foreach (var c in args.Skip(1)) Console.WriteLine(c + "=" + Play(c));
+        return 0;
+    }
+
+    static string Play(string spec)
+    {
+        var kv = spec.Split(',', StringSplitOptions.RemoveEmptyEntries)
+            .Select(p => p.Split('='))
+            .ToDictionary(p => p[0], p => int.Parse(p[1], CultureInfo.InvariantCulture));
+        int Get(string k, int d) => kv.TryGetValue(k, out var v) ? v : d;
+        int reveal = Get("r", 90), rise = Get("s", 190), away = Get("a", -1), own = Get("own", -1), back = Get("back", -1);
+        bool refused = Get("refused", 0) == 1, noDeact = Get("nodeact", 0) == 1;
+
+        var d = new PopoverDismiss();
+        d.Shown(0);
+        var fg = refused ? Fg.Other : Fg.Self;
+        bool revealed = false, opening = true, clickedAway = false;
+        for (int t = 0; t <= 5000; t++)
+        {
+            if (t == reveal)
+            {
+                revealed = true;
+                if (d.Revealed(t, fg == Fg.Self) && !clickedAway) fg = Fg.Self;
+                if (rise <= 0) opening = false;
+            }
+            if (rise > 0 && t == reveal + rise) opening = false;
+            Fg? to = t == away ? Fg.Other : t == own ? Fg.Own : t == back ? Fg.Self : null;
+            if (to != null)
+            {
+                if (to == Fg.Other) clickedAway = true;
+                bool left = fg == Fg.Self && to != Fg.Self;
+                fg = to.Value;
+                if (left && !noDeact && d.Deactivated(t, revealed)) return "closed@" + t;
+            }
+            if (t > 0 && t % 250 == 0 && d.Poll(revealed && !opening, fg == Fg.Self, fg == Fg.Own)) return "closed@" + t;
+        }
+        return "open";
     }
 }
 CS
@@ -624,6 +702,47 @@ await browser.close();
 process.exit(bad ? 1 : 0);
 JS
   fi
+fi
+
+# ---------------------------------------------------------------------------
+echo "--- strip popover click-away (PopoverDismiss from $STRIP_DIR/Program.cs)"
+if [ ! -f "$H/ExtractedUi.cs" ]; then
+  fail "popover click-away unchecked (no UI harness: MeterScale + SummaryTransform missing)"
+elif [ ! -f "$H/ExtractedDismiss.cs" ]; then
+  fail "no PopoverDismiss in $STRIP_DIR/Program.cs (popover click-away rules unchecked)"
+else
+  # case:expected. Times in ms from the strip click (Show); the poll ticks every 250 ms.
+  CASES=(
+    # A click on another app right after the 250 ms guard closes it AT ONCE, whenever the
+    # reveal came ({primed} at 30-90 ms, the 140 ms fallback): the guard counts from Show.
+    "r=30,a=260:closed@260"
+    "r=90,a=270:closed@270" "r=90,a=300:closed@300" "r=90,a=330:closed@330"
+    "r=140,a=270:closed@270" "r=140,a=300:closed@300" "r=140,a=330:closed@330"
+    "r=140,a=360:closed@360" "r=140,a=385:closed@385"
+    # Held back (inside the guard, or while still cloaked): closed by the first poll after the rise.
+    "r=90,a=200:closed@500" "r=140,a=100:closed@500" "r=0,s=0,a=100:closed@250"
+    # Windows refused the activation at Show; the reveal takes the foreground back and the guard
+    # restarts there - a click-away inside it is held back, not lost.
+    "r=90,refused=1,a=300:closed@500" "r=90,refused=1,a=400:closed@400"
+    # Later click-aways: the Deactivate, or the poll alone when no Deactivate arrives.
+    "r=90,a=2000:closed@2000" "r=90,a=2100,nodeact=1:closed@2250"
+    # Never closes by itself: no click-away (with the fallback, a refused activation, no motion),
+    # our own strip menu taking the foreground inside the guard, or the popover clicked again
+    # after that. (Our menu taking it AFTER the guard is an ordinary Deactivate, as before.)
+    "r=90:open" "r=140:open" "r=90,refused=1:open" "r=0,s=0:open"
+    "r=90,own=150:open" "r=90,own=150,back=600:open" "r=90,own=1000:closed@1000"
+  )
+  specs=(); for c in "${CASES[@]}"; do specs+=("${c%%:*}"); done
+  out=$(ui dismiss "${specs[@]}" 2>&1)
+  bad=""
+  for c in "${CASES[@]}"; do
+    spec=${c%%:*}; want=${c##*:}
+    got=$(printf '%s\n' "$out" | awk -v k="$spec=" 'index($0, k) == 1 { print; exit }')
+    got=${got#"$spec="}
+    [ "$got" = "$want" ] || bad="$bad [$spec: expected $want, got ${got:-$(printf '%s' "$out" | head -1)}]"
+  done
+  if [ -z "$bad" ]; then pass "popover click-away: ${#CASES[@]} open timelines (a click-away 250-385 ms after Show closes at once; a held-back one at the first poll after the rise; nothing else closes it)"
+  else fail "popover click-away:$bad"; fi
 fi
 
 [ $FAILS -eq 0 ] && echo "packaging: all passed" || echo "packaging: $FAILS failure(s)"

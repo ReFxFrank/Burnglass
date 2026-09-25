@@ -126,7 +126,10 @@ instead of the old fixed 60 / 85.
   content fades in from the top. It no longer grows out of a corner with
   text cut off at the edge. On Windows 11 the corners are rounded by Windows,
   with its own border and shadow. Closing is still instant, and with
-  Windows' "Animation effects" turned off the popover simply appears.
+  Windows' "Animation effects" turned off the popover simply appears. A click
+  on another window in the first quarter second after opening now closes it
+  too, right after it has risen (it used to be ignored, and the popover then
+  stayed open until you clicked the strip again).
 
 **The tray icon says why it isn't there.** When the icon can't start,
 System > Integrations now shows why: the exit code, PowerShell's own message
@@ -136,7 +139,8 @@ where the logs are, and a **Retry** button. The row reads *Icon running*,
 `~/.burnglass/tray-error.log`, and the server log gets one line saying how it
 ended. The tray's relaunch after an update now starts PowerShell by full path,
 and taking over the icon from a tray that crashed no longer depends on an
-ignored error.
+ignored error. When *Open dashboard* or the mini view can't start a browser,
+the tray now says so in `burnglass.log` and keeps running.
 
 **Removed: the OpenUsage launcher.** Burnglass Strip replaces it. The System
 toggle, the `openusage` / `openusagePath` config keys and POST

@@ -151,13 +151,19 @@ RES=$?
 # - a lost icon lock (exit 4) is an info line, and running is null (can't tell)
 #   until something polls; a plain status-line poll does NOT count, a
 #   WindowsPowerShell User-Agent (a pre-rc.3 tray) does;
-# - an early exit 0 while wanted is an error, one after disable is not;
+# - an early exit 0 while wanted is an error, one after disable is not, and
+#   neither is one whose LAST line says the menu asked — even after a
+#   non-fatal WARN line (the summary's pick) earlier in the same run;
 # - a non-loopback bind records why nothing started;
 # - the generated tray.ps1 (written by the same path): UTF-8 BOM + ASCII +
 #   CRLF, the FROZEN mutex name, the starting line as the first action, the
-#   setup try/catch (exit 2) + trap, ?from=tray polls, no bare
+#   setup try/catch (exit 2), NO script-level trap, ?from=tray polls, no bare
 #   'powershell.exe' relaunch, balanced brackets outside strings, no
-#   PowerShell 7-only operators; parsed by pwsh when available (PWSH=…).
+#   PowerShell 7-only operators; parsed by pwsh when available (PWSH=…), and
+#   with pwsh its browser-opening menu handlers are dispatched the way
+#   WinForms does (a .NET EventHandler whose caller catches exceptions) with
+#   Start-Process failing: each must return normally and log a WARN — a
+#   script-level trap made the error escape into WinForms.
 PH2=$TMP/home-diag
 mkdir -p "$PH2"
 echo '{}' > "$PH2/config.json"
@@ -190,6 +196,14 @@ if (mode === 'policy') {
   setTimeout(() => process.exit(0), 300);
 } else if (mode === 'menu') {
   own('INFO', 'starting (fake)');
+  own('INFO', 'Exit tray chosen from the menu - exiting.');
+  setTimeout(() => process.exit(0), 300);
+} else if (mode === 'menuwarn') {
+  // The real script's lines when the DestroyIcon helper can't compile: a
+  // non-fatal WARN (the summary's pick) before the deliberate last line.
+  own('INFO', 'starting (fake)');
+  own('WARN', 'icon-handle helper unavailable (Cannot add type. Compilation errors occurred.) - continuing without it.');
+  own('INFO', 'icon shown (fake)');
   own('INFO', 'Exit tray chosen from the menu - exiting.');
   setTimeout(() => process.exit(0), 300);
 } else {
@@ -247,6 +261,10 @@ echo menu > "$MODE"
 post /api/tray/enable > /dev/null
 sleep 1.5
 curl -s "$S/api/summary" > "$TMP/d-menu.json"
+echo menuwarn > "$MODE"
+post /api/tray/enable > /dev/null
+sleep 1.5
+curl -s "$S/api/summary" > "$TMP/d-menuwarn.json"
 curl -s "$S/api/logs" > "$TMP/d1-logs.json" # the dashboard log tail (level + text)
 kill $D1 2>/dev/null; wait $D1 2>/dev/null
 
@@ -284,6 +302,50 @@ if ($errs.Count) { foreach ($e in $errs) { Write-Output ('line ' + $e.Extent.Sta
 Write-Output 'parsed'
 EOF
   if "$PWSH" -NoProfile -NonInteractive -File "$TMP/parse.ps1" "$TMP/tray.ps1" > "$TMP/parse.out" 2>&1; then PARSE=ok; else PARSE=fail; fi
+fi
+
+# pwsh: the tray's browser-opening menu handlers, dispatched the way WinForms
+# does it (a .NET EventHandler whose caller catches what escapes), with
+# Start-Process failing like the cmdlet does when nothing can be started (a
+# statement-terminating error; the stub also means nothing is ever launched).
+# The harness is the REAL tray.ps1: everything before the setup `try {` (so a
+# script-level trap would be in force) + stand-ins for the WinForms objects the
+# setup creates + the script from `$ErrorActionPreference = 'Continue'`
+# through the click handler. Each handler must return normally and log a WARN.
+HANDLERS=skip
+if [ -n "$PWSH" ] && [ -f "$TMP/tray.ps1" ]; then
+  mkdir -p "$TMP/hh"
+  if node - "$TMP/tray.ps1" "$TMP/handlers.ps1" "$TMP/hh/burnglass.log" <<'EOF'
+const fs = require("fs");
+const [file, out, log] = process.argv.slice(2);
+const lines = fs.readFileSync(file, "utf8").replace(/^﻿/, "").split("\r\n");
+const tryAt = lines.indexOf("try {");
+const contAt = lines.indexOf("$ErrorActionPreference = 'Continue'");
+const clickAt = lines.findIndex((l) => /^\$ni\.add_MouseClick\(/.test(l));
+if (tryAt < 0 || contAt < tryAt || clickAt < contAt) { console.error("tray.ps1 layout changed: extend the handler harness"); process.exit(1); }
+const psq = (s) => "'" + s.replace(/'/g, "''") + "'";
+const ps = [
+  ...lines.slice(0, tryAt).map((l) => (/^\$logFile = /.test(l) ? "$logFile = " + psq(log) : l)),
+  "$base = 'http://127.0.0.1:9'",
+  "$script:handlers = @{}",
+  "$items = New-Object PSObject",
+  "$items | Add-Member -MemberType ScriptMethod -Name Add -Value { param($t, $i, $h) if ($h) { $script:handlers[$t] = $h } }",
+  "$menu = New-Object PSObject -Property @{ Items = $items }",
+  "$ni = New-Object PSObject -Property @{ ContextMenuStrip = $null; Visible = $true }",
+  "$ni | Add-Member -MemberType ScriptMethod -Name add_MouseClick -Value { param($h) $script:handlers['(click)'] = $h }",
+  "function Start-Process {",
+  "  [CmdletBinding()]",
+  "  param([Parameter(Position = 0)] $FilePath, $ArgumentList, $WindowStyle)",
+  "  $PSCmdlet.ThrowTerminatingError((New-Object System.Management.Automation.ErrorRecord((New-Object System.InvalidOperationException ('test: cannot start ' + $FilePath)), 'BurnglassTestNoBrowser', 'NotSpecified', $FilePath)))",
+  "}",
+  ...lines.slice(contAt, clickAt + 1).filter((l) => !/^\$menu = New-Object /.test(l)),
+  "Add-Type -TypeDefinition 'using System; public static class BurnglassTestDispatch { public static string Click(EventHandler h) { if (h == null) return \"missing\"; try { h(null, EventArgs.Empty); return \"returned\"; } catch (Exception e) { return \"escaped: \" + e.GetType().Name + \": \" + e.Message; } } }'",
+  "foreach ($n in @('Open dashboard', 'Open mini overview')) { [Console]::Out.WriteLine('HANDLER ' + $n + ' = ' + [BurnglassTestDispatch]::Click($script:handlers[$n])) }",
+];
+fs.writeFileSync(out, "﻿" + ps.join("\r\n") + "\r\n");
+EOF
+  then "$PWSH" -NoProfile -NonInteractive -File "$TMP/handlers.ps1" > "$TMP/handlers.out" 2>&1; HANDLERS=ran
+  else HANDLERS=layout; fi
 fi
 
 cat > "$TMP/diag-check.js" <<'EOF'
@@ -326,6 +388,11 @@ ok(qe.code === 0 && qe.kind === "error" && /starting \(fake\)/.test(qe.message |
    "exit 0 seconds after start while wanted = an early-exit error, its last line as the message (got " + JSON.stringify(q) + ")");
 const mn = tr("d-menu.json");
 ok(mn.lastError === null && mn.running === false && mn.alive === false, "an early exit 0 after \"Exit tray chosen from the menu\" is not an error");
+const mw = tr("d-menuwarn.json");
+ok(mw.lastError === null && mw.alive === false,
+   "the same after an earlier non-fatal WARN line: the LAST line decides, not the summary's pick (got " + JSON.stringify(mw.lastError) + ")");
+ok(/^info \[burnglass\] tray icon exited after \d+s \(its last line: Exit tray chosen from the menu/m.test(d1) && !/^warn .*tray icon exited .*icon-handle helper/m.test(d1),
+   "…logged at info with its real last line, no warning");
 
 const l = tr("d-lock.json"), le = l.lastError || {};
 ok(le.code === 4 && le.kind === "lock" && /already owns the icon/.test(le.message || ""), "lost icon lock: code 4, kind lock");
@@ -349,7 +416,7 @@ ok(!/[^\r]\n/.test(src) && src.endsWith("\r\n"), "CRLF line endings");
 const lines = src.split("\r\n");
 ok((src.match(/PulseTray/g) || []).length === 1 && src.includes("New-Object System.Threading.Mutex($false, 'PulseTray" + PORT + "')"),
    "FROZEN mutex name PulseTray<port>, once");
-const firstCall = lines.findIndex((x) => /^Write-BgLog\b/.test(x)); // script level (the trap body only runs on an error)
+const firstCall = lines.findIndex((x) => /^Write-BgLog\b/.test(x)); // script level
 ok(firstCall >= 0 && /^Write-BgLog \('starting \(v/.test(lines[firstCall]) && /PowerShell ' \+ \$PSVersionTable\.PSVersion/.test(lines[firstCall]),
    "the starting line (version, port, PowerShell version) is the first thing it does");
 const tryAt = lines.indexOf("try {"), mtxAt = lines.findIndex((x) => /System\.Threading\.Mutex/.test(x));
@@ -357,7 +424,11 @@ const shownAt = lines.findIndex((x) => /\$ni\.Visible = \$true/.test(x)), catchA
 ok(tryAt >= 0 && tryAt < mtxAt && mtxAt < shownAt && shownAt < catchAt, "setup try/catch spans the mutex through the icon being shown");
 const catchBody = lines.slice(catchAt, catchAt + 8).join("\n");
 ok(/ScriptLineNumber/.test(catchBody) && /'ERROR'/.test(catchBody) && /exit 2/.test(catchBody), "the catch logs the line + message at ERROR and exits 2");
-ok(/^trap \{/m.test(src) && /unexpected error at tray\.ps1 line/.test(src), "script-level trap logs any other terminating error");
+ok(!/^\s*trap\b/im.test(src), "no trap anywhere: a trap makes a handler's error escape into WinForms");
+ok(!/try \{[^\r\n]*Application\]::Run\(\)/.test(src) && /^\[System\.Windows\.Forms\.Application\]::Run\(\)$/m.test(src),
+   "Application.Run() is a bare statement (a try around it would do the same)");
+ok(/'Open dashboard', \$null, \{ Open-BgDashboard \}/.test(src) && /could not open the dashboard: /.test(src) && /could not open the mini overview: /.test(src),
+   "the browser-opening handlers catch locally and log a WARN");
 ok(/AbandonedMutexException/.test(src), "an abandoned icon lock still counts as acquired");
 ok(src.includes("/api/statusline?from=tray&pid=' + $PID"), "polls identify the tray (?from=tray&pid=)");
 ok(!/Start-Process 'powershell\.exe'/.test(src) && /Join-Path \$PSHOME 'powershell\.exe'/.test(src), "relaunch uses an absolute powershell.exe path");
@@ -379,6 +450,17 @@ ok(!neg && depth["("] === 0 && depth["{"] === 0 && depth["["] === 0, "(), {}, []
 ok(seven.length === 0, "no PowerShell 7-only operators (&& || ?? ?.): it runs under 5.1");
 if (PARSE === "skip") console.log("SKIP  pwsh parse (no pwsh here; set PWSH=/path/to/pwsh)");
 else ok(PARSE === "ok", "pwsh parses tray.ps1 without errors" + (PARSE === "ok" ? "" : ": " + R("parse.out")));
+const HANDLERS = process.argv[6];
+if (HANDLERS === "skip") console.log("SKIP  tray menu handlers under pwsh (no pwsh here; set PWSH=/path/to/pwsh)");
+else {
+  const hout = R("handlers.out"), hlog = R("hh/burnglass.log");
+  ok(HANDLERS === "ran", "menu-handler harness cut from the real tray.ps1 (" + HANDLERS + ")");
+  ok(/^HANDLER Open dashboard = returned\r?$/m.test(hout) && /^HANDLER Open mini overview = returned\r?$/m.test(hout),
+     "a failing Start-Process stays inside its menu handler, dispatched like WinForms (" + ((hout.match(/^HANDLER .*/mg) || []).join(" | ") || hout.slice(0, 400)) + ")");
+  ok(/WARN  \[burnglass\] tray: could not open the dashboard: test: cannot start http:\/\/127\.0\.0\.1:9\//.test(hlog)
+     && /WARN  \[burnglass\] tray: could not open the mini overview: test: cannot start http:\/\/127\.0\.0\.1:9\/#mini/.test(hlog),
+     "…and is logged as a WARN in burnglass.log (" + JSON.stringify(hlog.split(/\r?\n/).filter((l) => /WARN|ERROR/.test(l))) + ")");
+}
 
 // ---- summarizeTrayOutput: the other shapes PowerShell prints ----
 const { summarizeTrayOutput: S } = require(process.argv[5] + "/server.js");
@@ -401,9 +483,13 @@ o = S(Buffer.concat([Buffer.from(own("WARN", "another instance already owns the 
 ok(o.kind === "lock" && /already owns the icon/.test(o.message), "a NUL hole (older instance writing past the truncation) is not read as UTF-16");
 o = S(Buffer.alloc(0), 1);
 ok(o.message === "" && o.kind === "no-output", "no output -> kind no-output");
+o = S(Buffer.from(own("INFO", "starting (v, port 1, PowerShell 5.1 Desktop, FullLanguage, pid 1)") + own("WARN", "icon-handle helper unavailable (x) - continuing without it.") + own("INFO", "Exit tray chosen from the menu - exiting.") + "stray foreign text\r\n"), 0);
+ok(o.message === "icon-handle helper unavailable (x) - continuing without it." && o.last === "Exit tray chosen from the menu - exiting.",
+   "last = the script's own last line (foreign text ignored), message keeps ERROR > WARN (" + JSON.stringify(o) + ")");
+ok(S(Buffer.from("plain foreign\r\n"), 1).last === "", "last is empty without a line of the script's own");
 process.exit(fail);
 EOF
-node "$TMP/diag-check.js" "$TMP" "$PORT" "$PARSE" "$ROOT"
+node "$TMP/diag-check.js" "$TMP" "$PORT" "$PARSE" "$ROOT" "$HANDLERS"
 RES2=$?
 [ $RES2 -ne 0 ] && RES=$RES2
 echo "---- exit $RES"

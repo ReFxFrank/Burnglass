@@ -6663,14 +6663,14 @@ function trayScript(port) {
     '  if ($script:out) { try { $script:out.WriteLine($line) } catch { } } else { try { Write-Host $line } catch { } }',
     '  try { Add-Content -Path $logFile -Value $line -Encoding UTF8 -ErrorAction Stop } catch { }',
     '}',
-    // Any terminating error the setup try/catch below does not cover (the
-    // message loop, a menu action): log it WITH its line instead of losing it.
-    // `continue` keeps the old behaviour — the statement is skipped and the
-    // icon lives on — it only stops being silent.
-    'trap {',
-    "  Write-BgLog ('unexpected error at tray.ps1 line ' + $_.InvocationInfo.ScriptLineNumber + ': ' + $_.Exception.Message) 'ERROR'",
-    '  continue',
-    '}',
+    // NO script-level `trap`, and no try/catch around Application.Run below
+    // (the menu, click and timer handlers all run inside it): either one makes
+    // PowerShell propagate a statement-terminating error inside a handler OUT
+    // of the .NET delegate — WinForms then shows its unhandled-exception
+    // dialog from this hidden process, or unwinds Run() and the icon vanishes.
+    // Without them a failing statement is skipped (its text lands on stderr =
+    // tray-error.log) and the icon lives on; the handlers that can fail
+    // (opening a browser) catch locally and log a WARN.
     "Write-BgLog ('starting (v' + $myVer + ', port " + port + ", PowerShell ' + $PSVersionTable.PSVersion + ' ' + $PSVersionTable.PSEdition + ', ' + $ExecutionContext.SessionState.LanguageMode + ', pid ' + $PID + ')')",
     // Invoke-RestMethod's progress bar has no console to draw on here; some
     // hosts serialize it to stderr (= tray-error.log) on every poll.
@@ -6774,12 +6774,22 @@ function trayScript(port) {
     '}',
     // Left-click opens the mini overview as a chromeless app window (Edge is
     // on every Windows 11 box); falls back to the default browser.
+    // Both catch LOCALLY (see the no-trap note at the top): a missing Edge
+    // plus a broken default-browser association is logged, never thrown into
+    // WinForms.
     'function Open-BgMini {',
     "  try { Start-Process 'msedge' -ArgumentList ('--app=' + $base + '/#mini'), '--window-size=380,800' -ErrorAction Stop }",
-    '  catch { Start-Process ($base + \'/#mini\') }',
+    '  catch {',
+    "    try { Start-Process ($base + '/#mini') -ErrorAction Stop }",
+    "    catch { Write-BgLog ('could not open the mini overview: ' + $_.Exception.Message) 'WARN' }",
+    '  }',
+    '}',
+    'function Open-BgDashboard {',
+    "  try { Start-Process ($base + '/') -ErrorAction Stop }",
+    "  catch { Write-BgLog ('could not open the dashboard: ' + $_.Exception.Message) 'WARN' }",
     '}',
     '$menu = New-Object System.Windows.Forms.ContextMenuStrip',
-    "[void]$menu.Items.Add('Open dashboard', $null, { Start-Process ($base + '/') })",
+    "[void]$menu.Items.Add('Open dashboard', $null, { Open-BgDashboard })",
     "[void]$menu.Items.Add('Open mini overview', $null, { Open-BgMini })",
     "[void]$menu.Items.Add('-')",
     // X-Pulse is the FROZEN mutation header (a v1 server only accepts it).
@@ -6969,7 +6979,7 @@ function summarizeTrayOutput(buf, code) {
     const l = lines[i];
     const m = OWN.exec(l);
     if (m) {
-      if (m[1] === 'ERROR') ownErr = m[2]; // the LAST one ended it (trapped ones are non-fatal)
+      if (m[1] === 'ERROR') ownErr = m[2]; // the LAST one: only the setup catch writes ERROR (then exits 2)
       if (m[1] === 'WARN') ownWarn = m[2];
       if (/^starting \(/.test(m[2]) && /ConstrainedLanguage|RestrictedLanguage|NoLanguage/.test(m[2])) constrained = true;
       lastOwn = m[2];
@@ -6999,7 +7009,10 @@ function summarizeTrayOutput(buf, code) {
   else if (code === 4 || /already owns the icon/.test(message)) kind = 'lock';
   else if (code === 5 || /server unreachable/.test(message)) kind = 'unreachable';
   else if (!message) kind = 'no-output';
-  return { message, kind };
+  // `last` = the script's own LAST line, whatever its level: the one that
+  // says whether the exit was asked for (message prefers an earlier, possibly
+  // non-fatal WARN such as the icon-handle helper being unavailable).
+  return { message, kind, last: trayCleanText(lastOwn || '') };
 }
 function readTrayOutput(file) {
   try {
@@ -7018,14 +7031,16 @@ function onTrayExit(child, spawnedAt, errPath, code, signal) {
   if (trayProc.seenPid !== null && trayProc.seenPid === child.pid) { trayProc.seenAt = null; trayProc.seenPid = null; }
   const ran = now - spawnedAt;
   const secs = Math.max(0, Math.round(ran / 1000));
-  const { message, kind } = summarizeTrayOutput(readTrayOutput(errPath), code);
+  const { message, kind, last } = summarizeTrayOutput(readTrayOutput(errPath), code);
   // Exit 0 soon after start is a failure too (PowerShell ending quietly),
-  // unless its last line says it was asked to go.
-  const deliberate = /chosen from the menu|turned off in the dashboard|relaunching from the rewritten script/.test(message);
+  // unless its LAST own line says it was asked to go — never the summary
+  // pick, which prefers an earlier non-fatal WARN over that line.
+  const deliberate = code === 0 && !signal
+    && /chosen from the menu|turned off in the dashboard|relaunching from the rewritten script/.test(last);
   const failed = (typeof code === 'number' && code !== 0) || !!signal
     || (ran < TRAY_EARLY_EXIT_MS && trayEnabledNow() && !deliberate);
   if (!failed) {
-    console.log('[burnglass] tray icon exited after ' + slDur(ran) + (message ? ' (its last line: ' + message + ')' : ''));
+    console.log('[burnglass] tray icon exited after ' + slDur(ran) + (last ? ' (its last line: ' + last + ')' : ''));
     return;
   }
   // Its first action is the "starting" line, so no output at all means
