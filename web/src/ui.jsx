@@ -649,10 +649,12 @@ export function Sheet({ open, onClose, title, children, footer, className }) {
 
 // ---- states ---------------------------------------------------------------------------
 // Amber (or red, tone="crit") status strip for page-level warnings.
-export function WarnBar({ tone, children, action, className }) {
+// tone: undefined (warn) | 'crit' | 'info' (neutral accent — a notice, not a
+// problem; amber/red stay reserved for status).
+export function WarnBar({ tone, children, action, className, icon }) {
   return (
-    <div className={cx('warnbar', tone === 'crit' && 'critbar', className)} role="status">
-      <Icon name="alert" />
+    <div className={cx('warnbar', tone === 'crit' && 'critbar', tone === 'info' && 'infobar', className)} role="status">
+      <Icon name={icon || (tone === 'info' ? 'info' : 'alert')} />
       <div className="wb-body">{children}</div>
       {action || null}
     </div>

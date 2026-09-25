@@ -89,6 +89,9 @@
 .sec-limits .cx-read { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .sec-limits .cx-read b { color: var(--text); font-weight: var(--fw-semi); }
 
+/* ---- a meters panel holding only a state block keeps its own height ---- */
+.sec-limits .lim-meters.lim-compact { align-self: start; }
+
 /* ---- side column: budget + plan ---- */
 .sec-limits .lim-side > .lim-plan { flex: 1 1 auto; }
 .sec-limits .lim-plan-b { flex: 1; display: flex; flex-direction: column; justify-content: center; }
@@ -140,6 +143,11 @@
 .sec-limits .pm-bar { display: block; width: 100%; border-radius: 3px 3px 0 0; background: var(--bar); }
 .sec-limits .pm-bar.partial { background: repeating-linear-gradient(135deg, var(--bar) 0 3px, color-mix(in srgb, var(--bar) 40%, transparent) 3px 6px); }
 .sec-limits .pm-col:hover .pm-bar, .sec-limits .pm-col:focus-visible .pm-bar { filter: brightness(1.12); }
+.sec-limits .pm-col.pick { cursor: pointer; }
+.sec-limits .pm-col.on .pm-bar { background: var(--accent); }
+.sec-limits .pm-col.on .pm-bar.partial { background: repeating-linear-gradient(135deg, var(--accent) 0 3px, color-mix(in srgb, var(--accent) 40%, transparent) 3px 6px); }
+.sec-limits .pm-col.on .pm-val { color: var(--text); font-weight: var(--fw-semi); }
+.sec-limits .pm-x span.on { color: var(--accent); font-weight: var(--fw-semi); }
 .sec-limits .pm-val { font-size: var(--fs-2xs); line-height: var(--lh-2xs); color: var(--text-2); margin-bottom: 3px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .sec-limits .pm-be { position: absolute; left: 0; right: 0; height: 1px; background: var(--text-3); pointer-events: none; }
 .sec-limits .pm-be span { position: absolute; left: -22px; top: -7px; font-size: var(--fs-2xs); line-height: 14px; color: var(--text-3); }

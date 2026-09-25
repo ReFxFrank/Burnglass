@@ -1,4 +1,5 @@
 # Runtime / install artifacts
+burnglass.log
 pulse.log
 node_modules/
 npm-debug.log*
@@ -6,11 +7,12 @@ npm-debug.log*
 
 # single-executable build outputs
 dist-exe/
+dist-installer/
 build/sea-prep.blob
 build/sea-config.json
 
-# Pulse Strip (strip/) — C# build outputs. Only the SOURCE is committed; the
-# exe is built by CI and shipped as a release asset (dist-strip/pulse-strip.exe
+# Burnglass Strip (strip/) — C# build outputs. Only the SOURCE is committed; the
+# exe is built by CI and shipped as a release asset (dist-strip/burnglass-strip.exe
 # alone is ~105 MB, so this must never reach git history).
 strip/bin/
 strip/obj/

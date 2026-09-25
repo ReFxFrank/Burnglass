@@ -19,7 +19,7 @@
 import { useId, useState } from 'react';
 import { Section, Panel, Btn, Badge, Input, MBar, Tip, cx } from '../ui.jsx';
 import { Icon } from '../icons.jsx';
-import { BRAND, ago, num, postJson, shortDate } from '../lib.js';
+import { BRAND, ago, num, postJson, shortDate, homePath } from '../lib.js';
 import './Meshy.css';
 
 // Every task family Meshy documents (mirrors the server's MESHY_FAMILIES probe
@@ -172,7 +172,7 @@ export default function Meshy({ id, data }) {
             </p>
             <MeshyKeyForm hasKey={false} />
             <p className="hint">
-              Create a key in your Meshy account settings. {BRAND} stores it in <code>~/.pulse/config.json</code> on
+              Create a key in your Meshy account settings. {BRAND} stores it in <code>{homePath(data, 'config.json')}</code> on
               this machine and never logs it or puts it in a page, a URL or an export.
             </p>
           </div>

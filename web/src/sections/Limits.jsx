@@ -16,7 +16,9 @@
 //   thresholds  alert thresholds → MeterBar ticks + lib.meterTone colours
 //   srcFilter   budget spend follows the source filter (server-side); plan
 //               value and meters are account-level
-//   (period, colorMap, notify, gfx, theme, onStopped, onPeriod: unused)
+//   period      the selected period — its month bar in Plan value is marked
+//   onPeriod    clicking a Plan value month bar selects that month's period
+//   (colorMap, notify, gfx, theme, onStopped: unused)
 //
 // ENDPOINTS (mutations via lib.postJson, which adds X-Pulse: 1):
 //   POST /api/meters/recheck            (Connect card "Recheck now")
@@ -267,7 +269,9 @@ function monthTip(m, mult) {
   );
 }
 
-function PlanMonths({ months, cost }) {
+// A month bar is also a shortcut: clicking it (or Enter/Space on it) selects
+// that calendar month as the dashboard period, when the payload has it.
+function PlanMonths({ months, cost, selectable, current, onPeriod }) {
   const mults = months.map((m) => (m.multiplier != null && isFinite(m.multiplier) ? m.multiplier : cost > 0 ? m.spend / cost : 0));
   const top = Math.max(1.25, ...mults);
   const H = 76; // % of the plot the tallest bar may use; the rest holds its value label
@@ -280,9 +284,13 @@ function PlanMonths({ months, cost }) {
         {months.map((m, i) => (
           <Tip key={m.key} content={monthTip(m, mults[i])}>
             <span
-              className="pm-col"
+              className={cx('pm-col', selectable(m.key) && 'pick', current === m.key && 'on')}
               tabIndex={0}
-              aria-label={`${monthLong(m.key)}${m.partial ? ' so far' : ''}: ${multFmt(mults[i])} the plan cost, ${money(m.spend)}`}
+              role={selectable(m.key) ? 'button' : undefined}
+              aria-pressed={selectable(m.key) ? current === m.key : undefined}
+              aria-label={`${monthLong(m.key)}${m.partial ? ' so far' : ''}: ${multFmt(mults[i])} the plan cost, ${money(m.spend)}${selectable(m.key) ? '. Select to show this month' : ''}`}
+              onClick={selectable(m.key) ? () => onPeriod(m.key) : undefined}
+              onKeyDown={selectable(m.key) ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onPeriod(m.key); } } : undefined}
             >
               {!many || m.partial || i === months.length - 1 ? <span className="pm-val">{multFmt(mults[i])}</span> : null}
               <span
@@ -294,13 +302,13 @@ function PlanMonths({ months, cost }) {
         ))}
       </div>
       <div className="pm-x" aria-hidden="true">
-        {months.map((m) => <span key={m.key}>{monthShort(m.key)}{m.partial ? '*' : ''}</span>)}
+        {months.map((m) => <span key={m.key} className={current === m.key ? 'on' : undefined}>{monthShort(m.key)}{m.partial ? '*' : ''}</span>)}
       </div>
     </div>
   );
 }
 
-function PlanPanel({ plan, onSaved }) {
+function PlanPanel({ plan, onSaved, periodKeys, current, onPeriod }) {
   const [editing, setEditing] = useState(false);
   const [amount, setAmount] = useState('');
   const [label, setLabel] = useState('');
@@ -409,14 +417,22 @@ function PlanPanel({ plan, onSaved }) {
             <b>{money(plan.spend30)}</b> of list-priced usage in 30 days against <b>{moneyTarget(plan.cost)}/mo</b>.
           </p>
         </div>
-        {months.length ? <PlanMonths months={months} cost={plan.cost} /> : null}
+        {months.length ? (
+          <PlanMonths
+            months={months}
+            cost={plan.cost}
+            current={current}
+            selectable={(k) => typeof onPeriod === 'function' && periodKeys.has(k)}
+            onPeriod={onPeriod}
+          />
+        ) : null}
       </div>
     </Panel>
   );
 }
 
 // ---- section ------------------------------------------------------------------------
-export default function Limits({ id, data, thresholds, srcFilter }) {
+export default function Limits({ id, data, period, thresholds, srcFilter, onPeriod }) {
   const [fresh, refresh] = useFreshAfterSave(data, srcFilter);
   const src = fresh || data;
   const th = thresholds && thresholds.length ? thresholds : [80, 95];
@@ -441,7 +457,13 @@ export default function Limits({ id, data, thresholds, srcFilter }) {
       />
       <div className="c-4 lg-12 stack lim-side">
         <BudgetPanel budget={src.budget || null} filtered={filtered} onSaved={refresh} />
-        <PlanPanel plan={src.planValue} onSaved={refresh} />
+        <PlanPanel
+          plan={src.planValue}
+          onSaved={refresh}
+          periodKeys={new Set((data.periods || []).map((p) => p.key))}
+          current={period ? period.key : null}
+          onPeriod={onPeriod}
+        />
       </div>
     </Section>
   );

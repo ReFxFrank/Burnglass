@@ -1,5 +1,115 @@
 # Changelog
 
+## v2.0.0 — Pulse is now Burnglass
+
+**Pulse is now Burnglass**, with a redesigned dashboard and a new look. Your
+settings, history and integrations come with you. Here is what you need to
+know when you update from Pulse 1.x:
+
+- **Your settings are copied, not moved.** The first time the v2 server
+  starts, it copies your config, budget and plan cost, history archive,
+  Meshy task cache, effort sidecar, Discord timer and strip state from
+  `~/.pulse` into the new home folder `~/.burnglass`. The copy only runs once
+  the new server owns its port (so a v2 that can't start while v1 is still
+  running copies nothing). It is staged in a temporary folder and published
+  with one rename, and a `migrated-from-pulse.json` marker records what was
+  copied. **`~/.pulse` is kept as a backup and is never moved or deleted.**
+  After the copy Burnglass writes there only to keep older companions alive
+  (a mirrored `server.json`, a refreshed `tray.ps1`) and to remove the Meshy
+  API key from the old `config.json`. If the copy fails (for example, a
+  locked file on Windows), Burnglass keeps running on `~/.pulse`, says so on
+  the dashboard, and retries at the next start. History that a Pulse 1.x
+  copy seals into `~/.pulse/history` later is still read (the new folder
+  wins a tie). The dashboard shows a one-time notice with both paths.
+- **Nothing you set up breaks.** A one-click update keeps the executable's
+  file name and path, so a self-updated `pulse.exe` stays `pulse.exe` and now
+  runs Burnglass. The installer upgrades a Pulse install in place
+  (`%LOCALAPPDATA%\Programs\Pulse`, including installs made with
+  `pulse.exe --install`), adds `burnglass.exe` and keeps an identical
+  `pulse.exe` next to it. Your Claude Code **status line and effort hook**
+  (which point at the old path) keep working, and every later update
+  refreshes both copies. If one of them points at a file that no longer
+  exists, the dashboard, the server log and `--statusline-setup` /
+  `--effort-setup` now tell you. Burnglass still never edits `~/.claude`.
+- **Start with Windows** keeps its registry value name (`Pulse`), so the
+  toggle, the installer and `--install` still share one sign-in entry and you
+  never get two. The installer points it at `burnglass.exe`.
+- **Environment variables:** every `PULSE_*` variable now also answers to
+  `BURNGLASS_*` (which wins); the old names keep working. `BURNGLASS_HOME`
+  (or `PULSE_HOME`) pins the home folder, and a pinned folder is never
+  migrated.
+- **Discord:** the presence now says "Get Burnglass" and the idle hover text
+  reads "Burnglass — idle". The Discord application keeps its client id and
+  art keys; it is renamed to Burnglass and its art replaced on release day,
+  which also changes what Pulse 1.x users' presence shows.
+- **Release assets** are now `burnglass.exe`, `burnglass-linux`,
+  `burnglass-macos`, `burnglass-strip.exe` and `BurnglassSetup.exe`. Every
+  2.x release also carries byte-identical `pulse.exe`, `pulse-linux`,
+  `pulse-macos` and `pulse-strip.exe`, so Pulse 1.x installs can update in
+  one click. The GitHub repository moves to `ReFxFrank/Burnglass`; old links
+  redirect.
+- **Kept on purpose:** port 4747, every CLI flag, every `/api` route and
+  response shape, the `X-Pulse: 1` request header (`X-Burnglass: 1` is also
+  accepted), your browser preferences, the tray and strip lock names, and the
+  Discord client id. The log file is now `burnglass.log`.
+
+**Command Center redesign.** The dashboard is rebuilt from the ground up:
+
+- A **left rail** with section navigation, the period list (rolling 30 / 90 /
+  180 days and every calendar month, each with its total) and source
+  checkboxes with their spend, plus all-time totals, Mini view and Stop. Under
+  1024 px it becomes a compact header with bottom sheets for period, sources
+  and the menu. It works from 360 px up with no sideways scrolling.
+- **Overview** leads with the period's spend (delta against the previous
+  window and a sparkline) and Today / Last 7 days / Burn rate / 5-hour block
+  tiles.
+- **Limits & budget** puts every Claude and Codex meter in one grid with
+  alert-threshold ticks, a projection at reset and a live countdown, next to a
+  budget gauge with a pace marker and the plan-value card. Clicking a month in
+  plan value selects that month.
+- **Spend** has a rebuilt daily chart (daily-average line, tap-to-pin
+  tooltips, arrow-key reading), a By-source table and a cache / fast-mode /
+  daily-pattern strip. **Breakdown** has By model (provider marks and an
+  effort-mix bar), By effort and By project. **Activity** has the heatmap
+  (spend or messages) and recent sessions. **Meshy credits** and **System**
+  (server facts, update, Stop, theme and graphics, every integration switch,
+  Discord images and the log) complete the page.
+- A **light theme** alongside dark (System / Dark / Light, remembered in your
+  browser), no blur and nothing that animates forever, so lite mode and
+  reduced motion stay calm.
+- **Mini view** shows each limit as % used on the same meter bars as the
+  dashboard.
+- The frontend dropped framer-motion and Radix; the server still has zero
+  runtime dependencies.
+
+**The Glass identity.** A burning-glass mark (rays focused through a lens
+onto an ember), an ice-cyan accent, and the "Burn**glass**" wordmark across
+the dashboard, the favicon, the installer and exe icons, the strip popover
+and the Discord art. Amber and red still mean only "near a limit". The tray
+now uses dedicated icons at 16 / 20 / 24 / 32 px chosen by DPI: an ice dot
+at rest, then a green dot, a yellow ring or a red "no entry" disc for your
+5-hour usage. They follow your `alertThresholds` (80 / 95 by default)
+instead of the old fixed 60 / 85.
+
+**Fixes and smaller changes**
+
+- A second copy started at sign-in with `--no-open` no longer opens a
+  browser window when another instance is already running.
+- The updater picks the asset matching its own file name first, and a
+  `2.0.0-rc.1` build is ranked below `2.0.0`, so release-candidate testers
+  are offered the final release. Release candidates are published as
+  prereleases and never become the latest release.
+- `--install` reuses the installer's folder (or an existing
+  `Programs\Pulse`), and `--install` / `--uninstall` only touch Run values,
+  shortcuts and Add/Remove Programs entries that point into their own folder.
+- The strip is started with the server's home folder, looks for
+  `burnglass-strip.exe` before `pulse-strip.exe`, and doesn't start a second
+  copy while the old one runs.
+- `--statusline` and `--summary` find the running server through whichever
+  `server.json` belongs to a live process and was written most recently.
+- The dashboard never shows a hard-coded `~/.pulse`: paths come from the
+  server's real home folder, and help copy uses the running exe's own name.
+
 ## v1.34.0
 
 - **Discord art that follows what Claude is doing.** Three new image fields

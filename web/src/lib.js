@@ -11,6 +11,9 @@ import { useEffect, useRef, useState } from 'react';
 // v1.34): every visible product name in the UI reads this constant, never a
 // string literal. The server also reports it as payload.brand.
 export const BRAND = 'Burnglass';
+// The pre-2.0 name — ONLY for copy about the rename itself (the one-time
+// "settings were copied" notice). Everything else says BRAND.
+export const FORMER_BRAND = 'Pulse';
 // The executable users double-click to start the server again (stopped page,
 // System panel copy). A DEFAULT only: prefer payload.exeName, the running
 // exe's real filename — a self-updated v1 install is still called pulse.exe
@@ -18,6 +21,23 @@ export const BRAND = 'Burnglass';
 export const EXE_NAME = 'burnglass.exe';
 // The Windows taskbar-strip companion's executable (System panel help copy).
 export const STRIP_EXE_NAME = 'burnglass-strip.exe';
+
+// The exe name to show in help copy: the running exe's own filename when the
+// server reports one (a self-updated v1 install is still pulse.exe), else the
+// default. `data` may be null (whole-page states before the first payload).
+export function exeName(data) {
+  return (data && typeof data.exeName === 'string' && data.exeName) || EXE_NAME;
+}
+// A path inside the server's REAL home folder (payload.home: ~/.burnglass, a
+// pinned BURNGLASS_HOME/PULSE_HOME, or ~/.pulse while a failed move is retried).
+// Never hard-code ~/.pulse or ~/.burnglass in copy — use this. Joins with the
+// home's own separator so a Windows path stays a Windows path.
+export function homePath(data, sub) {
+  const home = (data && typeof data.home === 'string' && data.home) || '~/.burnglass';
+  if (!sub) return home;
+  const sep = home.includes('\\') && !home.includes('/') ? '\\' : '/';
+  return home.replace(/[\\/]+$/, '') + sep + sub;
+}
 
 // ---- colour ------------------------------------------------------------------
 // Categorical palette for SOURCES ONLY (validated in both themes). Values are
@@ -389,6 +409,13 @@ export function readPeriod() {
   return v && /^(last\d+|\d{4}-\d{2})$/.test(v) ? v : 'last30';
 }
 export function writePeriod(key) { if (key) lsSet(PERIOD_KEY, key); }
+
+// The one-time "Pulse is now Burnglass — your settings were copied" notice:
+// remembers the dismissed migration's timestamp (a later, different
+// migration shows again). Same `pulse-` prefix as every other key.
+const HOME_NOTICE_KEY = 'pulse-home-notice';
+export function homeNoticeDismissed(at) { return lsGet(HOME_NOTICE_KEY) === String(at); }
+export function dismissHomeNotice(at) { lsSet(HOME_NOTICE_KEY, String(at)); }
 
 // ---- theme: 'system' | 'dark' | 'light' → <html data-theme> ---------------------------
 // 'system' removes the attribute so prefers-color-scheme decides (dark is the

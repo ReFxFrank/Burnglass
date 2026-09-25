@@ -12,7 +12,7 @@
 // =============================================================================
 import { useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import {
-  BRAND, EXE_NAME, useSummary, makeColorMap, srcLabel, money, num, clockTime, hm, ago, prettyModel, effortLabel,
+  BRAND, FORMER_BRAND, exeName, homeNoticeDismissed, dismissHomeNotice, useSummary, makeColorMap, srcLabel, money, num, clockTime, hm, ago, prettyModel, effortLabel,
   alertThresholds, readGraphicsMode, effectiveLite, applyGraphicsMode, useTheme, motionReduced,
   readSourceFilter, writeSourceFilter, readPeriod, writePeriod,
   fireAlertNotifications, requestAlertPermission, notifyPermission,
@@ -180,15 +180,15 @@ export default function App() {
   if (stopped) {
     return (
       <PageState icon="power" title={`${BRAND} is stopped`}>
-        This page can’t restart a stopped server. To start {BRAND} again, double-click <code>{EXE_NAME}</code> or
-        your “{BRAND}” Desktop / Start Menu shortcut (create the shortcuts once with <code>{EXE_NAME} --install-shortcuts</code>).
+        This page can’t restart a stopped server. To start {BRAND} again, double-click <code>{exeName(data)}</code> or
+        your “{BRAND}” Desktop / Start Menu shortcut (create the shortcuts once with <code>{exeName(data)} --install-shortcuts</code>).
       </PageState>
     );
   }
   if (!data) {
     return error ? (
       <PageState icon="alert" tone="warn" title="Can’t reach the server">
-        Is the {BRAND} server running? Start it by double-clicking <code>{EXE_NAME}</code> (or <code>node server.js</code> from source).
+        Is the {BRAND} server running? Start it by double-clicking <code>{exeName(data)}</code> (or <code>node server.js</code> from source).
         <span className="paths" style={{ display: 'block', marginTop: 8 }}>{error}</span>
       </PageState>
     ) : (
@@ -237,12 +237,13 @@ export default function App() {
             {error && (
               <WarnBar>
                 Server unreachable ({error}), showing data from {clockTime(data.generatedAt)}. Retrying every 10 s — if you
-                stopped it, double-click <code>{EXE_NAME}</code> to start it again.
+                stopped it, double-click <code>{exeName(data)}</code> to start it again.
               </WarnBar>
             )}
             {data.selfCheck && !data.selfCheck.ok && (
               <WarnBar tone="crit">Internal self-check: {(data.selfCheck.issues || []).join('; ')}</WarnBar>
             )}
+            <HomeNotices data={data} />
             {data.hasData ? (
               <>
                 <Alerts id="alerts" {...sectionProps} />
@@ -334,6 +335,52 @@ export default function App() {
       </Sheet>
     </>
   );
+}
+
+// ---- rename / home notices (page-level) ---------------------------------------------
+// payload.homeMigration: the one-time ~/.pulse → ~/.burnglass copy. A success
+// shows a dismissible notice for two weeks; a failure (the server keeps
+// running on the old folder and retries next start) shows until it heals.
+// payload.integrations: Claude Code's status line / effort hook pointing at an
+// exe that no longer exists — Burnglass never edits ~/.claude, so it says so.
+const HOME_NOTICE_MS = 14 * 86400000;
+function HomeNotices({ data }) {
+  const mig = data.homeMigration;
+  const [hidden, setHidden] = useState(null); // the `at` dismissed this session
+  const bars = [];
+  if (mig && mig.status === 'failed') {
+    bars.push(
+      <WarnBar key="mig-failed">
+        {BRAND} couldn’t copy your {FORMER_BRAND} settings into its own folder{mig.error ? <> ({mig.error})</> : null}. It keeps
+        using <code>{mig.from}</code> for now and tries again at the next start. Nothing was lost.
+      </WarnBar>,
+    );
+  } else if (mig && mig.status === 'migrated' && mig.at && Date.now() - mig.at < HOME_NOTICE_MS
+    && hidden !== mig.at && !homeNoticeDismissed(mig.at)) {
+    bars.push(
+      <WarnBar
+        key="mig"
+        tone="info"
+        action={<Btn size="sm" variant="ghost" onClick={() => { dismissHomeNotice(mig.at); setHidden(mig.at); }}>Dismiss</Btn>}
+      >
+        {FORMER_BRAND} is now {BRAND}. Your settings and history were copied from <code>{mig.from}</code> to{' '}
+        <code>{data.home}</code>. The old folder stays as a backup and is never deleted.
+      </WarnBar>,
+    );
+  }
+  for (const i of data.integrations || []) {
+    if (!i || i.exists !== false) continue;
+    const what = i.kind === 'statusline' ? 'status line' : 'effort hook';
+    const flag = i.kind === 'statusline' ? '--statusline-setup' : '--effort-setup';
+    bars.push(
+      <WarnBar key={i.kind + (i.event || '') + i.target}>
+        Claude Code’s {what} runs <code>{i.target}</code>, which no longer exists. Run{' '}
+        <code>{exeName(data)} {flag}</code> and paste the command it prints into Claude Code’s settings.json
+        ({BRAND} never edits it for you).
+      </WarnBar>,
+    );
+  }
+  return bars.length ? <>{bars}</> : null;
 }
 
 // ---- rail ----------------------------------------------------------------------------

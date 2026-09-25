@@ -314,7 +314,9 @@ export function AccountLimits({ meters, codexMeters, codexUsage, thresholds, onR
       ctx={ctx.length ? ctx.join(' · ') : null}
       actions={legend}
       flush
-      className={cx('lim-meters', className)}
+      // No meter cells = only a short state block (connect / off / loading):
+      // don't stretch it to the Budget + Plan column's height (an empty box).
+      className={cx('lim-meters', !cells.length && 'lim-compact', className)}
     >
       {nothing ? (
         <div className="lim-state off">

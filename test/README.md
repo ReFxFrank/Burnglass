@@ -1,4 +1,11 @@
-# Pulse e2e tests
+# Burnglass e2e tests
+
+Burnglass was called Pulse up to v1.34. The suites still pin their fixture
+homes with `PULSE_HOME` and the other `PULSE_*` hooks on purpose: those names
+are permanent aliases of the `BURNGLASS_*` variables, so the whole run keeps
+exercising the alias path. `migration.test.sh` is the one suite that sets NO
+home variable and uses a fake `$HOME` instead, because that implicit path is
+the one real upgrades take.
 
 Each suite starts the REAL server against fixture homes in a temp dir
 (fake transcripts, rollouts, and credentials — never real ones) plus mock
@@ -37,9 +44,16 @@ bash test/discord.test.sh     # one suite
 | `export.test.sh` | CSV/JSON export: daily/per-source columns + UTF-8 BOM, exact per-model costs, RFC-4180 quoting, `?sources=` scoping, attachment headers, 400/404 paths, foreign-Host 403 |
 | `projection.test.sh` | Meter burn projection (`projLeftAtReset` from rising utilization, slow-burn band assertion pins slope units, clamped ≥0, null without resets_at), summary memo (same build ≤2.5s, config write busts), `payload.memory` rss/heap |
 | `migration.test.sh` | Pulse → Burnglass v2 with a fake `$HOME` and NO `*_HOME` pin: fresh install creates only `~/.burnglass`; a populated `~/.pulse` is COPIED (allowlist, byte-identical, marker lists copied/skipped, `*.tmp` skipped) only after the server owns its port (port taken → nothing published); `~/.pulse` loses nothing (only the `server.json` mirror, `tray.ps1` refresh and Meshy-key scrub touch it; the key ends in exactly one file); sentinel-only staging sweep; restart idempotent; legacy history/modes written after the move are merged read-only (new home wins ties); `BURNGLASS_HOME` > `PULSE_HOME` > implicit; degraded run on a failed move; racing servers; freshest-live `server.json` for `--statusline`; updater asset choice (own filename → new → legacy), repo-rename 301, `2.0.0-rc.1` < `2.0.0`; read-only Claude Code settings.json check |
+| `plan-value.test.sh` | Plan value: `payload.planValue` multiplier arithmetic on exact fixture spend, month history, `POST /api/plan/set` guards (mutation-only, clearing removes both keys), all-time `totals.bySource` |
+| `cache-savings.test.sh` | Prompt-cache economics per period: read discount minus write premium (`saved` / `writePremium` / `net`), exact across three models incl. a fast-mode entry |
+| `speed-spend.test.sh` | Fast vs standard split per period and `fastPremium` (actual minus the same tokens at the standard rate; 0 on models without a fast row) |
+| `summary-cli.test.sh` | `--summary` in-process fallback (dead port), always exit 0, `NO_COLOR` emits no ANSI incl. the plan label |
+| `startup.test.sh` | Run at startup through `PULSE_STARTUP_STUB` ONLY (never the real registry): POST enable/disable (GET refused), idempotent enable, the stored value is quoted absolute path(s) + `--no-open`, `--startup on\|off\|status` exit 0, state survives a restart |
+| `meshy.test.sh` | Meshy credits: key only in a POST body and never in logs / payload / URLs (`hasKey` only), balance + paged task history, store without prompts, 401 latch on the key fingerprint, 429/5xx back-off keeping last good, credits never in $ totals |
 | `tray.test.sh` | Tray + OpenUsage-companion toggle plumbing (cross-platform): `payload.tray`/`payload.openusage` state, POST enable/disable persists config, statusline `trayEnabled` handoff signal, config-file `openusagePath` resolution, GET refused on both endpoints (spawns suppressed via `PULSE_NO_TRAY_SPAWN`/`PULSE_NO_OPENUSAGE_SPAWN`) |
 
 Conventions when adding tests: fixture homes via `mktemp -d` + `CLAUDE_DIR` /
-`CODEX_DIR` / `PULSE_HOME` env; per-suite fixed port; fake tokens only, with
+`CODEX_DIR` / `PULSE_HOME` (or `BURNGLASS_HOME`) env; per-suite fixed port that no
+other suite uses (`migration.test.sh` owns 5831–5845 and fails fast if one is busy); fake tokens only, with
 an assertion that they never appear in server logs; `PASS`/`FAIL` lines and a
 non-zero exit on failure.

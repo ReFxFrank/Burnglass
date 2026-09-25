@@ -27,12 +27,14 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { Section, Panel, Btn, Badge, Switch, Seg, Field, Input, InfoTip, StopButton, cx } from '../ui.jsx';
 import { Icon } from '../icons.jsx';
-import { BRAND, EXE_NAME, STRIP_EXE_NAME, BP, ago, clockTime, dur, hm, postJson, useLogs, useMedia } from '../lib.js';
+import { BRAND, FORMER_BRAND, STRIP_EXE_NAME, exeName, homePath, BP, ago, clockTime, dur, hm, postJson, useLogs, useMedia } from '../lib.js';
 import { MeshyKeyForm } from './Meshy.jsx';
 import './System.css';
 
 // ---- small helpers ---------------------------------------------------------------
 const MB = (bytes) => Math.round((bytes || 0) / 1048576);
+// "C:\\Users\\x\\…\\pulse.exe" / "/home/x/pulse-linux" → the file name.
+const baseName = (p) => String(p || '').split(/[\\/]/).filter(Boolean).pop() || String(p || '');
 
 // A status word next to a toggle's title: tone good | warn | crit | idle | off.
 function Stat({ tone = 'off', title, children }) {
@@ -113,7 +115,7 @@ function ServerColumn({ data, gfx, theme, onStopped }) {
       }
       setNote({ text: `Installed. ${BRAND} is restarting itself, hold on…`, tone: '' });
       waitFor((h) => h && h.ok && h.version && h.version !== oldV,
-        `The new version did not come back up. Start it manually (it replaced the old ${EXE_NAME}).`);
+        `The new version did not come back up. Start it manually (it replaced the old ${exeName(data)}).`);
     } catch (e) {
       // A real HTTP response (403/500) is a failure; only a DROPPED connection
       // means the server is swapping itself out under the request.
@@ -124,6 +126,7 @@ function ServerColumn({ data, gfx, theme, onStopped }) {
   }
 
   const uptime = data.generatedAt && data.serverStartTs ? dur(data.generatedAt - data.serverStartTs) : '—';
+  const hooks = (Array.isArray(data.integrations) ? data.integrations : []).filter((h) => h && h.target);
   const hist = data.history || {};
   const gfxOptions = [
     { value: 'auto', label: `Auto · ${gfx && gfx.lite ? 'lite' : 'rich'}`, title: 'Picks Lite when the browser renders in software' },
@@ -154,6 +157,35 @@ function ServerColumn({ data, gfx, theme, onStopped }) {
         ) : null}
         <dt>Mode</dt>
         <dd>{data.daemon ? 'background' : 'console'} · {data.packaged ? 'exe' : 'source'}</dd>
+        {data.home ? (
+          <>
+            <dt>Data folder</dt>
+            <dd className="sys-home">
+              <span className="mono" title={data.home}>{data.home}</span>
+              {data.homeMigration && data.homeMigration.status === 'migrated' && data.homeMigration.from ? (
+                <InfoTip
+                  label="About the data folder"
+                  text={`Copied from ${data.homeMigration.from}${data.homeMigration.at ? ' on ' + new Date(data.homeMigration.at).toLocaleDateString() : ''} when ${BRAND} replaced ${FORMER_BRAND}. The old folder is kept as a backup and never deleted.`}
+                />
+              ) : null}
+            </dd>
+          </>
+        ) : null}
+        {hooks.length ? (
+          <>
+            <dt>Claude Code</dt>
+            <dd className="sys-hooks">
+              {hooks.map((h) => (
+                <span key={h.kind + (h.event || '') + h.target} className={cx('sys-hook', h.exists === false && 'sys-err')} title={h.target || undefined}>
+                  {h.kind === 'statusline' ? 'status line' : 'effort hook'}
+                  {' → '}
+                  <span className="mono">{baseName(h.target)}</span>
+                  {h.exists === false ? ' (missing)' : h.legacyName ? ' (old name, still works)' : ''}
+                </span>
+              ))}
+            </dd>
+          </>
+        ) : null}
         <dt>History</dt>
         <dd className="sys-hist">
           {hist.enabled
@@ -161,7 +193,7 @@ function ServerColumn({ data, gfx, theme, onStopped }) {
             : 'off'}
           <InfoTip
             label="About history"
-            text={`${BRAND} seals each past day’s totals to ~/.pulse/history so the 90- and 180-day views survive Claude Code’s ~30-day transcript pruning.`}
+            text={`${BRAND} seals each past day’s totals to ${homePath(data, 'history')} so the 90- and 180-day views survive Claude Code’s ~30-day transcript pruning.`}
           />
         </dd>
       </dl>
@@ -183,8 +215,8 @@ function ServerColumn({ data, gfx, theme, onStopped }) {
       </div>
       <p className={cx('sys-note', note && note.tone)} role="status" aria-live="polite">{note ? note.text : ''}</p>
       <p className="hint sys-restart">
-        To start again, run <code className="nowrap">{EXE_NAME}</code>. Its <code className="nowrap">--install-shortcuts</code> flag
-        adds Desktop “{BRAND}” and “{BRAND} — Stop” buttons.
+        To start again, run <code className="nowrap">{exeName(data)}</code>. Its <code className="nowrap">--install-shortcuts</code> flag
+        adds Desktop “{BRAND}” and “{BRAND} - Stop” shortcuts.
       </p>
 
       <div className="appearance">
@@ -343,7 +375,7 @@ function Integrations({ data, notify, thresholds, ovr }) {
             const st = r.discord ? r.discord.status : null;
             if (!n) return 'Discord presence off.';
             if (st === 'ok') return { text: 'Discord presence live. Check your profile.', tone: 'good' };
-            if (st === 'no-client-id') return { text: (r.discord && r.discord.error) || 'Set discordClientId in ~/.pulse/config.json first.', tone: 'warn' };
+            if (st === 'no-client-id') return { text: (r.discord && r.discord.error) || `Set discordClientId in ${homePath(data, 'config.json')} first.`, tone: 'warn' };
             if (st === 'discord-not-found') return { text: 'On. Waiting for the Discord desktop app (is it running?).', tone: 'warn' };
             return 'Discord presence on. Connecting…';
           }, 'Discord toggle failed: ')}
@@ -366,7 +398,7 @@ function Integrations({ data, notify, thresholds, ovr }) {
                 ? (meshy.hasKey
                   ? 'Meshy on. The credits panel appears on the next refresh (~10 s).'
                   : 'Meshy on. Add your API key and ' + BRAND + ' starts reading your credit balance.')
-                : 'Meshy off. ' + BRAND + ' stops calling api.meshy.ai; your key stays in ~/.pulse/config.json until you remove it.'),
+                : 'Meshy off. ' + BRAND + ' stops calling api.meshy.ai; your key stays in ' + homePath(data, 'config.json') + ' until you remove it.'),
               'Meshy toggle failed: ');
             }}
             extra={on('meshy') ? (keyForm ? (
@@ -389,7 +421,7 @@ function Integrations({ data, notify, thresholds, ovr }) {
               <Btn size="sm" variant="primary" icon="key" onClick={() => setKeyForm(true)}>Add key</Btn>
             )) : null}
           >
-            Balance and per-task credits from api.meshy.ai with a key you paste. Kept in ~/.pulse/config.json and never
+            Balance and per-task credits from api.meshy.ai with a key you paste. Kept in {homePath(data, 'config.json')} and never
             logged or shown back.
           </ToggleRow>
         ) : null}
@@ -406,7 +438,7 @@ function Integrations({ data, notify, thresholds, ovr }) {
               : `Startup entry removed. ${BRAND} no longer starts with Windows.`), 'Could not change the startup setting: ')}
           >
             Adds a per-user <code className="nowrap" title="HKCU\Software\Microsoft\Windows\CurrentVersion\Run">HKCU\…\Run</code> entry
-            that launches <code className="nowrap">{EXE_NAME} --no-open</code> at login. No admin rights needed; remove it here or in Task Manager.
+            that launches <code className="nowrap">{exeName(data)} --no-open</code> at login. No admin rights needed; remove it here or in Task Manager.
           </ToggleRow>
         ) : null}
 
@@ -436,7 +468,7 @@ function Integrations({ data, notify, thresholds, ovr }) {
               if (!n) return 'Strip off. It exits within a minute.';
               return r.strip && r.strip.path
                 ? `${BRAND} Strip starting on your taskbar. Drag it anywhere; click it for the popover.`
-                : { text: `On, but ${STRIP_EXE_NAME} was not found. Put it next to ${EXE_NAME} (or set "stripPath" in ~/.pulse/config.json).`, tone: 'warn' };
+                : { text: `On, but ${STRIP_EXE_NAME} was not found. Put it next to ${exeName(data)} (or set "stripPath" in ${homePath(data, 'config.json')}).`, tone: 'warn' };
             }, 'Strip toggle failed: ')}
           >
             Taskbar strip companion with a popover dashboard.
@@ -454,7 +486,7 @@ function Integrations({ data, notify, thresholds, ovr }) {
               if (!n) return 'OpenUsage auto-launch off. The app keeps running if open; quit it from its own menu.';
               return r.openusage && r.openusage.path
                 ? `OpenUsage will start with ${BRAND}. Launching it now.`
-                : { text: 'On, but OpenUsageTray.exe was not found. Unzip OpenUsage anywhere and set "openusagePath" in ~/.pulse/config.json.', tone: 'warn' };
+                : { text: 'On, but OpenUsageTray.exe was not found. Unzip OpenUsage anywhere and set "openusagePath" in ' + homePath(data, 'config.json') + '.', tone: 'warn' };
             }, 'OpenUsage toggle failed: ')}
           >
             Starts OpenUsageTray.exe alongside {BRAND}. {BRAND} never installs, updates or closes it.
@@ -495,7 +527,7 @@ const DISCORD_IMAGE_ROWS = [
 ];
 const rowValues = (src) => Object.fromEntries(DISCORD_IMAGE_ROWS.map(([k]) => [k, (src && src[k]) || '']));
 
-export function DiscordImagesForm({ images, idPrefix }) {
+export function DiscordImagesForm({ images, idPrefix, configPath = 'config.json' }) {
   const fromServer = rowValues(images);
   const sig = DISCORD_IMAGE_ROWS.map(([k]) => fromServer[k]).join('\n');
   // The dashboard polls every ~10 s, so right after a save the props are
@@ -553,14 +585,14 @@ export function DiscordImagesForm({ images, idPrefix }) {
         <Btn variant="primary" size="sm" disabled={busy || !dirty.length} onClick={save}>{busy ? 'Saving…' : 'Save images'}</Btn>
         {dirty.length > 0 && !busy ? <Btn variant="ghost" size="sm" onClick={() => { setEdits({}); setMsg(null); }}>Cancel</Btn> : null}
         <span className={cx('hint', 'disc-msg', msg && (msg.bad ? 'bad' : 'ok'))} role="status" aria-live="polite">
-          {msg ? msg.text : dirty.length ? `${dirty.length} unsaved ${dirty.length === 1 ? 'change' : 'changes'}` : 'Saved to ~/.pulse/config.json'}
+          {msg ? msg.text : dirty.length ? `${dirty.length} unsaved ${dirty.length === 1 ? 'change' : 'changes'}` : 'Saved to ' + configPath}
         </span>
       </div>
     </div>
   );
 }
 
-function DiscordImages({ discord }) {
+function DiscordImages({ discord, configPath }) {
   const phone = useMedia(BP.sm);
   const [open, setOpen] = useState(false);
   const bodyId = useId();
@@ -591,7 +623,7 @@ function DiscordImages({ discord }) {
             built-in art. Discord fetches the link, not {BRAND}, and anyone who can see your presence can see where it’s
             hosted. Avoid Discord attachment links, which expire.
           </p>
-          <DiscordImagesForm images={discord.images} idPrefix={bodyId + '-'} />
+          <DiscordImagesForm images={discord.images} idPrefix={bodyId + '-'} configPath={configPath} />
         </div>
       ) : null}
     </section>
@@ -671,7 +703,7 @@ export function SystemPanel({ data, gfx, theme, notify, thresholds, onStopped })
         <ServerColumn data={data} gfx={gfx} theme={theme} onStopped={onStopped} />
         <Integrations data={data} notify={notify} thresholds={thresholds} ovr={ovr} />
       </div>
-      {discordOn ? <div className="sys-row2"><DiscordImages discord={discord} /></div> : null}
+      {discordOn ? <div className="sys-row2"><DiscordImages discord={discord} configPath={homePath(data, 'config.json')} /></div> : null}
       <LogTail />
     </Panel>
   );

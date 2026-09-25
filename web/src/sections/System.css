@@ -27,6 +27,10 @@
 .sec-system .kv .sys-upd { margin-left: 6px; }
 .sec-system .kv dd.sys-err { color: var(--crit); }
 .sec-system .kv .sys-hist { display: flex; align-items: center; justify-content: flex-end; gap: 4px; }
+.sec-system .kv .sys-home { display: flex; align-items: center; justify-content: flex-end; gap: 4px; min-width: 0; }
+.sec-system .kv .sys-home > .mono { min-width: 0; overflow-wrap: anywhere; }
+.sec-system .kv .sys-hooks { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; min-width: 0; }
+.sec-system .kv .sys-hook { max-width: 100%; overflow-wrap: anywhere; }
 .sec-system .acts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: var(--sp-4); }
 .sec-system .sys-note { margin: 8px 0 0; font-size: var(--fs-xs); line-height: var(--lh-xs); color: var(--text-2); overflow-wrap: anywhere; }
 .sec-system .sys-note:empty { margin: 0; }
