@@ -1,13 +1,119 @@
 /* =============================================================================
-   sections/Spend.css — styles for sections/Spend.jsx ONLY.
-   OWNER: the Spend section engineer. Scope EVERY selector under .sec-spend (the
-   class <Section id="spend"> puts on the root) — CSS is global and four people
-   edit sections in parallel. Floating content (Tip/Menu/Sheet) is portalled
-   to <body>: style it through its own prefixed class (spend-…), not .sec-spend.
-   Use the tokens + primitives in ../styles.css; never hard-code colours.
-   Mockup reference (design-command/src/styles.css): .chart .yax .plot .gl .bars .col .stk .avg .xax .tip* (l.394-415), .econ .ratio (l.417-427), .tbl-src (l.449), .alltime-src (l.455); ≤760 l.645-655 — .share/.legend/.tbl are shared
+   sections/Spend.css — styles for sections/Spend.jsx (and the SpendChart it
+   renders from charts.jsx) ONLY. Every selector is scoped under .sec-spend.
+   Mockup reference (design-command/src/styles.css): .chart/.yax/.plot/.gl/.bars/
+   .col/.stk/.avg/.xax/.tip* (l.394-415), .econ (l.417-427), .tbl-src (l.459),
+   .alltime-src (l.465); ≤760 l.645-665. Colours: tokens only.
    ============================================================================= */
 
-/* ---- STUB layout (replace) ---- */
-.sec-spend .spend-stub-sum { margin: 0 0 12px; }
-.sec-spend .spend-stub-cost { font-size: var(--fs-lg); color: var(--text); font-weight: var(--fw-semi); }
+/* ---- chart panel ---- */
+.sec-spend .spend-pb { padding-bottom: var(--sp-2); }
+.sec-spend .spend-legend { align-items: center; }
+.sec-spend .spend-legend > span { min-width: 0; }
+.sec-spend .spend-lg-avg { margin-left: auto; color: var(--text-3); }
+.sec-spend .spend-lg-avg b { color: var(--text-2); font-weight: var(--fw-med); font-variant-numeric: tabular-nums; }
+
+/* ---- SpendChart (charts.jsx) ---- */
+.sec-spend .sc {
+  display: grid; grid-template-columns: 40px minmax(0, 1fr); grid-template-rows: var(--sc-h, 232px) auto;
+  column-gap: var(--sp-2); margin-top: var(--sp-4); min-width: 0;
+}
+.sec-spend .sc-yax { position: relative; }
+.sec-spend .sc-yax span {
+  position: absolute; right: 0; transform: translateY(-50%); font-size: var(--fs-2xs); line-height: var(--lh-2xs);
+  color: var(--text-3); font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.sec-spend .sc-yax .sc-yavg { color: var(--text); font-weight: var(--fw-semi); cursor: help; }
+.sec-spend .sc-plot { position: relative; min-width: 0; outline: none; border-radius: var(--r-xs); cursor: default; -webkit-tap-highlight-color: transparent; }
+.sec-spend .sc-plot:focus-visible { box-shadow: var(--focus); }
+.sec-spend .sc-svg { display: block; overflow: visible; }
+.sec-spend .sc-gl { stroke: var(--grid); stroke-width: 1; shape-rendering: crispEdges; }
+.sec-spend .sc-axis { stroke: var(--axis); stroke-width: 1; shape-rendering: crispEdges; }
+.sec-spend .sc-avg { stroke: var(--text-2); stroke-width: 1; opacity: .75; shape-rendering: crispEdges; }
+.sec-spend .sc-hl { fill: color-mix(in srgb, var(--text) 6%, transparent); }
+.sec-spend .sc-empty {
+  position: absolute; inset: 0; display: grid; place-items: center; font-size: var(--fs-sm); color: var(--text-3); pointer-events: none;
+}
+.sec-spend .sc-xax { grid-column: 2; position: relative; height: 22px; min-width: 0; }
+.sec-spend .sc-xax span {
+  position: absolute; top: 6px; font-size: var(--fs-2xs); line-height: var(--lh-2xs); color: var(--text-3); white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.sec-spend .sc-xax span.on { color: var(--text); font-weight: var(--fw-med); }
+
+/* tooltip: lives inside the plot (absolute), flips left near the right edge */
+.sec-spend .sc-tip {
+  position: absolute; top: 6px; z-index: 3; padding: 10px 12px; border-radius: var(--r-md);
+  background: var(--panel-2); box-shadow: var(--e-2); font-size: var(--fs-xs); line-height: var(--lh-xs); color: var(--text);
+  pointer-events: none;
+}
+.sec-spend .sc-tip.narrow { padding: 8px 10px; }
+.sec-spend .sc-tip-h { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-weight: var(--fw-semi); margin-bottom: 6px; }
+.sec-spend .sc-tip-tag { font-size: var(--fs-2xs); font-weight: var(--fw-med); color: var(--text-3); }
+.sec-spend .sc-tip-r { display: flex; align-items: center; gap: 6px; line-height: 20px; color: var(--text-2); min-width: 0; }
+.sec-spend .sc-tip-n { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sec-spend .sc-tip-r b { margin-left: auto; padding-left: 8px; color: var(--text); font-weight: var(--fw-med); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sec-spend .sc-tip-none { color: var(--text-3); }
+.sec-spend .sc-tip-t {
+  display: flex; justify-content: space-between; gap: 8px; border-top: 1px solid var(--line); margin-top: 6px; padding-top: 6px;
+  font-weight: var(--fw-semi);
+}
+.sec-spend .sc-tip-t span:last-child { font-variant-numeric: tabular-nums; }
+.sec-spend .sc-tip-tok { margin-top: 2px; }
+
+/* ---- econ strip (under the chart, full-bleed) ---- */
+.sec-spend .spend-econ { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 1px solid var(--line); margin-top: auto; }
+.sec-spend .spend-econ.n2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.sec-spend .spend-econ.n1 { grid-template-columns: minmax(0, 1fr); }
+.sec-spend .spend-econ-c { padding: var(--sp-3) var(--sp-4); min-width: 0; }
+.sec-spend .spend-econ-c + .spend-econ-c { border-left: 1px solid var(--line); }
+.sec-spend .spend-econ-l { display: flex; align-items: center; gap: 6px; font-size: var(--fs-xs); line-height: var(--lh-xs); color: var(--text-2); font-weight: var(--fw-med); }
+.sec-spend .spend-econ-l .spend-bolt { color: var(--text-3); }
+.sec-spend .spend-econ-v {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 4px;
+  font-size: var(--fs-lg); line-height: var(--lh-lg); font-weight: var(--fw-semi);
+}
+.sec-spend .spend-econ-v .spend-good { color: var(--good); }
+.sec-spend .spend-econ-v .spend-cost { color: var(--warn); }
+.sec-spend .spend-econ-u { font-size: var(--fs-xs); line-height: var(--lh-xs); font-weight: var(--fw-reg); color: var(--text-3); }
+.sec-spend .spend-econ-none { color: var(--text-3); }
+.sec-spend .spend-econ-s { font-size: var(--fs-xs); line-height: var(--lh-xs); color: var(--text-3); margin-top: 2px; overflow-wrap: anywhere; }
+.sec-spend .spend-econ-s b { color: var(--text-2); font-weight: var(--fw-med); font-variant-numeric: tabular-nums; }
+.sec-spend .spend-cov { color: var(--text-2); }
+
+/* ---- by source ---- */
+.sec-spend .spend-src { container-type: inline-size; container-name: spendsrc; }
+.sec-spend .spend-src-body { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.sec-spend .spend-src-main { min-width: 0; margin-bottom: var(--sp-4); }
+.sec-spend .spend-share { margin-bottom: var(--sp-3); }
+.sec-spend .spend-share-thin { height: 6px; }
+.sec-spend .spend-tbl .tr { grid-template-columns: minmax(0, 1fr) 76px 50px 58px; }
+.sec-spend .spend-tbl .tr > span { min-width: 0; }
+.sec-spend .spend-tbl .t-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.sec-spend .spend-tbl .two .t { color: var(--text); }
+.sec-spend .spend-alltime { margin-top: auto; padding-top: var(--sp-4); border-top: 1px solid var(--line); min-width: 0; }
+.sec-spend .spend-alltime-h { margin-top: var(--sp-2); }
+.sec-spend .spend-single { margin-bottom: var(--sp-2); }
+.sec-spend .spend-single b { color: var(--text); }
+
+/* wide By-source (≤1360 it spans the row): table left, all-time right */
+@container spendsrc (min-width: 640px) {
+  .sec-spend .spend-src-body { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); column-gap: var(--sp-6); align-items: start; }
+  .sec-spend .spend-src-main { margin-bottom: 0; }
+  .sec-spend .spend-alltime { margin-top: 0; padding-top: 0; padding-left: var(--sp-6); border-top: 0; border-left: 1px solid var(--line); align-self: stretch; }
+}
+/* narrow By-source: drop the tokens column rather than squeeze the names */
+@container spendsrc (max-width: 330px) {
+  .sec-spend .spend-tbl .tr { grid-template-columns: minmax(0, 1fr) 70px 50px; }
+  .sec-spend .spend-tbl .c-tok { display: none; }
+}
+
+@media (max-width: 760px) {
+  .sec-spend .spend-tbl .tr { grid-template-columns: minmax(0, 1fr) 76px 50px; }
+  .sec-spend .spend-tbl .c-tok { display: none; }
+  .sec-spend .sc { grid-template-columns: 34px minmax(0, 1fr); column-gap: 6px; margin-top: var(--sp-3); }
+  .sec-spend .spend-econ, .sec-spend .spend-econ.n2 { grid-template-columns: minmax(0, 1fr); }
+  .sec-spend .spend-econ-c { padding: var(--sp-3); }
+  .sec-spend .spend-econ-c + .spend-econ-c { border-left: 0; border-top: 1px solid var(--line); }
+  .sec-spend .spend-lg-avg { margin-left: auto; }
+}
