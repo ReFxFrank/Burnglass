@@ -1,0 +1,9 @@
+/* =============================================================================
+   sections/System.css — styles for sections/System.jsx ONLY.
+   OWNER: the System section engineer. Scope EVERY selector under .sec-system (the
+   class <Section id="system"> puts on the root) — CSS is global and four people
+   edit sections in parallel. Floating content (Tip/Menu/Sheet) is portalled
+   to <body>: style it through its own prefixed class (system-…), not .sec-system.
+   Use the tokens + primitives in ../styles.css; never hard-code colours.
+   Mockup reference (design-command/src/styles.css): .sys .kv .acts .toggles .tg* .stat-on/.stat-off .sys-row2 .imgs .formacts .disc-* .setting* .logs (l.524-555), .imgs l.597; ≤760 l.683-700, ≤420 l.716 — .kv/.switch/.seg/.field/.input are shared
+   ============================================================================= */

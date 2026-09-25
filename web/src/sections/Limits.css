@@ -1,0 +1,12 @@
+/* =============================================================================
+   sections/Limits.css — styles for sections/Limits.jsx ONLY.
+   OWNER: the Limits section engineer. Scope EVERY selector under .sec-limits (the
+   class <Section id="limits"> puts on the root) — CSS is global and four people
+   edit sections in parallel. Floating content (Tip/Menu/Sheet) is portalled
+   to <body>: style it through its own prefixed class (limits-…), not .sec-limits.
+   Use the tokens + primitives in ../styles.css; never hard-code colours.
+   Mockup reference (design-command/src/styles.css): .legend-mini .meters .mc* (l.321-349), .cx* (l.351-360), .gauge .facts (l.363-371), .plan .pm* (l.374-386); responsive lim-side l.601-602, l.637-644, l.704-705, l.717-718 — .meter/<MeterBar> is the shared bar
+   ============================================================================= */
+
+/* ---- STUB layout (replace) ---- */
+@media (max-width: 1360px) { .sec-limits .lim-stub { grid-column: span 12; } }

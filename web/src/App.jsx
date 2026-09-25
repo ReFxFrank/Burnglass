@@ -1,22 +1,112 @@
-import { useEffect, useMemo, useState } from 'react';
-import { motion, MotionConfig } from 'framer-motion';
+// =============================================================================
+// App.jsx — the Command Center frame. SHARED FILE (see CONTRACT.md).
+//   Rail (≥1024 px): brand, section nav with active tracking, PERIOD radios,
+//                    SOURCE checkboxes, all-time totals, Mini view, Stop.
+//   TopBar (≥1024):  title + context crumb, live chip, Updated time, reach,
+//                    update pill, mini, theme toggle.
+//   <1024:           MobileHeader + sticky FilterBar; period / sources / menu
+//                    open bottom Sheets.
+//   Dashboard:       sections in order, each from src/sections/<Name>.jsx.
+// App owns every piece of cross-section state (period, source filter, theme,
+// graphics mode, notification permission) and hands it down as SectionProps.
+// =============================================================================
+import { useEffect, useLayoutEffect, useMemo, useState } from 'react';
+import { MotionConfig } from 'framer-motion';
 import {
-  useSummary, makeColorMap, sourceLabel, ACCENT, money2, tokens, num, clockTime, ago,
-  perf, readGraphicsMode, effectiveLite, applyGraphicsMode,
+  BRAND, EXE_NAME, useSummary, makeColorMap, srcLabel, money, num, clockTime, hm, ago, prettyModel, effortLabel,
+  alertThresholds, perf, readGraphicsMode, effectiveLite, applyGraphicsMode, useTheme, motionReduced,
+  readSourceFilter, writeSourceFilter, readPeriod, writePeriod,
   fireAlertNotifications, requestAlertPermission, notifyPermission,
 } from './lib.js';
-import { SpendChart, Sparkline } from './charts.jsx';
-import {
-  Card, CurrentBlock, BurnRate, Rollup, BarList, EffortSpendBars, ProjectBars, SessionsTable, PeriodSelect, Legend, InfoTip, AlertsBar, Heatmap, BudgetCard,
-  PlanValueCard, CacheSavings, FastSpendNote, MeshyCard,
-} from './panels.jsx';
-import { ServerPanel, StopButton } from './server-panel.jsx';
-import { MetersCard } from './meters.jsx';
+import { Icon } from './icons.jsx';
+import { Btn, IconBtn, Pill, Sheet, StopButton, WarnBar, Empty, Swatch, Est, Seg, Panel, Section, cx } from './ui.jsx';
 import { MiniOverview } from './mini.jsx';
+import './legacy.css'; // TEMPORARY — styles the legacy components the section stubs still render
+
+import Alerts from './sections/Alerts.jsx';
+import Kpis from './sections/Kpis.jsx';
+import Limits from './sections/Limits.jsx';
+import Spend from './sections/Spend.jsx';
+import Breakdown from './sections/Breakdown.jsx';
+import Activity from './sections/Activity.jsx';
+import Meshy from './sections/Meshy.jsx';
+import System from './sections/System.jsx';
+
+// Rail / menu navigation. `id` is the DOM id each section renders on its
+// <Section id={id}> root (App passes it in as the `id` prop). Items whose
+// section is not on the page (e.g. Meshy when off) are hidden automatically.
+const NAV = [
+  { id: 'kpis', label: 'Overview', icon: 'overview' },
+  { id: 'limits', label: 'Limits & budget', icon: 'gauge' },
+  { id: 'spend', label: 'Spend', icon: 'chart' },
+  { id: 'breakdown', label: 'Breakdown', icon: 'layers' },
+  { id: 'activity', label: 'Activity', icon: 'clock' },
+  { id: 'meshy', label: 'Meshy credits', icon: 'cube' },
+  { id: 'system', label: 'System', icon: 'server' },
+];
+const NAV_IDS = NAV.map((n) => n.id);
+
+function openMini() {
+  window.open(window.location.pathname + '#mini', 'pulse-mini', 'width=340,height=760,popup=yes');
+}
+
+// Scroll a section into view under the sticky header (Overview = page top).
+function goTo(id, e) {
+  if (e) e.preventDefault();
+  const behavior = motionReduced() ? 'auto' : 'smooth';
+  if (id === NAV_IDS[0]) window.scrollTo({ top: 0, behavior });
+  else {
+    const el = document.getElementById(id);
+    if (el) el.scrollIntoView({ behavior, block: 'start' });
+  }
+  try { window.history.replaceState(null, '', id === NAV_IDS[0] ? window.location.pathname + window.location.search : '#' + id); } catch (_) {}
+}
+
+// Which nav targets exist in the DOM (re-checked after every render).
+function usePresentSections() {
+  const [present, setPresent] = useState([]);
+  useLayoutEffect(() => {
+    const now = NAV_IDS.filter((id) => document.getElementById(id));
+    if (now.join(',') !== present.join(',')) setPresent(now);
+  });
+  return present;
+}
+
+// Active section = the last one whose top has passed under the sticky header;
+// the last section wins once the page is scrolled to the bottom.
+function useActiveSection(present) {
+  const [active, setActive] = useState(NAV_IDS[0]);
+  useEffect(() => {
+    let raf = 0;
+    const compute = () => {
+      raf = 0;
+      let off = 56;
+      try { off = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--sticky-h')) || 56; } catch (_) {}
+      off += 24;
+      let cur = present[0] || NAV_IDS[0];
+      for (const id of present) {
+        const el = document.getElementById(id);
+        if (el && el.getBoundingClientRect().top <= off) cur = id;
+      }
+      const doc = document.documentElement;
+      if (present.length && window.innerHeight + window.scrollY >= doc.scrollHeight - 4 && window.scrollY > 0) cur = present[present.length - 1];
+      setActive(cur);
+    };
+    const on = () => { if (!raf) raf = requestAnimationFrame(compute); };
+    compute();
+    window.addEventListener('scroll', on, { passive: true });
+    window.addEventListener('resize', on);
+    return () => {
+      window.removeEventListener('scroll', on);
+      window.removeEventListener('resize', on);
+      if (raf) cancelAnimationFrame(raf);
+    };
+  }, [present.join(',')]); // eslint-disable-line react-hooks/exhaustive-deps
+  return active;
+}
 
 export default function App() {
-  // Graphics mode — 'auto' detects software rendering (no hardware accel) and
-  // switches to a blur/animation-free lite look so Pulse never hogs the CPU.
+  // Graphics mode — 'auto' detects software rendering; lite drops transitions.
   // Applied in the initializer so the very first paint is already correct.
   const [gfxMode, setGfxMode] = useState(() => {
     const m = readGraphicsMode();
@@ -25,16 +115,17 @@ export default function App() {
   });
   useEffect(() => { applyGraphicsMode(gfxMode); }, [gfxMode]);
   const liteActive = effectiveLite(gfxMode);
+  const theme = useTheme();
 
-  // Source filter — empty array means "all sources". Persisted locally.
-  const [srcFilter, setSrcFilter] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('pulse-source-filter')) || []; } catch (_) { return []; }
-  });
-  const { data, error, loading } = useSummary(10000, srcFilter);
-  const [periodKey, setPeriodKey] = useState('last30');
+  // Source filter — [] = all sources. Persisted; scopes the payload server-side.
+  const [srcFilter, setSrcFilter] = useState(readSourceFilter);
+  const { data, error } = useSummary(10000, srcFilter);
+  const [periodKey, setPeriodKeyState] = useState(readPeriod);
   const [stopped, setStopped] = useState(false);
+  const [sheet, setSheet] = useState(null); // 'menu' | 'period' | 'sources' | null
+  const [notifyState, setNotifyState] = useState(notifyPermission);
 
-  // #mini — the compact side overview (narrow docked window / installed app).
+  // #mini — the compact side overview (narrow docked window / tray popup).
   const [route, setRoute] = useState(() => window.location.hash);
   useEffect(() => {
     const onHash = () => setRoute(window.location.hash);
@@ -43,423 +134,572 @@ export default function App() {
   }, []);
   const miniView = route === '#mini';
 
+  useEffect(() => {
+    if (!miniView) document.title = BRAND + ' — usage';
+  }, [miniView]);
+
   function updateFilter(next) {
     setSrcFilter(next);
-    try { localStorage.setItem('pulse-source-filter', JSON.stringify(next)); } catch (_) {}
+    writeSourceFilter(next);
+  }
+  function setPeriodKey(k) {
+    setPeriodKeyState(k);
+    writePeriod(k);
   }
 
-  const colorMaps = useMemo(() => ({
-    src: makeColorMap(data?.allSources),
-    model: makeColorMap(data?.allModels),
-  }), [data?.allSources, data?.allModels]);
+  const colorMap = useMemo(() => makeColorMap(data?.allSources), [data?.allSources]);
+  const periods = data?.periods || [];
+  const period = periods.find((p) => p.key === periodKey) || periods.find((p) => p.key === 'last30') || periods[0];
+  const thresholds = alertThresholds(data);
+
+  // Limit/anomaly alerts → desktop notifications (de-duplicated per reset cycle in lib).
+  const alerts = data?.alerts || [];
+  const alertSig = alerts.map((a) => a.key + a.threshold + a.resetsAt).join(',');
+  useEffect(() => {
+    if (data && !miniView) fireAlertNotifications(alerts);
+  }, [alertSig, miniView, !!data]); // eslint-disable-line react-hooks/exhaustive-deps
+  const notify = {
+    permission: notifyState,
+    request: async () => {
+      try { await requestAlertPermission(); } catch (_) {}
+      setNotifyState(notifyPermission());
+      setTimeout(() => setNotifyState(notifyPermission()), 400); // callback-style browsers
+    },
+  };
+
+  const present = usePresentSections();
+  const active = useActiveSection(present);
+
+  // Deep link (#system etc.) — jump once the first payload has rendered.
+  const [jumped, setJumped] = useState(false);
+  useEffect(() => {
+    if (jumped || !data || miniView) return;
+    setJumped(true);
+    const h = window.location.hash.slice(1);
+    if (h && NAV_IDS.includes(h)) requestAnimationFrame(() => { const el = document.getElementById(h); if (el) el.scrollIntoView({ block: 'start' }); });
+  }, [data, jumped, miniView]);
 
   if (stopped) {
     return (
-      <Shell version={data?.version}>
-        <div className="center">
-          <div>
-            <h2>Pulse is stopped</h2>
-            <p>
-              This page can’t restart a stopped server. To start Pulse again, double-click{' '}
-              <code>pulse.exe</code> — or your <b>“Pulse”</b> Desktop shortcut
-              (create the shortcut pair once with <code>pulse.exe --install-shortcuts</code>).
-            </p>
-          </div>
-        </div>
-      </Shell>
+      <PageState icon="power" title={`${BRAND} is stopped`}>
+        This page can’t restart a stopped server. To start {BRAND} again, double-click <code>{EXE_NAME}</code> or
+        your “{BRAND}” Desktop / Start Menu shortcut (create the shortcuts once with <code>{EXE_NAME} --install-shortcuts</code>).
+      </PageState>
     );
   }
-
   if (!data) {
-    return (
-      <Shell>
-        <div className="center">
-          {error ? (
-            <div>
-              <h2>Can’t reach the server</h2>
-              <p>Is <code>node server.js</code> running? {error}</p>
-            </div>
-          ) : (
-            <h2>Reading your Claude Code history…</h2>
-          )}
-        </div>
-      </Shell>
+    return error ? (
+      <PageState icon="alert" title="Can’t reach the server">
+        Is the {BRAND} server running? Start it by double-clicking <code>{EXE_NAME}</code> (or <code>node server.js</code> from source).
+        <span className="paths" style={{ display: 'block', marginTop: 8 }}>{error}</span>
+      </PageState>
+    ) : (
+      <PageState icon="pulse" title="Reading your Claude Code history…">
+        The first read can take a few seconds on a large history.
+      </PageState>
     );
   }
-
   if (miniView) return <MiniOverview data={data} />;
 
-  const latest = data.latestTs;
-  const stale = latest && data.generatedAt - latest > 3 * 3600 * 1000;
+  const gfx = { mode: gfxMode, lite: liteActive, set: setGfxMode };
+  const onStopped = () => setStopped(true);
+  const sectionProps = {
+    data, period, colorMap, srcFilter, thresholds, notify, gfx, theme, onStopped, onPeriod: setPeriodKey,
+  };
+  const activeLabel = (NAV.find((n) => n.id === active) || NAV[0]).label;
   const allSrc = data.allSources || [];
+  const srcSummary = sourceSummary(srcFilter, allSrc, data.sourceMeta);
 
   return (
-    <Shell
-      version={data.version}
-      codex={data.hasCodex}
-      header={
-        <div className="hmeta">
-          <div className="hactions">
-            <button
-              className="minibtn"
-              title="Open the compact side overview in a small window (limits, resets, spend at a glance)"
-              onClick={() => window.open(window.location.pathname + '#mini', 'pulse-mini', 'width=340,height=760,popup=yes')}
+    <MotionConfig reducedMotion={perf.lite ? 'always' : 'user'}>
+      <div className="app">
+        <Rail
+          data={data}
+          periods={periods}
+          period={period}
+          onPeriod={setPeriodKey}
+          srcFilter={srcFilter}
+          onFilter={updateFilter}
+          colorMap={colorMap}
+          present={present}
+          active={active}
+          onStopped={onStopped}
+        />
+        <main className="main">
+          <TopBar data={data} error={error} title={activeLabel} period={period} srcSummary={srcSummary} theme={theme} />
+          <MobileHeader
+            data={data}
+            error={error}
+            period={period}
+            srcSummary={srcSummary}
+            multiSource={allSrc.length >= 2}
+            onOpen={setSheet}
+          />
+          <div className="content">
+            {error && (
+              <WarnBar>
+                Server unreachable ({error}), showing data from {clockTime(data.generatedAt)}. Retrying every 10 s — if you
+                stopped it, double-click <code>{EXE_NAME}</code> to start it again.
+              </WarnBar>
+            )}
+            {data.selfCheck && !data.selfCheck.ok && (
+              <WarnBar tone="crit">Internal self-check: {(data.selfCheck.issues || []).join('; ')}</WarnBar>
+            )}
+            {data.hasData ? (
+              <>
+                <Alerts id="alerts" {...sectionProps} />
+                <Kpis id="kpis" {...sectionProps} />
+                <Limits id="limits" {...sectionProps} />
+                <Spend id="spend" {...sectionProps} />
+                <Breakdown id="breakdown" {...sectionProps} />
+                <Activity id="activity" {...sectionProps} />
+                <Meshy id="meshy" {...sectionProps} />
+                <System id="system" {...sectionProps} />
+              </>
+            ) : (
+              <>
+                <Section id="kpis">
+                  <Panel>
+                    <Empty icon="chart" title="No usage recorded yet">
+                      {BRAND} is watching your Claude Code and Codex folders. Run a session and it appears here within
+                      10 seconds.
+                      <span className="paths" style={{ display: 'block', marginTop: 10 }}>{data.claudeDir}</span>
+                    </Empty>
+                  </Panel>
+                </Section>
+                {/* Meshy has no local logs, so it can have plenty to show on a
+                    machine with no Claude/Codex history; the server must stay
+                    controllable even with no data. */}
+                <Alerts id="alerts" {...sectionProps} />
+                <Limits id="limits" {...sectionProps} />
+                <Meshy id="meshy" {...sectionProps} />
+                <System id="system" {...sectionProps} />
+              </>
+            )}
+            <Footer data={data} />
+          </div>
+        </main>
+      </div>
+
+      {/* phone / tablet sheets (<1024 px) */}
+      <Sheet open={sheet === 'period'} onClose={() => setSheet(null)} title="Period">
+        <PeriodList periods={periods} value={period?.key} onChange={(k) => { setPeriodKey(k); setSheet(null); }} />
+      </Sheet>
+      <Sheet
+        open={sheet === 'sources'}
+        onClose={() => setSheet(null)}
+        title="Sources"
+        footer={(
+          <>
+            <Btn onClick={() => updateFilter([])} disabled={!srcFilter.length}>Select all</Btn>
+            <Btn variant="primary" onClick={() => setSheet(null)}>Done</Btn>
+          </>
+        )}
+      >
+        <SourceList all={allSrc} filter={srcFilter} onChange={updateFilter} colorMap={colorMap} period={period} data={data} noOnly />
+      </Sheet>
+      <Sheet open={sheet === 'menu'} onClose={() => setSheet(null)} title={BRAND}>
+        <nav className="menu-nav" aria-label="Sections">
+          {NAV.filter((n) => present.includes(n.id)).map((n) => (
+            <a
+              key={n.id}
+              href={'#' + n.id}
+              className={active === n.id ? 'on' : undefined}
+              aria-current={active === n.id ? 'location' : undefined}
+              onClick={(e) => { e.preventDefault(); setSheet(null); requestAnimationFrame(() => goTo(n.id)); }}
             >
-              ◧ mini
-            </button>
-            {data.reach && (data.reach.downloads != null || data.reach.stars != null) && (
-              <a
-                className="reachpill"
-                href={`https://github.com/${data.reach.repo}`}
-                target="_blank"
-                rel="noreferrer"
-                title={`Pulse's public GitHub reach — ${data.reach.downloads != null ? num(data.reach.downloads) + ' total downloads' : ''}${data.reach.downloads != null && data.reach.stars != null ? ' · ' : ''}${data.reach.stars != null ? num(data.reach.stars) + ' stars' : ''}. Public counts only — nothing about you leaves this machine.`}
-              >
-                {data.reach.downloads != null && <>↓ {num(data.reach.downloads)}</>}
-                {data.reach.downloads != null && data.reach.stars != null && ' · '}
-                {data.reach.stars != null && <>★ {num(data.reach.stars)}</>}
-              </a>
-            )}
-            {data.update?.status === 'available' && (
-              <a className="updpill" href="#server">v{data.update.latest} available ↓</a>
-            )}
-            <StopButton compact onStopped={() => setStopped(true)} />
-          </div>
-          <div>updated <b>{clockTime(data.generatedAt)}</b> · refreshes every 10s</div>
-          <div>
-            {latest
-              ? <>latest activity: <b className={stale ? 'warnc' : ''}>{ago(latest)}</b></>
-              : 'no usage recorded on this machine'}
-          </div>
-          <div>{num(data.totals.messages)} msgs · {num(data.totals.sessions)} sessions · {allSrc.length <= 1 ? `source: ${sourceLabel(allSrc[0] || 'cli', data.sourceMeta)}` : `${allSrc.length} sources`}</div>
+              <Icon name={n.icon} />{n.label}
+              {n.id === 'limits' && alerts.length > 0 ? <span className="count">{alerts.length}</span> : null}
+            </a>
+          ))}
+        </nav>
+        <div className="sheet-sec">
+          <div className="rail-h">Theme</div>
+          <Seg
+            className="block"
+            label="Theme"
+            value={theme.pref}
+            onChange={theme.set}
+            options={[{ value: 'system', label: 'System', icon: 'monitor' }, { value: 'dark', label: 'Dark', icon: 'moon' }, { value: 'light', label: 'Light', icon: 'sun' }]}
+          />
         </div>
-      }
-      footer={data}
-    >
-      {error && (
-        <div className="warnbar">
-          ⚠ Server unreachable ({error}) — if you stopped it, double-click <code>pulse.exe</code> to start it again.
+        <div className="sheet-sec">
+          <AllTime data={data} />
+          {data.reach && (data.reach.downloads != null || data.reach.stars != null) && <ReachPill reach={data.reach} />}
         </div>
-      )}
-      <SourceFilter
-        allSources={data.allSources || []}
-        active={srcFilter}
-        colorMap={colorMaps.src}
-        onChange={updateFilter}
-        estimated={data.estimatedSources || []}
-        meta={data.sourceMeta}
-      />
-      {!data.hasData ? (
-        <>
-          <div className="center">
-            <div>
-              <h2>No usage yet</h2>
-              <p>Pulse is watching <code>{data.claudeDir}</code>. Run Claude Code and your usage appears here — the page refreshes every 10 seconds.</p>
-            </div>
+        <div className="sheet-sec">
+          <div className="sheet-row">
+            <Btn icon="mini" onClick={() => { setSheet(null); openMini(); }}>Mini view</Btn>
+            <StopButton onStopped={onStopped} size="" />
           </div>
-          {/* Meshy has no local logs, so it can have plenty to show on a
-              machine with no Claude/Codex history at all. */}
-          <MeshyCard meshy={data.meshy} delay={0.15} />
-          {/* the background process must stay controllable even with no data */}
-          <ServerPanel data={data} onStopped={() => setStopped(true)} gfx={{ mode: gfxMode, lite: liteActive, set: setGfxMode }} delay={0.2} />
-        </>
-      ) : (
-        <Dashboard data={data} colorMaps={colorMaps} periodKey={periodKey} setPeriodKey={setPeriodKey} srcFilter={srcFilter} onStopped={() => setStopped(true)} gfx={{ mode: gfxMode, lite: liteActive, set: setGfxMode }} />
-      )}
-    </Shell>
+        </div>
+      </Sheet>
+    </MotionConfig>
   );
 }
 
-// Multi-select source filter chips. Empty selection = all sources. The list
-// always shows every source ever seen (server keeps allSources unfiltered),
-// so a chip never disappears because you just filtered it out.
-function SourceFilter({ allSources, active, colorMap, onChange, estimated = [], meta }) {
-  if (!allSources || allSources.length < 2) return null;
-  const set = new Set(active);
-  const est = new Set(estimated);
-  function toggle(s) {
-    const next = new Set(set);
-    if (next.has(s)) next.delete(s); else next.add(s);
-    // selecting everything = no filter
-    onChange(next.size === allSources.length ? [] : Array.from(next));
-  }
+// ---- rail ----------------------------------------------------------------------------
+function Rail({ data, periods, period, onPeriod, srcFilter, onFilter, colorMap, present, active, onStopped }) {
+  const allSrc = data.allSources || [];
+  const alertsN = (data.alerts || []).length;
   return (
-    <div className="srcfilter">
-      <span className="sflabel">sources</span>
-      <button
-        className={'sfchip' + (set.size === 0 ? ' on' : '')}
-        onClick={() => onChange([])}
-      >
-        all
-      </button>
-      {allSources.map((s) => (
-        <button
-          key={s}
-          className={'sfchip' + (set.has(s) ? ' on' : '')}
-          onClick={() => toggle(s)}
-          title={(est.has(s) ? 'Locally-estimated usage (not provider-billed). ' : '') + (set.has(s) ? 'Click to remove from filter' : 'Click to show only selected sources')}
-        >
-          <i style={{ background: colorMap.get(s) }} />{sourceLabel(s, meta)}{est.has(s) && <sup className="estmark">est</sup>}
-        </button>
-      ))}
-      {set.size > 0 && (
-        <span className="sfnote">showing {Array.from(set).map((s) => sourceLabel(s, meta)).join(' + ')} only</span>
-      )}
+    <aside className="rail" aria-label="Navigation and filters">
+      <div className="rail-in">
+        <div className="brand">
+          <span className="logo"><Icon name="pulse" /></span>
+          <div className="mh-brand">
+            <div className="brand-name">{BRAND}</div>
+            <div className="brand-sub">Usage monitor · <span className="mono">v{data.version}</span></div>
+          </div>
+        </div>
+
+        <nav className="nav" aria-label="Sections">
+          {NAV.filter((n) => present.includes(n.id)).map((n) => (
+            <a
+              key={n.id}
+              href={'#' + n.id}
+              className={active === n.id ? 'on' : undefined}
+              aria-current={active === n.id ? 'location' : undefined}
+              onClick={(e) => goTo(n.id, e)}
+            >
+              <Icon name={n.icon} />{n.label}
+              {n.id === 'limits' && alertsN > 0 ? <span className="count" title={`${alertsN} active alert${alertsN === 1 ? '' : 's'}`}>{alertsN}</span> : null}
+            </a>
+          ))}
+        </nav>
+
+        {periods.length > 0 && (
+          <div className="rail-grp">
+            <div className="rail-h" id="rail-period-h">Period</div>
+            <PeriodList periods={periods} value={period?.key} onChange={onPeriod} labelledBy="rail-period-h" />
+          </div>
+        )}
+
+        {allSrc.length >= 2 && (
+          <div className="rail-grp">
+            <div className="rail-h">
+              <span id="rail-src-h">Sources</span>
+              {srcFilter.length > 0 && <button type="button" className="link" onClick={() => onFilter([])}>Select all</button>}
+            </div>
+            <SourceList all={allSrc} filter={srcFilter} onChange={onFilter} colorMap={colorMap} period={period} data={data} labelledBy="rail-src-h" />
+          </div>
+        )}
+        {allSrc.length === 1 && (
+          <div className="rail-grp">
+            <div className="rail-h">Source</div>
+            <div className="opt on" aria-disabled="true"><Swatch color={colorMap.get(allSrc[0])} /><span className="lbl">{srcLabel(allSrc[0], data.sourceMeta)}</span></div>
+          </div>
+        )}
+
+        <div className="rail-foot">
+          <AllTime data={data} />
+          <div className="rail-actions">
+            <Btn size="sm" icon="mini" onClick={openMini} title="Open the compact side view (limits, resets, spend at a glance)">Mini view</Btn>
+            <StopButton variant="icon" onStopped={onStopped} />
+          </div>
+        </div>
+      </div>
+    </aside>
+  );
+}
+
+function AllTime({ data }) {
+  const t = data.totals || {};
+  return (
+    <div className="alltime">
+      All time <b>{money(t.cost)}</b>{data.sourceFilter && data.sourceFilter.length ? <span> · selected</span> : null}<br />
+      {num(t.messages)} msgs · {num(t.sessions)} sessions
     </div>
   );
 }
 
-// Delta chip: this period's spend vs the previous equal-length window.
-// Hidden when there's no prior data to compare against (avoids a meaningless
-// "+100%" on your first period).
-function PeriodDelta({ cost, prev, label }) {
-  if (!prev || prev.cost <= 0) return null;
-  const d = ((cost - prev.cost) / prev.cost) * 100;
-  const up = d >= 0;
-  const cls = Math.abs(d) < 0.5 ? 'flat' : up ? 'up' : 'down';
-  const arrow = cls === 'flat' ? '±' : up ? '▲' : '▼';
-  return (
-    <span className={'perioddelta ' + cls} title={`vs ${label}: ${money2(prev.cost)}`}>
-      {' '}{arrow} {Math.abs(d) < 0.5 ? '0' : Math.abs(Math.round(d))}%
-      <span className="pdlabel"> vs {label}</span>
-    </span>
-  );
-}
-
-// Export the selected window as CSV/JSON. Plain same-origin GET links with the
-// download attribute — the server route sits behind the same allowRead guard as
-// every /api read. Carries the current period AND the active source filter so a
-// download always matches exactly what's on screen.
-function ExportMenu({ periodKey, srcFilter }) {
-  const [open, setOpen] = useState(false);
-  const href = (extra) => {
-    const p = new URLSearchParams(extra);
-    if (periodKey) p.set('period', periodKey);
-    if (srcFilter && srcFilter.length) p.set('sources', srcFilter.join(','));
-    return '/api/export?' + p.toString();
-  };
-  const csvSets = [
-    ['daily spend', 'daily'],
-    ['by model', 'models'],
-    ['by source', 'sources'],
-    ['by project', 'projects'],
-    ['recent sessions', 'sessions'],
-  ];
-  return (
-    <span className="exportwrap" onMouseLeave={() => setOpen(false)} onKeyDown={(e) => { if (e.key === 'Escape') setOpen(false); }}>
-      <button className={'expbtn' + (open ? ' on' : '')} onClick={() => setOpen(!open)} title="Download dashboard data as CSV or JSON">
-        ⇩ export
+// Single-choice period list (radiogroup, roving focus, arrow keys).
+function PeriodList({ periods, value, onChange, labelledBy }) {
+  const rolling = periods.filter((p) => p.key.startsWith('last'));
+  const months = periods.filter((p) => !p.key.startsWith('last'));
+  const order = [...rolling, ...months];
+  const cur = order.findIndex((p) => p.key === value);
+  function onKey(e, i) {
+    let n = null;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowRight') n = (i + 1) % order.length;
+    else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') n = (i - 1 + order.length) % order.length;
+    else if (e.key === 'Home') n = 0;
+    else if (e.key === 'End') n = order.length - 1;
+    if (n == null) return;
+    e.preventDefault();
+    onChange(order[n].key);
+    const el = e.currentTarget.parentElement && e.currentTarget.parentElement.querySelector(`[data-pk="${order[n].key}"]`);
+    if (el) el.focus();
+  }
+  const opt = (p) => {
+    const i = order.indexOf(p);
+    const on = p.key === value;
+    return (
+      <button
+        key={p.key}
+        type="button"
+        role="radio"
+        aria-checked={on}
+        data-pk={p.key}
+        tabIndex={on || (cur < 0 && i === 0) ? 0 : -1}
+        className={cx('opt', on && 'on')}
+        onClick={() => onChange(p.key)}
+        onKeyDown={(e) => onKey(e, i)}
+      >
+        <span className="radio" aria-hidden="true" />
+        <span className="lbl">{p.label}</span>
+        <span className="amt">{money(p.cost)}</span>
       </button>
-      {open && (
-        <span className="expmenu">
-          {csvSets.map(([label, data]) => (
-            <a key={data} className="expitem" href={href({ format: 'csv', data })} download onClick={() => setOpen(false)}>
-              CSV · {label}
-            </a>
-          ))}
-          <a className="expitem" href={href({ format: 'json' })} download onClick={() => setOpen(false)}>
-            JSON · full payload
-          </a>
-        </span>
-      )}
-    </span>
+    );
+  };
+  return (
+    <div role="radiogroup" aria-labelledby={labelledBy} aria-label={labelledBy ? undefined : 'Period'}>
+      {rolling.map(opt)}
+      {months.length > 0 && <div className="rail-sub" role="presentation">Calendar months</div>}
+      {months.map(opt)}
+    </div>
   );
 }
 
-function Dashboard({ data, colorMaps, periodKey, setPeriodKey, srcFilter, onStopped, gfx }) {
-  const periods = data.periods || [];
-  let period = periods.find((p) => p.key === periodKey);
-  if (!period) period = periods[0];
-
-  const modelRows = period
-    ? Object.keys(period.byModel).sort((a, b) => period.byModel[b].cost - period.byModel[a].cost)
-        .map((m) => ({ name: m, ...period.byModel[m], color: colorMaps.model.get(m) }))
-    : [];
-  const sourceRows = period
-    ? Object.keys(period.bySource).sort((a, b) => period.bySource[b].cost - period.bySource[a].cost)
-        .map((s) => ({ name: s, label: sourceLabel(s, data.sourceMeta), ...period.bySource[s], color: colorMaps.src.get(s) }))
-    : [];
-
-  // Limit alerts → desktop notifications (de-duplicated per reset cycle in lib).
-  const alerts = data.alerts || [];
-  const alertSig = alerts.map((a) => a.key + a.threshold + a.resetsAt).join(',');
-  const [notifyState, setNotifyState] = useState(() => notifyPermission());
-  useEffect(() => { fireAlertNotifications(alerts); }, [alertSig]); // eslint-disable-line react-hooks/exhaustive-deps
-  const onEnableNotify = () => { requestAlertPermission(); setTimeout(() => setNotifyState(notifyPermission()), 400); };
-
+// Multi-select source list. Semantics identical to the old chips: [] = all;
+// selecting every source resets to []; the last checked source can't be
+// unchecked (an empty selection would silently mean "all" again).
+function SourceList({ all, filter, onChange, colorMap, period, data, labelledBy, noOnly }) {
+  const set = new Set(filter);
+  const allOn = set.size === 0;
+  const est = new Set(data.estimatedSources || []);
+  const isOn = (s) => allOn || set.has(s);
+  const inOrder = (xs) => all.filter((s) => xs.has(s));
+  function toggle(s) {
+    const cur = allOn ? new Set(all) : new Set(set);
+    if (cur.has(s)) {
+      if (cur.size === 1) return;
+      cur.delete(s);
+    } else cur.add(s);
+    onChange(cur.size === all.length ? [] : inOrder(cur));
+  }
+  function only(s) {
+    onChange(all.length <= 1 ? [] : [s]);
+  }
   return (
-    <>
-      {data.selfCheck && !data.selfCheck.ok && (
-        <div className="warnbar">⚠ internal self-check: {data.selfCheck.issues.join('; ')}</div>
-      )}
-
-      <AlertsBar alerts={alerts} notifyState={notifyState} onEnableNotify={onEnableNotify} />
-
-      {/* planValue is all-sources by design — a source filter narrows the
-          dashboard, not what the subscription costs. */}
-      <PlanValueCard plan={data.planValue} />
-
-      <BudgetCard budget={data.budget} />
-
-      <div className="grid stats">
-        <CurrentBlock cb={data.currentBlock} delay={0} />
-        <BurnRate burn={data.burnRate} delay={0.05} />
-        <Rollup label="Today" r={data.today} delay={0.1} />
-        <Rollup label="Last 7 days" r={data.week} delay={0.15} />
-      </div>
-
-      <MetersCard meters={data.meters} codex={data.codexMeters} codexUsage={data.codexUsage} delay={0.18} />
-
-      {/* Meshy sits with the account-level cards and ABOVE the spend section on
-          purpose: it is counted in credits, not dollars, and must never read as
-          another row of the money below it. */}
-      <MeshyCard meshy={data.meshy} delay={0.19} />
-
-      {period && (
-        <>
-          <Card delay={0.2} hover={false}>
-            <div className="h2row">
-              <h2 style={{ marginBottom: 0 }}>
-                Spend&nbsp;
-                <InfoTip text="Estimated at each provider's API list prices (or the cost an agent recorded itself). On a Pro/Max or ChatGPT plan this reflects relative usage, not a bill. Pick a month to see fixed calendar-month totals.">
-                  <span style={{ color: 'var(--text-3)', cursor: 'help' }}>ⓘ</span>
-                </InfoTip>
-              </h2>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
-                <PeriodSelect periods={periods} value={period.key} onChange={setPeriodKey} />
-                <ExportMenu periodKey={period.key} srcFilter={srcFilter} />
-                <Legend period={period} colorMap={colorMaps.src} single={period.singleSource} meta={data.sourceMeta} />
-              </div>
-            </div>
-            <div className="sub" style={{ margin: '2px 0 14px' }}>
-              <span className="mono" style={{ color: 'var(--text)', fontSize: 17 }}>{money2(period.cost)}</span>
-              <PeriodDelta cost={period.cost} prev={period.prev} label={period.key.startsWith('last') ? 'prev ' + period.label.replace('Last ', '').toLowerCase() : 'prev month'} />
-              {' · '}<span className="mono">{tokens(period.tokens)}</span> tokens
-              {' · '}<span className="mono">{num(period.messages)}</span> msgs
-              {' · '}<span className="mono">{num(period.sessions)}</span> sessions
-            </div>
-            {/* period comes along so the strip can disclose how much of the
-                headline above it the live-only figures actually cover. */}
-            <CacheSavings cache={period.cacheSavings} period={period} />
-            <SpendChart period={period} colorMap={colorMaps.src} meta={data.sourceMeta} />
-          </Card>
-
-          <div className="grid cols-2">
-            <Card delay={0.24}>
-              <h2 style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                By model · {period.label}
-                <InfoTip
-                  text={
-                    data.modesLogged
-                      ? 'Chips show the reasoning effort (low → max, plus ultracode): Claude Code ≥ 2.1.212 records the level on each message; older sessions come from /effort commands in the transcripts and from Pulse’s optional hook. Plus execution speed when fast mode was used.'
-                      : 'Effort chips appear from the level Claude Code ≥ 2.1.212 records on each message, from /effort commands in older transcripts, or via Pulse’s optional hook (--effort-setup). Ultracode is also detected from prompt text.'
-                  }
-                >
-                  <span style={{ color: 'var(--text-3)', cursor: 'help', textTransform: 'none' }}>ⓘ</span>
-                </InfoTip>
-              </h2>
-              <BarList rows={modelRows} modelLogos />
-              <FastSpendNote speed={period.speedSpend} period={period} />
-            </Card>
-            {period.singleSource ? (
-              <Card delay={0.28}>
-                <h2>By source · {period.label}</h2>
-                <div className="sub" style={{ marginTop: 2, marginBottom: 4 }}>
-                  Single source — <b style={{ color: 'var(--text-2)' }}>{sourceLabel(period.sources[0] || 'cli', data.sourceMeta)}</b> accounts for 100% of this period.
-                </div>
-                <Sparkline period={period} />
-              </Card>
-            ) : (
-              <Card delay={0.28}>
-                <h2>By source · {period.label}</h2>
-                <BarList rows={sourceRows} estimatedSources={data.estimatedSources || []} />
-              </Card>
+    <div role="group" aria-labelledby={labelledBy} aria-label={labelledBy ? undefined : 'Sources'}>
+      {all.map((s) => {
+        const on = isOn(s);
+        const row = period && period.bySource ? period.bySource[s] : null;
+        const amt = row ? money(row.cost) : (on ? money(0) : '—');
+        const label = srcLabel(s, data.sourceMeta);
+        return (
+          <div className="srcrow" key={s}>
+            <button
+              type="button"
+              role="checkbox"
+              aria-checked={on}
+              className={cx('opt', on && 'on')}
+              onClick={() => toggle(s)}
+              title={s !== label ? s : undefined}
+            >
+              <span className={cx('cbox', on && 'on')} aria-hidden="true"><Icon name="check" size={12} /></span>
+              <Swatch color={colorMap.get(s)} />
+              <span className="lbl">{label}</span>
+              {est.has(s) && <Est />}
+              <span className="amt">{amt}</span>
+            </button>
+            {!noOnly && (
+              <button type="button" className="only" tabIndex={-1} onClick={() => only(s)} title={`Show only ${label}`}>only</button>
             )}
           </div>
+        );
+      })}
+    </div>
+  );
+}
 
-          <div className="grid cols-2">
-            <Card delay={0.3}>
-              <h2 style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                By effort · {period.label}
-                <InfoTip text="Spend grouped by the reasoning-effort level in force (low → max, ultracode, or default when none was set). Covers sessions still in your logs — the long-window archive keeps day/model totals, not per-entry effort.">
-                  <span style={{ color: 'var(--text-3)', cursor: 'help', textTransform: 'none' }}>ⓘ</span>
-                </InfoTip>
-              </h2>
-              <EffortSpendBars spend={period.effortSpend} />
-            </Card>
-            <Card delay={0.32}>
-              <h2 style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                By project · {period.label}
-                <InfoTip text="Spend grouped by working directory (project). Folder name shown; hover for the full path. Top 30 by cost; the rest fold into “(other)”. Covers sessions still in your logs.">
-                  <span style={{ color: 'var(--text-3)', cursor: 'help', textTransform: 'none' }}>ⓘ</span>
-                </InfoTip>
-              </h2>
-              <ProjectBars rows={period.byProject} />
-            </Card>
-          </div>
-        </>
-      )}
+function sourceSummary(filter, all, meta) {
+  if (!all.length) return 'No sources';
+  if (!filter.length) return all.length === 1 ? srcLabel(all[0], meta) : `All ${all.length} sources`;
+  if (filter.length === 1) return srcLabel(filter[0], meta);
+  return `${filter.length} of ${all.length} sources`;
+}
 
-      {data.heatmap && data.heatmap.maxCost > 0 && (
-        <Card delay={0.34} hover={false}>
-          <h2 style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            When you work
-            <InfoTip text="Spend by local day-of-week and hour, across all sessions in your logs. Darker = more spend in that hour. Hover a cell for the details.">
-              <span style={{ color: 'var(--text-3)', cursor: 'help', textTransform: 'none' }}>ⓘ</span>
-            </InfoTip>
-          </h2>
-          <Heatmap heatmap={data.heatmap} />
-        </Card>
-      )}
+// ---- live status -------------------------------------------------------------------------
+function liveStatus(data, error) {
+  if (error) return { tone: 'warn', head: 'Offline', parts: ['server unreachable, retrying'], latest: null, stale: false };
+  const st = data.agentState;
+  const an = data.activeNow;
+  const who = (p) => (p === 'codex' ? 'Codex' : 'Claude');
+  let head;
+  if (st) head = who(st.provider) + ' ' + (st.state === 'waiting' ? 'waiting on you' : st.state);
+  else if (an) head = who(an.provider) + ' active';
+  else head = data.latestTs ? 'No live session' : 'No usage yet';
+  const parts = [];
+  if (an) {
+    if (an.model) parts.push(prettyModel(an.model));
+    if (an.ultracode) parts.push('Ultracode');
+    else if (an.effort) parts.push(effortLabel(an.effort));
+    if (an.sessions) parts.push(an.sessions + (an.sessions === 1 ? ' session' : ' sessions'));
+  }
+  const stale = !!(data.latestTs && data.generatedAt - data.latestTs > 3 * 3600 * 1000);
+  return { tone: 'ok', head, parts, latest: data.latestTs ? ago(data.latestTs) : null, stale };
+}
 
-      <Card delay={0.36} hover={false}>
-        <h2>Recent sessions</h2>
-        <SessionsTable sessions={data.recentSessions} meta={data.sourceMeta} />
-      </Card>
-
-      <ServerPanel data={data} onStopped={onStopped} gfx={gfx} delay={0.4} />
+function LiveText({ s }) {
+  return (
+    <>
+      <b>{s.head}</b>
+      {s.parts.map((p, i) => <span key={i}> · {p}</span>)}
+      {s.latest ? <span className={s.stale ? 'warnc' : 'muted'}> · {s.latest}</span> : null}
     </>
   );
 }
 
-function Shell({ children, header, footer, version, codex }) {
+// ---- top bar (≥1024) -----------------------------------------------------------------------
+function TopBar({ data, error, title, period, srcSummary, theme }) {
+  const s = liveStatus(data, error);
+  const upd = data.update || {};
   return (
-    <MotionConfig reducedMotion={perf.lite ? 'always' : 'never'}>
-    <div className="wrap">
-      <motion.header className="hdr" initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5 }}>
-        <div className="brand">
-          <div className="logo">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
-              <path d="M3 12h4l2-6 4 14 2-8h6" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
+    <header className="topbar">
+      <div className="tb-title">
+        <h1>{title}</h1>
+        <span className="crumb">
+          <b>{period ? period.label : '—'}</b>
+          {(data.allSources || []).length ? <> · {srcSummary.replace(/^All /, 'all ')}</> : null}
+        </span>
+      </div>
+      <div className="tb-sp" />
+      <span className="live" title="What your agents are doing right now (latest main-conversation activity)">
+        <span className={cx('dot', s.tone === 'warn' && 'warn')} aria-hidden="true" />
+        <span className="lt"><LiveText s={s} /></span>
+      </span>
+      <div className="tb-meta" title="Refreshes every 10 seconds">
+        <span className="tb-ref">Updated </span>
+        <b key={data.generatedAt} className="tick-flash">{clockTime(data.generatedAt)}</b>
+      </div>
+      <span className="vsep" aria-hidden="true" />
+      <div className="tb-actions">
+        {data.reach && (data.reach.downloads != null || data.reach.stars != null) && <ReachPill reach={data.reach} className="reach" />}
+        {upd.status === 'available' && (
+          <Pill tone="accent" icon="arrowup" href="#system" title="Update available — see System">v{upd.latest} available</Pill>
+        )}
+        <IconBtn icon="mini" label="Open the mini view" onClick={openMini} />
+        <ThemeToggle theme={theme} />
+      </div>
+    </header>
+  );
+}
+
+function ReachPill({ reach, className }) {
+  const bits = [];
+  if (reach.downloads != null) bits.push(num(reach.downloads) + ' downloads');
+  if (reach.stars != null) bits.push(num(reach.stars) + ' stars');
+  return (
+    <Pill
+      className={className}
+      href={`https://github.com/${reach.repo}`}
+      target="_blank"
+      rel="noreferrer"
+      title={`${BRAND}'s public GitHub reach: ${bits.join(' · ')}. Public counts only — nothing about you leaves this machine.`}
+    >
+      {reach.downloads != null && <><Icon name="arrowdown" size={12} /><b>{num(reach.downloads)}</b></>}
+      {reach.stars != null && <><Icon name="star" size={12} /><b>{num(reach.stars)}</b></>}
+    </Pill>
+  );
+}
+
+function ThemeToggle({ theme }) {
+  const dark = theme.effective === 'dark';
+  const label = `Theme: ${dark ? 'dark' : 'light'}${theme.pref === 'system' ? ' (system)' : ''} — switch to ${dark ? 'light' : 'dark'}`;
+  return <IconBtn icon={dark ? 'moon' : 'sun'} label={label} onClick={() => theme.set(dark ? 'light' : 'dark')} />;
+}
+
+// ---- mobile header + filter bar (<1024) ------------------------------------------------------
+function MobileHeader({ data, error, period, srcSummary, multiSource, onOpen }) {
+  const s = liveStatus(data, error);
+  const upd = data.update || {};
+  return (
+    <>
+      <header className="mhead">
+        <div className="mh-row">
+          <span className="logo"><Icon name="pulse" /></span>
+          <div className="mh-brand">
+            <h1 className="brand-name">{BRAND}</h1>
+            <div className="brand-sub">v{data.version} · updated {hm(data.generatedAt)}</div>
           </div>
-          <div>
-            <h1>Pulse</h1>
-            <div className="tag"><span className="dot" />{codex ? 'Claude Code + Codex' : 'Claude Code usage'} · live{version ? <span className="ver">v{version}</span> : null}</div>
-          </div>
+          <span className="sp" />
+          {upd.status === 'available' && (
+            <Pill tone="accent" icon="arrowup" href="#system" title={`v${upd.latest} available — see System`}>v{upd.latest}</Pill>
+          )}
+          <IconBtn icon="mini" label="Open the mini view" onClick={openMini} />
+          <IconBtn icon="menu" label="Menu" aria-haspopup="dialog" onClick={() => onOpen('menu')} />
         </div>
-        {header}
-      </motion.header>
+        <div className="mh-status">
+          <span className={cx('dot', s.tone === 'warn' && 'warn')} aria-hidden="true" />
+          <span className="t"><LiveText s={s} /></span>
+        </div>
+      </header>
+      <div className={cx('mfilters', !multiSource && 'one')}>
+        <button type="button" className="fbtn" aria-haspopup="dialog" onClick={() => onOpen('period')} disabled={!period}>
+          <span className="l">Period{period ? ' · ' + money(period.cost) : ''}</span>
+          <span className="v">{period ? period.label : '—'}</span>
+          <Icon name="down" size={14} />
+        </button>
+        {multiSource && (
+          <button type="button" className="fbtn" aria-haspopup="dialog" onClick={() => onOpen('sources')}>
+            <span className="l">Sources</span>
+            <span className="v">{srcSummary}</span>
+            <Icon name="down" size={14} />
+          </button>
+        )}
+      </div>
+    </>
+  );
+}
 
-      {children}
+// ---- footer ------------------------------------------------------------------------------------
+function Footer({ data }) {
+  const sessionFiles = (data.fileCount || 0) - (data.codexFileCount || 0);
+  return (
+    <footer className="foot">
+      <div>
+        <p>
+          <b>Costs are estimates</b> at each provider’s API list prices (or the cost an agent recorded itself). On a Pro,
+          Max or ChatGPT plan they show relative usage, not a bill. {BRAND} runs on this machine and reads your agents’
+          logs (<code>~/.claude</code>, <code>~/.codex</code>, …) read-only. Usage data never leaves it.
+        </p>
+        <p>
+          <b>Network:</b> a GitHub version check and public download/star counts (turn both off with{' '}
+          <code>--no-update-check</code>). Opt-in only: api.anthropic.com and chatgpt.com meters with the logins those
+          tools already saved, and api.meshy.ai with your key. Discord presence uses the desktop app’s local socket.
+        </p>
+        <div className="paths">
+          reading {data.claudeDir} · {num(sessionFiles)} session file{sessionFiles === 1 ? '' : 's'}
+          {data.hasCodex ? <> + {data.codexDir} · {num(data.codexFileCount)} codex file{data.codexFileCount === 1 ? '' : 's'}</> : null}
+        </div>
+      </div>
+      <div className="foot-r">
+        {BRAND} v{data.version}
+        {data.reach && (data.reach.downloads != null || data.reach.stars != null) && (
+          <>
+            <br />
+            <a href={`https://github.com/${data.reach.repo}`} target="_blank" rel="noreferrer">
+              {data.reach.downloads != null && <><Icon name="arrowdown" size={12} />{num(data.reach.downloads)}</>}
+              {data.reach.stars != null && <><Icon name="star" size={12} />{num(data.reach.stars)}</>}
+            </a>
+          </>
+        )}
+      </div>
+    </footer>
+  );
+}
 
-      {footer && (
-        <footer>
-          <div className="disc">
-            Costs are <b>estimates</b> at each provider’s API list prices — on a subscription they express
-            relative usage, not a bill. Pulse runs entirely on your machine and only ever reads your agents’ logs
-            (<code>~/.claude</code>, <code>~/.codex</code>, …).
-            Usage data never leaves this machine. By default Pulse only checks GitHub for updates (disable
-            with <code>--no-update-check</code>); account meters, Codex usage and Meshy are opt-in calls to those
-            providers, and Discord presence talks to the local Discord app.
-          </div>
-          <div className="reading">
-            reading: {footer.claudeDir} · {num((footer.fileCount || 0) - (footer.codexFileCount || 0))} session file{(footer.fileCount || 0) - (footer.codexFileCount || 0) === 1 ? '' : 's'}
-            {footer.hasCodex ? <> &nbsp;+&nbsp; {footer.codexDir} · {num(footer.codexFileCount)} codex file{footer.codexFileCount === 1 ? '' : 's'}</> : null}
-          </div>
-        </footer>
-      )}
+// ---- whole-page states (no payload yet / stopped) -------------------------------------------------
+function PageState({ icon, title, children }) {
+  return (
+    <div className="boot">
+      <div className="boot-in">
+        <span className="logo" aria-hidden="true"><Icon name={icon} /></span>
+        <h2>{title}</h2>
+        <p className="hint">{children}</p>
+      </div>
     </div>
-    </MotionConfig>
   );
 }

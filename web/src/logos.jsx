@@ -1,42 +1,47 @@
 // Provider marks for the model families recognized in ./model-families.js.
-// Marks are simple original glyphs in brand colors (evocative, not exact
-// trademarked logos) so they stay tasteful, lightweight, and safe.
+// Marks are simple original glyphs (evocative, not exact trademarked logos)
+// painted with the --fam-* tokens, so light mode can darken them.
+// SHARED FILE (see CONTRACT.md).
+//
+//   <ModelLogo model="claude-opus-5-5" size={14} />   mark for a model id
+//   <FamilyMark family="openai" size={14} />          mark for a provider family
 import { modelFamily, FAMILY_META } from './model-families.js';
 export { modelFamily, FAMILY_META };
 
-// A brand-colored monogram badge — the consistent fallback and the mark for
-// families without a bespoke glyph.
+// A monogram badge — the consistent fallback for families without a glyph.
 function Monogram({ label, color, size }) {
   return (
     <span
-      title={label}
+      className="fam-mono"
+      aria-hidden="true"
       style={{
-        display: 'inline-flex', width: size, height: size, borderRadius: Math.round(size * 0.28),
-        background: color, color: '#fff', fontSize: Math.round(size * 0.62), lineHeight: 1,
-        fontWeight: 700, alignItems: 'center', justifyContent: 'center', flex: 'none',
-        fontFamily: 'var(--mono)',
+        width: size, height: size, borderRadius: Math.round(size * 0.28),
+        background: color, fontSize: Math.round(size * 0.62),
       }}
     >{label[0]}</span>
   );
 }
 
-// Simple original SVG marks for the common families; monogram for the rest.
-export function ModelLogo({ model, size = 16 }) {
-  const fam = modelFamily(model);
-  const { label, color } = FAMILY_META[fam];
-  const common = { width: size, height: size, viewBox: '0 0 24 24', style: { flex: 'none', display: 'block' } };
+export function FamilyMark({ family = 'other', size = 16, title }) {
+  const fam = FAMILY_META[family] ? family : 'other';
+  const { label, css: color } = FAMILY_META[fam];
+  const common = { width: size, height: size, viewBox: '0 0 24 24', className: 'pmark', 'aria-hidden': true, focusable: 'false' };
+  // title: undefined → the family label; '' → purely decorative (hidden from AT).
+  const decorative = title === '';
+  const tt = decorative ? undefined : (title || label);
+  const a11y = { title: tt, role: decorative ? undefined : 'img', 'aria-label': tt, 'aria-hidden': decorative || undefined };
   const svg = (children) => (
-    <span title={label} style={{ display: 'inline-flex', flex: 'none' }} aria-label={label}>
-      <svg {...common}>{children}</svg>
+    <span className="fam-wrap" {...a11y}>
+      <svg {...common} style={{ width: size, height: size }}>{children}</svg>
     </span>
   );
   switch (fam) {
     case 'claude': // sunburst
       return svg(
-        <g stroke={color} strokeWidth="2" strokeLinecap="round">
+        <g stroke={color} strokeWidth="2.4" strokeLinecap="round">
           {Array.from({ length: 8 }).map((_, i) => {
             const a = (i * Math.PI) / 4;
-            const x = 12 + Math.cos(a) * 8, y = 12 + Math.sin(a) * 8;
+            const x = 12 + Math.cos(a) * 9, y = 12 + Math.sin(a) * 9;
             const x0 = 12 + Math.cos(a) * 3, y0 = 12 + Math.sin(a) * 3;
             return <line key={i} x1={x0} y1={y0} x2={x} y2={y} />;
           })}
@@ -44,7 +49,7 @@ export function ModelLogo({ model, size = 16 }) {
       );
     case 'openai': // six-petal rosette (approximate knot)
       return svg(
-        <g fill="none" stroke={color} strokeWidth="1.8">
+        <g fill="none" stroke={color} strokeWidth="2">
           {Array.from({ length: 6 }).map((_, i) => {
             const a = (i * Math.PI) / 3;
             const cx = 12 + Math.cos(a) * 4, cy = 12 + Math.sin(a) * 4;
@@ -78,15 +83,24 @@ export function ModelLogo({ model, size = 16 }) {
         <path d="M12 3 L20 7.5 L20 16.5 L12 21 L4 16.5 L4 7.5 Z"
           fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" />
       );
-    case 'mistral': // stacked colored bands
+    case 'mistral': // stacked bands
       return svg(
         <g>
-          {['#F7D046', '#F2A73B', '#EE792F', '#EA3326'].map((c, i) => (
-            <rect key={i} x="4" y={4 + i * 4} width="16" height="3.2" rx="1" fill={c} />
+          {[1, 2, 3, 4].map((n, i) => (
+            <rect key={n} x="4" y={4 + i * 4} width="16" height="3.2" rx="1" fill={`var(--fam-mistral-${n})`} />
           ))}
         </g>
       );
     default:
-      return <Monogram label={label} color={color} size={size} />;
+      return (
+        <span className="fam-wrap" {...a11y}>
+          <Monogram label={label} color={color} size={size} />
+        </span>
+      );
   }
+}
+
+// Mark for a model id (family recognised from the name).
+export function ModelLogo({ model, size = 16, title }) {
+  return <FamilyMark family={modelFamily(model)} size={size} title={title} />;
 }

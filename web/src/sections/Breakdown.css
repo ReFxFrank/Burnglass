@@ -1,0 +1,9 @@
+/* =============================================================================
+   sections/Breakdown.css — styles for sections/Breakdown.jsx ONLY.
+   OWNER: the Breakdown section engineer. Scope EVERY selector under .sec-breakdown (the
+   class <Section id="breakdown"> puts on the root) — CSS is global and four people
+   edit sections in parallel. Floating content (Tip/Menu/Sheet) is portalled
+   to <body>: style it through its own prefixed class (breakdown-…), not .sec-breakdown.
+   Use the tokens + primitives in ../styles.css; never hard-code colours.
+   Mockup reference (design-command/src/styles.css): .tbl-model .tbl-proj .tbl-eff (l.450-452), .mix (l.462-463), .eff-key (l.476-478); ≤760 l.656-668 + l.713-714 — .tbl/.mag/.sig/.efflab/.fastchip are shared
+   ============================================================================= */

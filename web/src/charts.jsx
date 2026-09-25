@@ -32,19 +32,13 @@ export function ProgressRing({ fraction, size = 96, stroke = 8, children }) {
   return (
     <div style={{ position: 'relative', width: size, height: size, flex: 'none' }}>
       <svg width={size} height={size} style={{ transform: 'rotate(-90deg)' }}>
-        <defs>
-          <linearGradient id="ringg" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0%" stopColor="#8f7ff5" />
-            <stop offset="100%" stopColor="#b3a5ff" />
-          </linearGradient>
-        </defs>
-        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="rgba(255,255,255,0.07)" strokeWidth={stroke} />
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="var(--m-track)" strokeWidth={stroke} />
         <circle
           cx={size / 2}
           cy={size / 2}
           r={r}
           fill="none"
-          stroke="url(#ringg)"
+          stroke="var(--m-fill)"
           strokeWidth={stroke}
           strokeLinecap="round"
           strokeDasharray={c}
@@ -100,11 +94,7 @@ export function Sparkline({ period, height = 92 }) {
           strokeWidth="2.25"
           strokeLinejoin="round"
           strokeLinecap="round"
-          strokeDasharray={len || undefined}
-          strokeDashoffset={len || 0}
-          style={{ animation: len ? 'draw 1.1s ease forwards' : undefined }}
         />
-        <style>{`@keyframes draw { to { stroke-dashoffset: 0; } }`}</style>
       </svg>
     </div>
   );

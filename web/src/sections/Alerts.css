@@ -1,0 +1,9 @@
+/* =============================================================================
+   sections/Alerts.css — styles for sections/Alerts.jsx ONLY.
+   OWNER: the Alerts section engineer. Scope EVERY selector under .sec-alerts (the
+   class <Section id="alerts"> puts on the root) — CSS is global and four people
+   edit sections in parallel. Floating content (Tip/Menu/Sheet) is portalled
+   to <body>: style it through its own prefixed class (alerts-…), not .sec-alerts.
+   Use the tokens + primitives in ../styles.css; never hard-code colours.
+   Mockup reference (design-command/src/styles.css): .alert (l.272-278; ≤760 l.631-633)
+   ============================================================================= */

@@ -3202,6 +3202,9 @@ function buildSummary(sourceFilter, opts) {
   // Limit alerts: which windows are at/above a warning threshold right now.
   // Stateless — the dashboard de-dups notifications per reset cycle client-side.
   payload.alerts = computeAlerts(payload.meters, payload.codexMeters);
+  // The configured thresholds themselves, so the dashboard's meter ticks and
+  // warn/crit colouring use the same numbers the alerts fire on.
+  payload.alertThresholds = alertThresholds();
   // Spend anomaly (opt-in) leads the list — a runaway day outranks a window
   // that is merely approaching its limit. Computed ONLY on the unfiltered
   // view: like the meter alerts it is an account-level signal, and a

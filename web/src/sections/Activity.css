@@ -1,0 +1,9 @@
+/* =============================================================================
+   sections/Activity.css — styles for sections/Activity.jsx ONLY.
+   OWNER: the Activity section engineer. Scope EVERY selector under .sec-activity (the
+   class <Section id="activity"> puts on the root) — CSS is global and four people
+   edit sections in parallel. Floating content (Tip/Menu/Sheet) is portalled
+   to <body>: style it through its own prefixed class (activity-…), not .sec-activity.
+   Use the tokens + primitives in ../styles.css; never hard-code colours.
+   Mockup reference (design-command/src/styles.css): .hm* (l.483-497), .tbl-sess .sess-t .proj .srcl .models .ago .sess-meta (l.500-509); ≤760 l.669-681, l.708
+   ============================================================================= */

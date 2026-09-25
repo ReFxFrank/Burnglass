@@ -1,0 +1,49 @@
+/* #mini — the compact side overview (popup / tray window). Solid surfaces,
+   tokens only, no blur, nothing animated. Owned with mini.jsx (not a
+   dashboard section). */
+.mini { max-width: 380px; margin: 0 auto; padding: 14px 12px 24px; }
+.minitop { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; }
+.minibrand { font-weight: var(--fw-semi); font-size: var(--fs-md); color: var(--text); }
+.minifull { font-size: var(--fs-xs); color: var(--accent); }
+.minifull:hover { text-decoration: underline; }
+.minialert {
+  font-size: var(--fs-xs); color: var(--text); background: var(--warn-soft);
+  border: 1px solid var(--warn-line); border-radius: var(--r-sm); padding: 7px 10px; margin-bottom: 10px;
+}
+.minicard { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-md); padding: 12px; margin-bottom: 10px; }
+.minihead { font-size: var(--fs-2xs); font-weight: var(--fw-semi); letter-spacing: var(--track-caps); text-transform: uppercase; color: var(--text-3); margin-bottom: 8px; }
+.minirow { margin-bottom: 10px; }
+.minirow:last-child { margin-bottom: 2px; }
+.minirow.stale { opacity: .55; }
+.minilbl { font-size: var(--fs-xs); color: var(--text-2); margin-bottom: 4px; }
+.minilblrow { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 4px; }
+.minilblrow .minilbl { margin-bottom: 0; }
+.miniproj { font-size: var(--fs-2xs); color: var(--text-3); cursor: help; white-space: nowrap; }
+.minitrack { height: 8px; border-radius: 2px; background: var(--m-track); overflow: hidden; }
+.minitrack i { display: block; height: 100%; border-radius: 2px; background: var(--m-fill); }
+.minitrack i.warm { background: var(--warn); }
+.minitrack i.hot { background: var(--crit); }
+.minimeta { display: flex; justify-content: space-between; font-size: var(--fs-2xs); color: var(--text-3); margin-top: 4px; font-variant-numeric: tabular-nums; }
+.minimeta b { color: var(--text-2); font-weight: var(--fw-semi); }
+.minihint { font-size: var(--fs-xs); color: var(--text-3); line-height: var(--lh-xs); }
+.minitabs { display: flex; gap: 2px; background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 2px; margin-bottom: 12px; }
+.minitab { flex: 1; font-size: var(--fs-xs); color: var(--text-3); cursor: pointer; background: transparent; border: 0; border-radius: 4px; height: 24px; }
+.minitab.on { background: var(--panel-3); color: var(--text); box-shadow: var(--e-1); }
+.minidonutrow { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; }
+.minidonut { width: 108px; height: 108px; flex: none; }
+.minidonutlbl { fill: var(--text); font-size: 13px; font-weight: 600; }
+.minilegend { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.minilegrow { display: flex; align-items: center; gap: 7px; font-size: var(--fs-xs); }
+.minilegrow i { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.minilegname { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.minilegval { margin-left: auto; color: var(--text); font-variant-numeric: tabular-nums; }
+.ministats { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; }
+.ministat { display: flex; align-items: baseline; gap: 8px; font-size: var(--fs-xs); }
+.ministat span { color: var(--text-3); }
+.ministat b { margin-left: auto; color: var(--text); font-weight: var(--fw-semi); font-variant-numeric: tabular-nums; }
+.ministat em { font-style: normal; color: var(--text-3); font-size: var(--fs-2xs); font-variant-numeric: tabular-nums; }
+.minitrendhead { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 5px; }
+.minitrendhead span { font-size: var(--fs-2xs); color: var(--text-2); font-weight: var(--fw-semi); }
+.minitrendhead em { font-style: normal; font-size: var(--fs-2xs); color: var(--text-3); }
+.minitrend { display: flex; align-items: flex-end; gap: 2px; height: 36px; }
+.minitrend i { flex: 1; min-width: 2px; border-radius: 2px 2px 0 0; background: var(--q5); }

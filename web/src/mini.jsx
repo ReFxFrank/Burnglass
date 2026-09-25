@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { money2, tokens, durClock, useTick, makeColorMap, sourceLabel } from './lib.js';
+import { money2, tokens, durClock, useTick, makeColorMap, sourceLabel, BRAND } from './lib.js';
+import './mini.css';
 
 // Compact side overview (#mini) — stacked provider cards sized for a narrow
 // docked window or an installed-app panel: official Claude/Codex windows as
@@ -53,12 +54,12 @@ function MiniDonut({ slices, total, colorMap }) {
   let acc = 0;
   return (
     <svg className="minidonut" viewBox="0 0 110 110" role="img" aria-label="Spend by source">
-      <circle cx="55" cy="55" r={R} fill="none" stroke="rgba(255,255,255,0.07)" strokeWidth="12" />
+      <circle cx="55" cy="55" r={R} fill="none" stroke="var(--m-track)" strokeWidth="12" />
       {total > 0 && slices.map((s) => {
         const frac = s.cost / total;
         const seg = (
           <circle key={s.name} cx="55" cy="55" r={R} fill="none"
-            stroke={colorMap.get(s.name) || '#9b8cff'} strokeWidth="12"
+            stroke={colorMap.get(s.name) || 'var(--accent)'} strokeWidth="12"
             strokeDasharray={`${Math.max(0.5, frac * C - 1.5)} ${C}`}
             strokeDashoffset={-acc * C}
             transform="rotate(-90 55 55)" strokeLinecap="butt" />
@@ -98,7 +99,7 @@ export function MiniOverview({ data }) {
   const [tab, setTab] = useState('30d');
   useEffect(() => {
     const prev = document.title;
-    document.title = 'Pulse — mini';
+    document.title = BRAND + ' — mini';
     return () => { document.title = prev; };
   }, []);
   const m = data.meters;
@@ -125,7 +126,7 @@ export function MiniOverview({ data }) {
   return (
     <div className="mini">
       <div className="minitop">
-        <span className="minibrand">Pulse</span>
+        <span className="minibrand">{BRAND}</span>
         <a className="minifull" href="#">full dashboard →</a>
       </div>
       {alerts.length > 0 && (

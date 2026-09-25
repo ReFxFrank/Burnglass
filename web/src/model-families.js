@@ -17,16 +17,19 @@ export function modelFamily(model) {
   return 'other';
 }
 
+// `color` is the brand hex (kept for tests and non-CSS consumers); the UI
+// paints marks with `css` — a token (styles.css --fam-*) that light mode
+// darkens so every mark keeps its contrast on white.
 export const FAMILY_META = {
-  claude:   { label: 'Anthropic', color: '#D97757' },
-  openai:   { label: 'OpenAI',    color: '#0E9C7E' },
-  google:   { label: 'Google',    color: '#4285F4' },
-  deepseek: { label: 'DeepSeek',  color: '#4D6BFE' },
-  glm:      { label: 'Z.ai GLM',  color: '#0EA5C4' },
-  meta:     { label: 'Meta',      color: '#0668E1' },
-  xai:      { label: 'xAI',       color: '#c7c9cc' },
-  qwen:     { label: 'Qwen',      color: '#7A6FF0' },
-  mistral:  { label: 'Mistral',   color: '#EE792F' },
-  cohere:   { label: 'Cohere',    color: '#39A0A0' },
-  other:    { label: 'Model',     color: '#8a8f98' },
+  claude:   { label: 'Anthropic', color: '#D97757', css: 'var(--fam-claude)' },
+  openai:   { label: 'OpenAI',    color: '#0E9C7E', css: 'var(--fam-openai)' },
+  google:   { label: 'Google',    color: '#4285F4', css: 'var(--fam-google)' },
+  deepseek: { label: 'DeepSeek',  color: '#4D6BFE', css: 'var(--fam-deepseek)' },
+  glm:      { label: 'Z.ai GLM',  color: '#0EA5C4', css: 'var(--fam-glm)' },
+  meta:     { label: 'Meta',      color: '#0668E1', css: 'var(--fam-meta)' },
+  xai:      { label: 'xAI',       color: '#c7c9cc', css: 'var(--fam-xai)' },
+  qwen:     { label: 'Qwen',      color: '#7A6FF0', css: 'var(--fam-qwen)' },
+  mistral:  { label: 'Mistral',   color: '#EE792F', css: 'var(--fam-mistral)' },
+  cohere:   { label: 'Cohere',    color: '#39A0A0', css: 'var(--fam-cohere)' },
+  other:    { label: 'Model',     color: '#8a8f98', css: 'var(--fam-other)' },
 };

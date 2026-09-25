@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { motion, animate } from 'framer-motion';
 import * as Select from '@radix-ui/react-select';
-import * as Tooltip from '@radix-ui/react-tooltip';
+import { InfoTip } from './ui.jsx';
 import { ProgressRing } from './charts.jsx';
-import { money, money2, tokens, num, pct, dur, durClock, hm, ago, dayLabel, ACCENT, perf, postJson, sourceLabel } from './lib.js';
+import { money, money2, tokens, num, pct, dur, durClock, hm, ago, dayLabel, ACCENT, perf, postJson, sourceLabel, EFFORT_RAMP } from './lib.js';
 import { ModelLogo, modelFamily, FAMILY_META } from './logos.jsx';
 
 const EASE = [0.2, 0.7, 0.2, 1];
@@ -47,21 +47,9 @@ export function AnimatedNumber({ value, format }) {
   return <span ref={ref}>{format(value ?? 0)}</span>;
 }
 
-export function InfoTip({ children, text }) {
-  return (
-    <Tooltip.Provider delayDuration={120}>
-      <Tooltip.Root>
-        <Tooltip.Trigger asChild>{children}</Tooltip.Trigger>
-        <Tooltip.Portal>
-          <Tooltip.Content className="rtip" sideOffset={7}>
-            {text}
-            <Tooltip.Arrow style={{ fill: 'rgba(16,14,22,0.92)' }} />
-          </Tooltip.Content>
-        </Tooltip.Portal>
-      </Tooltip.Root>
-    </Tooltip.Provider>
-  );
-}
+// Legacy name kept for the old components: the shared tooltip (hover, focus
+// and tap-to-open on touch) lives in ui.jsx now.
+export { InfoTip };
 
 export function Legend({ period, colorMap, single, meta }) {
   if (single) {
@@ -824,7 +812,7 @@ export function Heatmap({ heatmap }) {
             const intensity = c.cost > 0 ? 0.14 + 0.86 * Math.sqrt(c.cost / max) : 0;
             return (
               <InfoTip key={h} text={`${WEEKDAYS[d]} ${hourLabel(h)}–${hourLabel((h + 1) % 24)} — ${money2(c.cost)} · ${tokens(c.tokens)} tokens · ${num(c.messages)} msgs`}>
-                <span className="hm-cell" style={{ background: c.cost > 0 ? `rgba(155,140,255,${intensity})` : undefined }} />
+                <span className="hm-cell" style={{ background: c.cost > 0 ? `color-mix(in srgb, var(--accent) ${Math.round(intensity * 100)}%, transparent)` : undefined }} />
               </InfoTip>
             );
           })}
@@ -893,10 +881,7 @@ export function BarList({ rows, modelLogos = false, estimatedSources = [] }) {
 // Spend broken down by reasoning-effort level (incl. ultracode / default) —
 // bars colored to match the effort-chip heat ramp.
 const EFFORT_SPEND_ORDER = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultracode', 'default'];
-const EFFORT_BAR_COLORS = {
-  minimal: '#8a8f98', low: '#22b892', medium: '#4a9bf5', high: '#9b8cff',
-  xhigh: '#e0a132', max: '#f27878', ultracode: '#c07be0', default: '#5b6270',
-};
+const EFFORT_BAR_COLORS = EFFORT_RAMP;
 export function EffortSpendBars({ spend }) {
   const keys = EFFORT_SPEND_ORDER.filter((k) => spend && spend[k] && spend[k].cost > 0);
   if (!keys.length) {
@@ -949,7 +934,7 @@ export function ProjectBars({ rows }) {
             <div className="hbar">
               <div className="nm" style={special ? { color: 'var(--text-3)', fontStyle: 'italic' } : null}>{name}</div>
               <div className="track">
-                <motion.i style={{ background: 'linear-gradient(90deg, #6f8cff, #9b8cff)' }} initial={{ width: 0 }}
+                <motion.i style={{ background: 'var(--bar)' }} initial={{ width: 0 }}
                   animate={{ width: Math.max(2, (r.cost / max) * 100) + '%' }} transition={{ duration: 0.7, ease: EASE }} />
               </div>
               <div className="v">{money2(r.cost)} <small>· {tokens(r.tokens)}</small></div>

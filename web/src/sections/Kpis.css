@@ -1,0 +1,9 @@
+/* =============================================================================
+   sections/Kpis.css — styles for sections/Kpis.jsx ONLY.
+   OWNER: the Kpis section engineer. Scope EVERY selector under .sec-kpis (the
+   class <Section id="kpis"> puts on the root) — CSS is global and four people
+   edit sections in parallel. Floating content (Tip/Menu/Sheet) is portalled
+   to <body>: style it through its own prefixed class (kpis-…), not .sec-kpis.
+   Use the tokens + primitives in ../styles.css; never hard-code colours.
+   Mockup reference (design-command/src/styles.css): .kpis (l.283; ≤1360 l.599-600; ≤760 l.625-630) — .kpi/.kfacts/.kbar/.delta/.spark are shared primitives already
+   ============================================================================= */
