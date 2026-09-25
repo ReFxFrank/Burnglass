@@ -448,14 +448,15 @@ start_upd() { # port [NAME=VALUE]
   SRV=$!
 }
 start_upd 5844; wait_up 5844
-rel v2.0.1 "$(asset pulse-linux),$(asset burnglass-linux)"; check 5844 "$TMP/u1.json"
-rel v2.0.1 "$(asset pulse-linux)";                           check 5844 "$TMP/u2.json"
+# mock "newer" releases use 99.x so they stay newer than whatever version is running
+rel v99.0.1 "$(asset pulse-linux),$(asset burnglass-linux)"; check 5844 "$TMP/u1.json"
+rel v99.0.1 "$(asset pulse-linux)";                          check 5844 "$TMP/u2.json"
 rel v2.0.0-rc.1 "$(asset burnglass-linux)";                  check 5844 "$TMP/u3.json"
-rel v2.0.1-rc.2 "$(asset burnglass-linux)";                  check 5844 "$TMP/u4.json"
+rel v99.0.1-rc.2 "$(asset burnglass-linux)";                 check 5844 "$TMP/u4.json"
 rel v1.34.0 "$(asset pulse-linux)";                          check 5844 "$TMP/u5.json"
 stop_srv $SRV
 start_upd 5845 BURNGLASS_SELF_EXE_NAME=pulse-linux; wait_up 5845
-rel v2.0.1 "$(asset burnglass-linux),$(asset pulse-linux)"; check 5845 "$TMP/u6.json"
+rel v99.0.1 "$(asset burnglass-linux),$(asset pulse-linux)"; check 5845 "$TMP/u6.json"
 stop_srv $SRV
 
 # ---------------------------------------------------------------- assertions
@@ -685,7 +686,7 @@ ok(U("u1.json").status === "available" && U("u1.json").assetName === "burnglass-
 ok(U("u2.json").assetName === "pulse-linux", "U1: falls back to the legacy asset name");
 ok(U("u6.json").assetName === "pulse-linux", "U1: an exe named pulse-linux pulls pulse-linux first");
 ok(U("u3.json").status === "uptodate", "U1: 2.0.0-rc.1 is not offered over the running " + V + " (" + U("u3.json").status + ")");
-ok(U("u4.json").status === "available" && U("u4.json").latest === "2.0.1-rc.2", "U1: 2.0.1-rc.2 ranks above 2.0.0");
+ok(U("u4.json").status === "available" && U("u4.json").latest === "99.0.1-rc.2", "U1: a prerelease of a NEWER version (99.0.1-rc.2) ranks above the running " + V);
 ok(U("u5.json").status === "uptodate", "U1: v1.34.0 is not an update");
 process.exit(fail);
 ' "$TMP" "$SECRET" "$ROOT"
