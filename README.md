@@ -390,7 +390,10 @@ Discord's own image proxy fetches it (Pulse still makes no network call), it
 can take a few seconds to appear the first time, and anyone who can see your
 presence can see where the image is hosted. Avoid Discord attachment links —
 they expire. If Discord rejects the image, the Server panel shows the error
-until the next accepted update.
+until the next accepted update. You don't have to edit the config file: with
+presence on, the **Server panel** has an image field for each slot (Claude
+Code / Codex / idle) — paste a link or an art-asset key, or clear it to go
+back to the built-in art.
 
 How it works / privacy: Pulse speaks the Discord **desktop client's local IPC
 socket** directly (named pipe on Windows) — the same mechanism as every

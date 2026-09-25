@@ -34,7 +34,7 @@ const url = require('url');
 const crypto = require('crypto');
 
 // Version — keep in sync with package.json (build/make-exe.mjs enforces this).
-const PULSE_VERSION = '1.32.0';
+const PULSE_VERSION = '1.33.0';
 const SERVER_START = Date.now();
 let IS_DAEMON_CHILD = false; // set when running as the hidden background child
 let IS_AFTER_UPDATE = false; // set on the relaunch right after a self-update
@@ -5015,9 +5015,48 @@ function startDiscordLoop() {
   if (discordEnabled()) discordTick();
 }
 
+// The three large-image slots and their config keys. A slot holds a
+// Developer-Portal Art Asset key, an https link (the ONLY way Discord
+// animates a GIF / animated WebP), or nothing (= the built-in key).
+const DISCORD_IMAGE_SLOTS = { claude: 'discordClaudeImage', codex: 'discordCodexImage', idle: 'discordLargeImage' };
+const DISCORD_IMAGE_MAX = 256; // Discord's external-asset URL limit
+
+// Validate one slot value from the dashboard → { value } (null clears the
+// slot) or { error }. Discord's image proxy — never Pulse — fetches a link,
+// so this only has to keep junk and non-https schemes out of the presence.
+function validDiscordImage(raw) {
+  if (raw === null || raw === undefined) return { value: null };
+  if (typeof raw !== 'string') return { error: 'must be text' };
+  const v = raw.trim();
+  if (!v) return { value: null };
+  if (v.length > DISCORD_IMAGE_MAX) return { error: 'is longer than ' + DISCORD_IMAGE_MAX + ' characters (Discord\'s limit)' };
+  if (!/^[\x21-\x7e]+$/.test(v)) return { error: 'contains spaces or unsupported characters' };
+  if (/^[a-z][a-z0-9+.-]*:/i.test(v)) {
+    let u = null;
+    try { u = new URL(v); } catch (_) {}
+    if (!u || u.protocol !== 'https:' || !u.hostname) {
+      return { error: 'must be an https:// link (Discord ignores http and other schemes)' };
+    }
+    return { value: v };
+  }
+  // Art Asset key: Discord lowercases keys on upload.
+  if (!/^[a-z0-9_.-]{1,64}$/i.test(v)) return { error: 'is neither an https:// link nor an art-asset key' };
+  return { value: v.toLowerCase() };
+}
+
+function discordImagesForPayload() {
+  const cfg = readConfig();
+  const out = {};
+  for (const [slot, key] of Object.entries(DISCORD_IMAGE_SLOTS)) {
+    out[slot] = typeof cfg[key] === 'string' && cfg[key] ? cfg[key] : null;
+  }
+  return out;
+}
+
 function discordForPayload() {
-  if (!discordEnabled()) return { enabled: false, status: 'off' };
-  return { enabled: true, status: discordState.status === 'off' ? 'connecting' : discordState.status, error: discordState.error };
+  const images = discordImagesForPayload();
+  if (!discordEnabled()) return { enabled: false, status: 'off', images };
+  return { enabled: true, status: discordState.status === 'off' ? 'connecting' : discordState.status, error: discordState.error, images };
 }
 
 // ---------------------------------------------------------------------------
@@ -5238,10 +5277,11 @@ function allowRead(req, res, boundLoopback) {
 }
 
 // Read a small JSON request body. Pulse's mutation routes are otherwise all
-// query-string driven; this exists for exactly one reason — a SECRET (the
-// Meshy API key) must not travel in a URL, where it would land in server logs,
-// browser history and Referer headers. Size-capped, and every failure path
-// answers the callback exactly once.
+// query-string driven; this exists because a SECRET (the Meshy API key) must
+// not travel in a URL, where it would land in server logs, browser history
+// and Referer headers — and it also carries the Discord image links, which
+// are URLs themselves. Size-capped, and every failure path answers the
+// callback exactly once.
 function readJsonBody(req, limitBytes, cb) {
   cb = once(cb);
   let body = '';
@@ -5993,6 +6033,36 @@ function startServer(port, host, opts) {
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, discord: discordForPayload() }));
+        return;
+      }
+      if (route === '/api/discord/images') {
+        if (!allowMutation(req, res)) return;
+        // JSON body {claude?, codex?, idle?}: only the slots present change;
+        // an empty value restores the built-in art key. All-or-nothing — one
+        // bad value rejects the whole request and nothing is written.
+        readJsonBody(req, 4096, (bodyErr, body) => {
+          const fail = (msg) => {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: msg }));
+          };
+          if (bodyErr) return fail(bodyErr.message);
+          const patch = {};
+          for (const [slot, key] of Object.entries(DISCORD_IMAGE_SLOTS)) {
+            if (!Object.prototype.hasOwnProperty.call(body, slot)) continue;
+            const r = validDiscordImage(body[slot]);
+            if (r.error) return fail(slot + ' image ' + r.error);
+            patch[key] = r.value;
+          }
+          if (!Object.keys(patch).length) return fail('no image slots given (claude, codex, idle)');
+          writeConfig(patch);
+          console.log('[pulse] discord images updated from the dashboard (' +
+            Object.keys(patch).map((k) => k + '=' + (patch[k] ? 'set' : 'default')).join(', ') + ')');
+          // Publish now rather than on the next 15s tick.
+          discordLastActivity = '';
+          if (discordEnabled()) discordTick();
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, discord: discordForPayload() }));
+        });
         return;
       }
       if (route === '/api/tray/enable' || route === '/api/tray/disable') {

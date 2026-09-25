@@ -12,6 +12,10 @@
 #    a dated OpenAI snapshot id shows without its date: "GPT-5 · High · 1 session".
 # G: Claude long workflow — the main thread went quiet > 15 min while only its
 #    subagents write: still the MAIN model + effort, not the Haiku explorer.
+# H: POST /api/discord/images (Server-panel field): mutation guard, per-slot
+#    validation (https only, no spaces, length cap, asset keys lowercased),
+#    all-or-nothing writes, partial updates, empty = built-in art, and an
+#    immediate re-publish (no 15 s wait).
 # Second line (state): "<model> · <effort> · N sessions" from the newest MAIN-
 # conversation entry (a newer subagent line must not flip it) + live sessions;
 # config discordShowModel:false removes it (checked in phase C).
@@ -142,6 +146,37 @@ kill $SRV 2>/dev/null; wait $SRV 2>/dev/null
 CLD=$CL2 start_pulse "$IPC"
 curl -s "http://127.0.0.1:$PORT/api/summary" > "$TMP/g.json"
 kill $SRV 2>/dev/null; wait $SRV 2>/dev/null
+
+# --- H: image slots from the dashboard (slow ticks: the publish must be immediate)
+echo '{"discordPresence": true, "discordClientId": "123456789012345678", "discordCodexImage": "codex_old"}' > "$PH/config.json"
+CLAUDE_DIR=$CL PULSE_HOME=$PH CODEX_DIR=$TMP/no-codex PULSE_SUMMARY_MEMO_MS=0 \
+  PULSE_DISCORD_IPC="$IPC" PULSE_DISCORD_TICK_MS=60000 PULSE_DISCORD_ROTATE_MS=60000 \
+  node "$ROOT/server.js" --port $PORT --no-update-check >"$TMP/h.log" 2>&1 &
+SRV=$!
+sleep 2.5
+U="http://127.0.0.1:$PORT/api/discord/images"
+post() { curl -s -o "$TMP/h-$1.json" -w "%{http_code}" -X POST -H 'X-Pulse: 1' -H 'Content-Type: application/json' --data "$2" "$U"; }
+cfgsnap() { cp "$PH/config.json" "$TMP/h-cfg-$1.json"; }
+{
+  echo "noheader $(curl -s -o /dev/null -w '%{http_code}' -X POST --data '{"claude":"x"}' "$U")"
+  echo "get $(curl -s -o /dev/null -w '%{http_code}' "$U")"
+  echo "http $(post http '{"claude":"http://i.imgur.com/6XNR72Z.gif"}')"
+  echo "js $(post js '{"claude":"javascript:alert(1)"}')"
+  echo "space $(post space '{"claude":"https://i.imgur.com/a b.gif"}')"
+  echo "long $(post long "{\"claude\":\"https://x.test/$(printf 'a%.0s' $(seq 1 260)).gif\"}")"
+  echo "number $(post number '{"claude":123}')"
+  echo "empty $(post empty '{}')"
+  # one bad slot rejects the whole request: claude is valid, idle is not
+  echo "mixed $(post mixed '{"claude":"https://i.imgur.com/6XNR72Z.gif","idle":"ftp://x.test/a.gif"}')"
+  cfgsnap bad
+  echo "ok $(post ok '{"claude":"  https://i.imgur.com/6XNR72Z.gif  ","idle":"Pulse_Anim"}')"
+  cfgsnap ok
+  echo "partial $(post partial '{"codex":""}')"
+  cfgsnap partial
+} > "$TMP/h-codes.txt"
+sleep 0.5
+curl -s "http://127.0.0.1:$PORT/api/summary" > "$TMP/h-sum.json"
+kill $SRV 2>/dev/null; wait $SRV 2>/dev/null
 kill $MOCK 2>/dev/null
 
 node -e '
@@ -208,7 +243,8 @@ const urlAct = frames.find((f) => f.op === 1 && f.payload.cmd === "SET_ACTIVITY"
   f.payload.args.activity.assets.large_image === "https://example.com/clawd.gif");
 ok(!!urlAct, "E: https image URL reaches large_image verbatim");
 
-// Frames of the k-th Discord connection (split at each handshake).
+// Frames of the k-th Discord connection (split at each handshake). The last
+// three connections are phases F, G, H in that order.
 const conns = []; for (const f of frames) { if (f.op === 0) conns.push([]); else if (conns.length) conns[conns.length - 1].push(f); }
 const lastState = (k) => { const a = (conns[k] || []).filter((f) => f.payload.cmd === "SET_ACTIVITY" && f.payload.args.activity);
   return a.length ? a[a.length - 1].payload.args.activity.state : undefined; };
@@ -216,12 +252,36 @@ const F = require(SP + "/f.json").activeNow;
 ok(F && F.provider === "codex" && F.model === "gpt-5-2025-08-07" && F.effort === "high",
    "F: Codex subagents (current + legacy) never flip the model/effort (" + JSON.stringify(F) + ")");
 ok(F && F.sessions === 1, "F: auto-reviewer + legacy child fold into ONE session (" + (F && F.sessions) + ")");
-ok(lastState(conns.length - 2) === "GPT-5 · High · 1 session", "F: state drops the snapshot date (" + lastState(conns.length - 2) + ")");
+ok(lastState(conns.length - 3) === "GPT-5 · High · 1 session", "F: state drops the snapshot date (" + lastState(conns.length - 3) + ")");
 ok(!/unknown model/i.test(fs.readFileSync(SP + "/f.log", "utf8")), "F: no unknown-model warnings");
 const G = require(SP + "/g.json").activeNow;
 ok(G && G.model === "claude-opus-5-5" && G.effort === "xhigh" && G.sessions === 1,
    "G: quiet main thread still wins over its live subagents (" + JSON.stringify(G) + ")");
-ok(lastState(conns.length - 1) === "Opus 5.5 · Extra High · 1 session", "G: state (" + lastState(conns.length - 1) + ")");
+ok(lastState(conns.length - 2) === "Opus 5.5 · Extra High · 1 session", "G: state (" + lastState(conns.length - 2) + ")");
+
+const codes = Object.fromEntries(fs.readFileSync(SP + "/h-codes.txt", "utf8").trim().split("\n").map((l) => l.split(" ")));
+ok(codes.noheader === "403" && codes.get === "403", "H: mutation guard (no X-Pulse " + codes.noheader + ", GET " + codes.get + ")");
+for (const k of ["http", "js", "space", "long", "number", "empty", "mixed"]) {
+  const body = JSON.parse(fs.readFileSync(SP + "/h-" + k + ".json", "utf8"));
+  ok(codes[k] === "400" && typeof body.error === "string", "H: rejects " + k + " (" + codes[k] + ": " + body.error + ")");
+}
+const cBad = JSON.parse(fs.readFileSync(SP + "/h-cfg-bad.json", "utf8"));
+ok(cBad.discordClaudeImage === undefined && cBad.discordCodexImage === "codex_old" && cBad.discordLargeImage === undefined,
+   "H: rejected requests wrote nothing (all-or-nothing)");
+const cOk = JSON.parse(fs.readFileSync(SP + "/h-cfg-ok.json", "utf8"));
+ok(codes.ok === "200" && cOk.discordClaudeImage === "https://i.imgur.com/6XNR72Z.gif" && cOk.discordLargeImage === "pulse_anim" && cOk.discordCodexImage === "codex_old",
+   "H: valid save trims links, lowercases asset keys, leaves absent slots alone");
+ok(cOk.discordPresence === true && cOk.discordClientId === "123456789012345678", "H: other config keys preserved");
+const cPart = JSON.parse(fs.readFileSync(SP + "/h-cfg-partial.json", "utf8"));
+ok(codes.partial === "200" && cPart.discordCodexImage === null && cPart.discordClaudeImage === "https://i.imgur.com/6XNR72Z.gif",
+   "H: empty value restores the built-in art for that slot only");
+const hImgs = require(SP + "/h-sum.json").discord.images;
+ok(hImgs && hImgs.claude === "https://i.imgur.com/6XNR72Z.gif" && hImgs.codex === null && hImgs.idle === "pulse_anim",
+   "H: payload.discord.images mirrors config (" + JSON.stringify(hImgs) + ")");
+const hActs = (conns[conns.length - 1] || []).filter((f) => f.payload.cmd === "SET_ACTIVITY" && f.payload.args.activity);
+ok(hActs.length >= 2 && hActs[0].payload.args.activity.assets.large_image === "claude" &&
+   hActs.some((f) => f.payload.args.activity.assets.large_image === "https://i.imgur.com/6XNR72Z.gif"),
+   "H: saved link re-published immediately with 60 s ticks (" + hActs.map((f) => f.payload.args.activity.assets.large_image).join(" -> ") + ")");
 process.exit(fail);
 ' "$TMP" "$ECONN"
 RES=$?

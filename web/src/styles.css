@@ -659,6 +659,20 @@ html.lite .mtrack i, html.lite .hbar .track i { transition: none; }
 .msh-note { font-size: 12px; color: var(--text-3); margin-top: 10px; }
 .msh-note.bad { color: var(--warn); }
 
+/* Discord image slots (Server panel) */
+.dimg-form { display: grid; gap: 6px; margin: 8px 0 2px; max-width: 640px; }
+.dimg-row { display: grid; grid-template-columns: 170px minmax(0, 1fr); align-items: center; gap: 10px; }
+.dimg-row span { font-size: 12px; color: var(--text-3); }
+.dimg-row input {
+  width: 100%; min-width: 0; box-sizing: border-box; background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--stroke); color: var(--text); border-radius: 8px; padding: 6px 10px;
+  font: inherit; font-family: var(--mono); font-size: 12px;
+}
+.dimg-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
+.dimg-note { font-size: 12px; color: var(--text-3); }
+.dimg-note.bad { color: var(--warn); }
+@media (max-width: 560px) { .dimg-row { grid-template-columns: 1fr; gap: 4px; } }
+
 .msh-row { display: flex; align-items: flex-start; gap: 30px; flex-wrap: wrap; }
 .msh-hero { flex: none; }
 .msh-bal {

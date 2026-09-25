@@ -34,6 +34,68 @@ export function StopButton({ onStopped, compact = false, disabled = false }) {
   );
 }
 
+// Discord large-image slots: an https link (the only way Discord animates a
+// GIF) or an uploaded Art Asset key; empty = the built-in art. No preview on
+// purpose — rendering the link here would make the dashboard fetch it, and
+// Pulse makes no network calls beyond its documented list (Discord's own
+// image proxy is what fetches it for the presence).
+const DISCORD_IMAGE_ROWS = [
+  ['claude', 'While using Claude Code', 'claude'],
+  ['codex', 'While using Codex', 'codex'],
+  ['idle', 'When idle', 'pulse'],
+];
+function DiscordImagesForm({ images }) {
+  const server = images || {};
+  const fromServer = { claude: server.claude || '', codex: server.codex || '', idle: server.idle || '' };
+  // null = follow the server's values (the payload refreshes every few
+  // seconds); an object = what the user is editing or has just saved.
+  const [local, setLocal] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const shown = local || fromServer;
+  useEffect(() => {
+    // Once the server reports what was saved, go back to following it.
+    if (local && !busy && DISCORD_IMAGE_ROWS.every(([k]) => local[k] === fromServer[k])) setLocal(null);
+  }, [local, busy, fromServer.claude, fromServer.codex, fromServer.idle]);
+  const edit = (k, v) => { setLocal({ ...shown, [k]: v }); setMsg(null); };
+  async function save() {
+    setBusy(true); setMsg(null);
+    try {
+      const body = {};
+      for (const [k] of DISCORD_IMAGE_ROWS) body[k] = shown[k].trim();
+      const r = await postJson('/api/discord/images', body);
+      const saved = (r.discord && r.discord.images) || {};
+      setLocal({ claude: saved.claude || '', codex: saved.codex || '', idle: saved.idle || '' });
+      setMsg({ bad: false, text: 'Saved — Discord shows it on the next update (a new link can take a few seconds the first time).' });
+    } catch (e) { setMsg({ bad: true, text: 'Couldn’t save: ' + e.message }); }
+    setBusy(false);
+  }
+  const changed = DISCORD_IMAGE_ROWS.some(([k]) => shown[k].trim() !== fromServer[k]);
+  return (
+    <div className="dimg-form">
+      {DISCORD_IMAGE_ROWS.map(([k, label, def]) => (
+        <label key={k} className="dimg-row">
+          <span>{label}</span>
+          <input
+            type="text"
+            spellCheck={false}
+            autoComplete="off"
+            placeholder={def + ' (uploaded art)'}
+            value={shown[k]}
+            onChange={(e) => edit(k, e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter' && changed && !busy) save(); }}
+          />
+        </label>
+      ))}
+      <div className="dimg-actions">
+        <button className="btn albtn" disabled={busy || !changed} onClick={save}>{busy ? 'Saving…' : 'Save images'}</button>
+        {local && changed && !busy && <button className="btn ghost albtn" onClick={() => { setLocal(null); setMsg(null); }}>Cancel</button>}
+        {msg && <span className={'dimg-note' + (msg.bad ? ' bad' : '')}>{msg.text}</span>}
+      </div>
+    </div>
+  );
+}
+
 // The Server card: identity (version / uptime / mode), update check + install,
 // stop button, and a live tail of the server log — everything you would
 // otherwise need the console window for.
@@ -337,6 +399,17 @@ export function ServerPanel({ data, onStopped, gfx, delay = 0.36 }) {
         on your Discord profile, via the desktop app’s local socket (nothing sent over the network by Pulse).
         Works out of the box: just flip it on with Discord running. It’s public to anyone who can see your
         profile; <code>{'{"discordShowModel": false}'}</code> in config hides the model line.
+        {data.discord && data.discord.enabled && (
+          <>
+            <div style={{ marginTop: 8, color: 'var(--text-3)' }}>
+              <b style={{ color: 'var(--text-2)' }}>Images:</b> paste an <code>https://</code> link to a GIF or
+              animated WebP to animate it (uploaded art assets can’t animate), an art-asset key, or leave a
+              field empty for the built-in art. Discord fetches the link, not Pulse, and anyone who can see
+              your presence can see where it’s hosted. Avoid Discord attachment links — they expire.
+            </div>
+            <DiscordImagesForm images={data.discord.images} />
+          </>
+        )}
       </div>
       {data.meshy && (
         <div className="sub" style={{ margin: '-4px 0 4px' }}>

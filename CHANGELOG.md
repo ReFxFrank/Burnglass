@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.33.0
+
+- **Set the Discord images from the dashboard.** With Discord presence on,
+  the Server panel now has three fields — *While using Claude Code*, *While
+  using Codex*, *When idle* — so you can paste an `https://` link to a GIF or
+  animated WebP (the only way Discord animates an image) or an uploaded
+  art-asset key without editing `config.json`. An empty field goes back to
+  the built-in art. Saving re-publishes the presence immediately instead of
+  on the next 15 s tick. Links must be https, have no spaces, and be at most
+  256 characters (Discord's limit); asset keys are lowercased the way
+  Discord stores them; one bad value rejects the whole save and nothing is
+  written. The panel deliberately shows no preview: rendering the link
+  would make the dashboard fetch it, and Pulse makes no network calls
+  beyond its documented list — Discord's own image proxy is what fetches
+  it. New `POST /api/discord/images` (JSON body `{claude?, codex?, idle?}`)
+  and `payload.discord.images`.
+
 ## v1.32.0
 
 - **Discord presence shows what you're running.** While you're active, a
