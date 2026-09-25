@@ -356,6 +356,8 @@ try {
   res.roundTrip = samples.map((x) => { const q = s.psQuote(x); const r = scanSq(q, 0); return !!r && r.value === x && r.end === q.length; });
   const l = logLine(s.trayScript(4747));
   res.unit = { value: l.lit && l.lit.value, rest: l.rest, expect: path.join(HQ, ".burnglass", "burnglass.log") };
+  // the self-relaunch must pass its own path QUOTED (profiles with spaces)
+  res.relaunchQuoted = /\x27-File\x27, \(\x27"\x27 \+ \$PSCommandPath \+ \x27"\x27\)/.test(s.trayScript(4747));
 } catch (e) { res.err = String(e && e.message || e); }
 try { const l = logLine(fs.readFileSync(T + "/q1-tray.ps1", "utf8")); res.file = { value: l.lit && l.lit.value, rest: l.rest }; } catch (e) { res.fileErr = String(e.message); }
 fs.writeFileSync(T + "/q1-unit.json", JSON.stringify(res));
@@ -651,6 +653,7 @@ const q = J("q1-unit.json") || {};
 const HQREAL = path.join(T, "hq", "Se\u00e1n O\u2019Neill \u2018x\u201A\u201B \x27y\x27");
 ok(!q.err && Array.isArray(q.roundTrip) && q.roundTrip.length === 5 && q.roundTrip.every(Boolean), "Q1: psQuote round-trips every PowerShell single-quote kind (" + JSON.stringify(q.roundTrip || q.err) + ")");
 ok(q.unit && q.unit.value === q.unit.expect && q.unit.rest === "", "Q1: trayScript $logFile literal parses to the exact home path (" + JSON.stringify(q.unit) + ")");
+ok(q.relaunchQuoted === true, "Q1: the tray self-relaunch quotes $PSCommandPath (profile paths with spaces)");
 ok(q.file && q.file.value === path.join(HQREAL, ".burnglass", "burnglass.log") && q.file.rest === "",
    "Q1: the refreshed legacy ~/.pulse/tray.ps1 parses too (" + JSON.stringify(q.file || q.fileErr) + ")");
 ok((J("q1.json") || {}).home === path.join(HQREAL, ".burnglass"), "Q1: the quoted home migrated");

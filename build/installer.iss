@@ -305,7 +305,14 @@ var
   ResultCode: Integer;
 begin
   Dir := AddBackslash(AppDir);
+  // PowerShell treats ' and the typographic U+2018..U+201B all as single
+  // quotes inside a '...' literal — double every one (a profile such as
+  // C:\Users\Seán O’Neill otherwise breaks the command).
   StringChangeEx(Dir, '''', '''''', True);
+  StringChangeEx(Dir, #$2018, #$2018#$2018, True);
+  StringChangeEx(Dir, #$2019, #$2019#$2019, True);
+  StringChangeEx(Dir, #$201A, #$201A#$201A, True);
+  StringChangeEx(Dir, #$201B, #$201B#$201B, True);
   Cmd := '-NoProfile -NonInteractive -Command "$d = ''' + Dir + '''; ' +
     'Get-CimInstance Win32_Process -Filter \"Name=''burnglass-strip.exe'' OR Name=''pulse-strip.exe''\" | ' +
     'Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($d, [System.StringComparison]::OrdinalIgnoreCase) } | ' +

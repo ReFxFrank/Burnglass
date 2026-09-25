@@ -6481,7 +6481,7 @@ function trayScript(port) {
     // from the fresh file and hand over the mutex.
     '    if ($s.version -and $s.version -ne $myVer) {',
     "      Write-BgLog ('server is now v' + $s.version + ' (icon was built for v' + $myVer + ') - relaunching from the rewritten script.')",
-    "      Start-Process 'powershell.exe' -WindowStyle Hidden -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', $PSCommandPath",
+    "      Start-Process 'powershell.exe' -WindowStyle Hidden -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', ('\"' + $PSCommandPath + '\"')",
     '      $ni.Visible = $false; [System.Windows.Forms.Application]::Exit(); return',
     '    }',
     "    $t = 'Burnglass'",
