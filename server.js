@@ -3712,7 +3712,9 @@ function buildSummary(sourceFilter, opts) {
   payload.discord = discordForPayload();
   // Windows tray state — the Server panel shows the toggle only where the
   // feature exists.
-  payload.tray = { supported: process.platform === 'win32', enabled: trayDesired !== null ? trayDesired : readConfig().tray === true };
+  // (+ additive running/starting/alive/spawnedAt/lastSeen/lastError: the
+  // tray diagnoses itself — see trayForPayload).
+  payload.tray = trayForPayload();
   payload.openusage = { supported: process.platform === 'win32', enabled: readConfig().openusage === true, path: findOpenUsage() };
   // refresh: the post-update strip refresh's outcome on this start (additive;
   // a failure also carries attempts / retriesLeft / retryAt / checking).
@@ -6633,67 +6635,131 @@ let trayDesired = null;
 function trayScript(port) {
   const pngTable = (state) => '@{ ' + [16, 20, 24, 32].map((n) => n + " = '" + TRAY_ICONS[state][n] + "'").join('; ') + ' }';
   return '﻿' + [ // BOM: PowerShell 5.1 reads a BOM-less script as ANSI and would garble a non-ASCII home path
-    // The tray is spawned detached with stdio ignored, so anything it prints is
-    // discarded — it logs to <home>/burnglass.log instead, which is exactly
-    // what the Server panel tails. (v1 hard-coded ~/.pulse here and so ignored
-    // a pinned home.)
-    '$logFile = ' + psQuote(path.join(appHome(), 'burnglass.log')),
-    // Same shape as the server's own lines so the tail reads uniformly.
+    // Where this process reports (the dashboard's log tail is the SERVER's
+    // in-memory ring, so none of this reaches it directly):
+    //  - <home>/burnglass.log via Add-Content, in the server's own line shape;
+    //  - stdout, which startTray points at <home>/tray-error.log (truncated
+    //    per spawn, stderr goes there too). PowerShell's OWN errors — a Group
+    //    Policy or antivirus block, a parse error — land there before one line
+    //    of this script runs, and the server reads that file when this process
+    //    exits early or non-zero (payload.tray.lastError). (v1 hard-coded
+    //    ~/.pulse here and so ignored a pinned home.)
+    // Exit codes (read by the server): 0 normal (Exit tray, turned off in the
+    // dashboard, a version relaunch) - 2 setup failed - 4 another instance
+    // owns the icon lock - 5 the server stopped answering. The whole script
+    // stays ASCII (see Write-BgLog) apart from the home path in $logFile.
+    // Absolute: the tray runs with cwd = the home, so a relative pinned home
+    // would otherwise resolve twice.
+    '$logFile = ' + psQuote(path.resolve(appHome(), 'burnglass.log')),
+    "$myVer = '" + PULSE_VERSION + "'",
+    '$script:out = $null',
+    'try { $script:out = New-Object System.IO.StreamWriter([Console]::OpenStandardOutput(), (New-Object System.Text.UTF8Encoding($false))); $script:out.AutoFlush = $true } catch { }',
+    // Same shape as the server's own lines so the file reads uniformly.
     // ASCII only: PowerShell 5.1 + the log's other readers disagree about
     // encoding often enough that a stray em-dash shows up as mojibake.
-    'function Write-BgLog([string]$msg) {',
-    '  try {',
-    "    $ts = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')",
-    "    Add-Content -Path $logFile -Value ($ts + ' INFO  [burnglass] tray: ' + $msg) -Encoding UTF8 -ErrorAction Stop",
-    '  } catch { }',
+    "function Write-BgLog([string]$msg, [string]$level = 'INFO') {",
+    "  $ts = ''",
+    "  try { $ts = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ') } catch { }",
+    "  $line = $ts + ' ' + $level.PadRight(5) + ' [burnglass] tray: ' + $msg",
+    // No writer (Constrained Language mode refuses StreamWriter): the host's
+    // own output also lands in the redirected stdout.
+    '  if ($script:out) { try { $script:out.WriteLine($line) } catch { } } else { try { Write-Host $line } catch { } }',
+    '  try { Add-Content -Path $logFile -Value $line -Encoding UTF8 -ErrorAction Stop } catch { }',
     '}',
+    // Any terminating error the setup try/catch below does not cover (the
+    // message loop, a menu action): log it WITH its line instead of losing it.
+    // `continue` keeps the old behaviour — the statement is skipped and the
+    // icon lives on — it only stops being silent.
+    'trap {',
+    "  Write-BgLog ('unexpected error at tray.ps1 line ' + $_.InvocationInfo.ScriptLineNumber + ': ' + $_.Exception.Message) 'ERROR'",
+    '  continue',
+    '}',
+    "Write-BgLog ('starting (v' + $myVer + ', port " + port + ", PowerShell ' + $PSVersionTable.PSVersion + ' ' + $PSVersionTable.PSEdition + ', ' + $ExecutionContext.SessionState.LanguageMode + ', pid ' + $PID + ')')",
+    // Invoke-RestMethod's progress bar has no console to draw on here; some
+    // hosts serialize it to stderr (= tray-error.log) on every poll.
+    "$ProgressPreference = 'SilentlyContinue'",
+    '$script:exitCode = 0',
+    '$script:haveLock = $false',
+    "$script:step = 'starting'",
+    // Everything from the lock to the icon on screen: a failure here used to
+    // leave a toggle that said On with nothing anywhere explaining why. Now it
+    // names the step and the tray.ps1 line, and exits 2 for the server.
+    'try {',
+    "  $ErrorActionPreference = 'Stop'",
+    "  $script:step = 'opening the single-instance lock'",
     // FROZEN name: an old v1 tray holds 'PulseTray<port>' during the handoff.
-    "$mtx = New-Object System.Threading.Mutex($false, 'PulseTray" + port + "')",
+    "  $mtx = New-Object System.Threading.Mutex($false, 'PulseTray" + port + "')",
     // 10s (not 0): during a version handoff the new instance starts before
-    // the old one has released the mutex.
+    // the old one has released the mutex. An owner that ended WITHOUT
+    // releasing it (killed, crashed, a pre-rc.3 tray relaunching) leaves it
+    // abandoned: the wait still acquires it but throws — before this
+    // try/catch that error was skipped, so it has always meant "acquired".
+    '  try { $script:haveLock = $mtx.WaitOne(10000) } catch {',
+    '    if ($_.Exception.GetBaseException() -is [System.Threading.AbandonedMutexException]) {',
+    '      $script:haveLock = $true',
+    "      Write-BgLog 'took over the icon lock from an instance that ended without releasing it.'",
+    '    } else { throw }',
+    '  }',
     // Losing this race is NORMAL (a restart while an older icon is still up),
     // but exiting silently meant the dashboard reported the tray as enabled
     // with nothing on screen and nothing anywhere explaining why. Say it.
-    'if (-not $mtx.WaitOne(10000)) {',
-    "  Write-BgLog 'another instance already owns the icon on port " + port + "; this one is exiting. If no icon is visible, that owner is stale - end the powershell process running tray.ps1, or toggle the tray off and on in the Server panel.'",
-    '  exit',
-    '}',
-    "$myVer = '" + PULSE_VERSION + "'",
-    'Add-Type -AssemblyName System.Windows.Forms',
-    'Add-Type -AssemblyName System.Drawing',
-    // GetHicon handles must be destroyed once cloned into a managed Icon.
-    "Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public class BurnglassIconUtil{[DllImport(\"user32.dll\")]public static extern bool DestroyIcon(IntPtr h);}'",
-    "$base = 'http://127.0.0.1:" + port + "'",
-    '$ni = New-Object System.Windows.Forms.NotifyIcon',
+    '  if (-not $script:haveLock) {',
+    "    Write-BgLog 'another instance already owns the icon on port " + port + "; this one is exiting. If no icon is visible, that owner is stale - end the powershell process running tray.ps1, or toggle Tray icon off and on in System > Integrations.' 'WARN'",
+    '    exit 4',
+    '  }',
+    "  $script:step = 'loading Windows Forms'",
+    '  Add-Type -AssemblyName System.Windows.Forms',
+    '  Add-Type -AssemblyName System.Drawing',
+    // GetHicon handles must be destroyed once cloned into a managed Icon. The
+    // helper is compiled on the fly (csc, in %TEMP%): when that is blocked the
+    // four icons (decoded once) just keep their handles — as before this
+    // try/catch, where the failure was skipped — never a reason to show nothing.
+    '  $script:canDestroy = $false',
+    "  try { Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public class BurnglassIconUtil{[DllImport(\"user32.dll\")]public static extern bool DestroyIcon(IntPtr h);}'; $script:canDestroy = $true }",
+    "  catch { Write-BgLog ('icon-handle helper unavailable (' + $_.Exception.Message + ') - continuing without it.') 'WARN' }",
+    "  $script:step = 'creating the notification icon'",
+    "  $base = 'http://127.0.0.1:" + port + "'",
+    '  $ni = New-Object System.Windows.Forms.NotifyIcon',
     // Windows asks for 16 at 100% scaling, 20 at 125%, 24 at 150%, 32 at 200%:
     // take the smallest drawn size that covers it (never a non-integer
     // rescale of a smaller drawing).
-    '$want = [System.Windows.Forms.SystemInformation]::SmallIconSize.Width',
-    '$px = 32',
-    'foreach ($c in @(16, 20, 24, 32)) { if ($c -ge $want) { $px = $c; break } }',
-    '$PNG = @{',
-    '  base = ' + pngTable('base'),
-    '  good = ' + pngTable('good'),
-    '  warn = ' + pngTable('warn'),
-    '  crit = ' + pngTable('crit'),
+    '  $want = [System.Windows.Forms.SystemInformation]::SmallIconSize.Width',
+    '  $px = 32',
+    '  foreach ($c in @(16, 20, 24, 32)) { if ($c -ge $want) { $px = $c; break } }',
+    "  $script:step = 'decoding the icons'",
+    '  $PNG = @{',
+    '    base = ' + pngTable('base'),
+    '    good = ' + pngTable('good'),
+    '    warn = ' + pngTable('warn'),
+    '    crit = ' + pngTable('crit'),
+    '  }',
+    '  function New-BgIcon([string]$b64) {',
+    '    $bytes = [Convert]::FromBase64String($b64)',
+    '    $ms = New-Object System.IO.MemoryStream(,$bytes)',
+    '    $bmp = New-Object System.Drawing.Bitmap($ms)',
+    '    $h = $bmp.GetHicon()',
+    '    $icon = [System.Drawing.Icon]::FromHandle($h).Clone()',
+    '    if ($script:canDestroy) { [void][BurnglassIconUtil]::DestroyIcon($h) }',
+    '    $bmp.Dispose(); $ms.Dispose()',
+    '    return $icon',
+    '  }',
+    '  $icons = @{}',
+    "  foreach ($k in @('base', 'good', 'warn', 'crit')) { $icons[$k] = New-BgIcon $PNG[$k][$px] }",
+    "  $script:step = 'showing the notification icon'",
+    "  $script:state = 'base'",
+    "  $ni.Icon = $icons['base']",
+    "  $ni.Text = 'Burnglass'",
+    '  $ni.Visible = $true',
+    "  Write-BgLog ('icon shown (v' + $myVer + ', port " + port + ", ' + $px + 'px). Windows hides new tray icons behind the ^ chevron until you drag one out or promote it in Taskbar settings.')",
+    '} catch {',
+    '  $e = $_',
+    "  Write-BgLog ('failed while ' + $script:step + ' (tray.ps1 line ' + $e.InvocationInfo.ScriptLineNumber + '): ' + $e.Exception.Message) 'ERROR'",
+    '  try { if ($ni) { $ni.Visible = $false; $ni.Dispose() } } catch { }',
+    '  if ($script:haveLock) { try { $mtx.ReleaseMutex() } catch { } }',
+    '  exit 2',
     '}',
-    'function New-BgIcon([string]$b64) {',
-    '  $bytes = [Convert]::FromBase64String($b64)',
-    '  $ms = New-Object System.IO.MemoryStream(,$bytes)',
-    '  $bmp = New-Object System.Drawing.Bitmap($ms)',
-    '  $h = $bmp.GetHicon()',
-    '  $icon = [System.Drawing.Icon]::FromHandle($h).Clone()',
-    '  [void][BurnglassIconUtil]::DestroyIcon($h)',
-    '  $bmp.Dispose(); $ms.Dispose()',
-    '  return $icon',
-    '}',
-    '$icons = @{}',
-    "foreach ($k in @('base', 'good', 'warn', 'crit')) { $icons[$k] = New-BgIcon $PNG[$k][$px] }",
-    "$script:state = 'base'",
-    "$ni.Icon = $icons['base']",
-    "$ni.Text = 'Burnglass'",
-    '$ni.Visible = $true',
-    "Write-BgLog ('icon shown (v' + $myVer + ', port " + port + ", ' + $px + 'px). Windows hides new tray icons behind the ^ chevron until you drag one out or promote it in Taskbar settings.')",
+    // Back to the default: the poll/menu code below keeps its old semantics.
+    "$ErrorActionPreference = 'Continue'",
     'function Set-BgState([string]$st) {',
     '  if ($st -ne $script:state) { $ni.Icon = $icons[$st]; $script:state = $st }',
     '}',
@@ -6720,21 +6786,27 @@ function trayScript(port) {
     "[void]$menu.Items.Add('Open mini overview', $null, { Open-BgMini })",
     "[void]$menu.Items.Add('-')",
     // X-Pulse is the FROZEN mutation header (a v1 server only accepts it).
-    "[void]$menu.Items.Add('Stop Burnglass', $null, { try { Invoke-RestMethod -Method Post -Uri ($base + '/api/shutdown') -Headers @{ 'X-Pulse' = '1' } -TimeoutSec 3 | Out-Null } catch {}; $ni.Visible = $false; [System.Windows.Forms.Application]::Exit() })",
-    "[void]$menu.Items.Add('Exit tray', $null, { $ni.Visible = $false; [System.Windows.Forms.Application]::Exit() })",
+    "[void]$menu.Items.Add('Stop Burnglass', $null, { Write-BgLog 'Stop Burnglass chosen from the menu.'; try { Invoke-RestMethod -Method Post -Uri ($base + '/api/shutdown') -Headers @{ 'X-Pulse' = '1' } -TimeoutSec 3 | Out-Null } catch {}; $ni.Visible = $false; [System.Windows.Forms.Application]::Exit() })",
+    "[void]$menu.Items.Add('Exit tray', $null, { Write-BgLog 'Exit tray chosen from the menu - exiting.'; $ni.Visible = $false; [System.Windows.Forms.Application]::Exit() })",
     '$ni.ContextMenuStrip = $menu',
     "$ni.add_MouseClick({ if ($_.Button -eq [System.Windows.Forms.MouseButtons]::Left) { Open-BgMini } })",
     '$script:fails = 0',
     'function Update-BgTray {',
     '  try {',
-    "    $s = Invoke-RestMethod -Uri ($base + '/api/statusline') -TimeoutSec 3",
+    // ?from=tray&pid= (additive; the route is frozen) is how the server knows
+    // the icon process is alive: payload.tray.running / lastSeen.
+    "    $s = Invoke-RestMethod -Uri ($base + '/api/statusline?from=tray&pid=' + $PID) -TimeoutSec 3",
     // The dashboard toggle turns the tray off by flipping this field.
     "    if ($s.trayEnabled -eq $false) { Write-BgLog 'turned off in the dashboard - hiding the icon and exiting.'; $ni.Visible = $false; [System.Windows.Forms.Application]::Exit(); return }",
     // Server updated under us: the server rewrote tray.ps1, so relaunch
-    // from the fresh file and hand over the mutex.
+    // from the fresh file and hand over the mutex. By absolute path (the one
+    // running this script): a bare 'powershell.exe' is looked up in the
+    // current folder first — the server's, e.g. Downloads for a portable exe.
     '    if ($s.version -and $s.version -ne $myVer) {',
     "      Write-BgLog ('server is now v' + $s.version + ' (icon was built for v' + $myVer + ') - relaunching from the rewritten script.')",
-    "      Start-Process 'powershell.exe' -WindowStyle Hidden -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', ('\"' + $PSCommandPath + '\"')",
+    "      $psExe = Join-Path $PSHOME 'powershell.exe'",
+    "      if (-not (Test-Path -LiteralPath $psExe)) { $psExe = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\\v1.0\\powershell.exe' }",
+    "      Start-Process $psExe -WindowStyle Hidden -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', ('\"' + $PSCommandPath + '\"')",
     '      $ni.Visible = $false; [System.Windows.Forms.Application]::Exit(); return',
     '    }',
     "    $t = 'Burnglass'",
@@ -6750,7 +6822,7 @@ function trayScript(port) {
     '    $script:fails = $script:fails + 1',
     "    $ni.Text = 'Burnglass - server not responding'",
     "    Set-BgState 'base'",
-    "    if ($script:fails -ge 6) { Write-BgLog 'server unreachable for 6 polls (~3 min) - exiting. Start Burnglass again and the icon comes back.'; $ni.Visible = $false; [System.Windows.Forms.Application]::Exit() }",
+    "    if ($script:fails -ge 6) { Write-BgLog ('server unreachable for 6 polls (~3 min, last error: ' + $_.Exception.Message + ') - exiting. Start Burnglass again and the icon comes back.') 'WARN'; $script:exitCode = 5; $ni.Visible = $false; [System.Windows.Forms.Application]::Exit() }",
     '  }',
     '}',
     '$timer = New-Object System.Windows.Forms.Timer',
@@ -6760,42 +6832,292 @@ function trayScript(port) {
     '$timer.Start()',
     '[System.Windows.Forms.Application]::Run()',
     '$ni.Visible = $false',
+    // Release the lock instead of leaving it abandoned, so a relaunch or the
+    // next start acquires it cleanly.
+    'if ($script:haveLock) { try { $mtx.ReleaseMutex() } catch { } }',
+    'exit $script:exitCode',
   ].join('\r\n') + '\r\n';
+}
+
+// ---- tray self-diagnosis ---------------------------------------------------
+// The icon is a hidden PowerShell process: when it failed (a Group Policy or
+// antivirus block, a script error, a stale instance holding the lock) the
+// toggle said On with nothing on screen and nothing anywhere saying why —
+// its own log lines went to burnglass.log on disk, which the dashboard's log
+// tail (the in-memory ring) never shows. Now:
+//  - its stdout+stderr go to <home>/tray-error.log (truncated per spawn);
+//  - an early (< TRAY_EARLY_EXIT_MS) or non-zero exit of the tray THIS server
+//    spawned is summarised from that file into payload.tray.lastError and
+//    logged once (a lost-lock exit at info level: normal after a restart);
+//  - its polls say ?from=tray, so payload.tray.running is "checked in within
+//    TRAY_SEEN_MS" — a pre-rc.3 tray never says so, but it is the only
+//    PowerShell client of that feed, so its WindowsPowerShell User-Agent
+//    counts too (running is null only while nothing can be known yet).
+const TRAY_SEEN_MS = 75 * 1000;       // it polls every 30 s: two missed polls
+const TRAY_STARTING_MS = 20 * 1000;   // PowerShell + WinForms + first poll take a few s
+const TRAY_EARLY_EXIT_MS = 60 * 1000; // an exit this soon is a failure, whatever the code
+const TRAY_MSG_MAX = 300;
+const trayProc = {
+  child: null,      // the latest tray this server spawned, until it exits
+  spawnedAt: null,  // when that spawn happened
+  seenAt: null,     // the last /api/statusline poll that came from a tray
+  seenPid: null,    // …and its pid (?pid=), so its exit ends "running" at once
+  lockHeldAt: null, // the latest spawn found the icon lock held (exit 4)
+  lastError: null,  // {code, at, message, kind} — cleared by a poll or a new spawn
+};
+function trayErrorLogPath() { return path.resolve(appHome(), 'tray-error.log'); }
+// The suites run on Linux: BURNGLASS_TRAY_TEST_SCRIPT=<file.js> stands in for
+// powershell + tray.ps1 (spawned as `node <file.js> <port> <tray.ps1>`), so
+// the spawn / exit / poll bookkeeping runs for real. Test hook only.
+function trayTestScript() { return envv('TRAY_TEST_SCRIPT') || ''; }
+function trayCanSpawn() { return process.platform === 'win32' || !!trayTestScript(); }
+function trayEnabledNow() { return trayDesired !== null ? trayDesired : readConfig().tray === true; }
+function trayForPayload() {
+  const now = Date.now();
+  const seen = trayProc.seenAt !== null && now - trayProc.seenAt < TRAY_SEEN_MS;
+  const alive = !!trayProc.child;
+  const starting = !seen && alive && trayProc.spawnedAt !== null && now - trayProc.spawnedAt < TRAY_STARTING_MS;
+  let running;
+  if (seen) running = true;
+  else if (starting) running = false;
+  // Another instance holds the lock: it may be a healthy icon that simply
+  // has not polled yet (every restart spawns a second copy that loses).
+  else if (trayProc.lockHeldAt !== null && now - trayProc.lockHeldAt < TRAY_SEEN_MS) running = null;
+  // Just started and spawned nothing: a tray from before may not have polled.
+  else if (trayProc.spawnedAt === null && now - SERVER_START < TRAY_SEEN_MS) running = null;
+  else running = false;
+  return {
+    supported: trayCanSpawn(),
+    enabled: trayEnabledNow(),
+    // Additive (rc.3): the dashboard's "Icon running / Starting / Not running".
+    running,
+    starting,
+    alive,
+    spawnedAt: trayProc.spawnedAt,
+    lastSeen: trayProc.seenAt,
+    lastError: trayProc.lastError,
+  };
+}
+// /api/statusline: a tray identifies itself with ?from=tray; a pre-rc.3 one
+// by Invoke-RestMethod's WindowsPowerShell User-Agent (nothing else polls it
+// from PowerShell — the status line helper is node, the strip is .NET).
+function noteTrayPoll(req, query) {
+  let q = null;
+  try { q = new URLSearchParams(query || ''); } catch (_) {}
+  const fromTray = !!q && q.get('from') === 'tray';
+  if (!fromTray && !/WindowsPowerShell\//i.test(String((req && req.headers && req.headers['user-agent']) || ''))) return;
+  const pid = fromTray && /^\d{1,10}$/.test(q.get('pid') || '') ? Number(q.get('pid')) : null;
+  trayProc.seenAt = Date.now();
+  trayProc.seenPid = pid;
+  trayProc.lockHeldAt = null;
+  if (trayProc.lastError) trayProc.lastError = null;
+}
+function trayExitCodeText(code, signal) {
+  if (signal) return 'signal ' + signal;
+  if (typeof code !== 'number') return 'no exit code';
+  // NTSTATUS crashes (0xC0000142 = the process could not initialise…) read as hex.
+  return 'exit code ' + (code > 0xffff || code < -0xffff ? '0x' + (code >>> 0).toString(16).toUpperCase() : code);
+}
+// One printable line: no ANSI sequences, no control characters, the user's
+// profile folder shown as ~, capped.
+function trayCleanText(s) {
+  let t = String(s || '')
+    .replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, '')
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?/g, '')
+    .replace(/[\u0000-\u001f\u007f-\u009f\ufffd]/g, ' ')
+    .replace(/\s+/g, ' ').trim();
+  const home = os.homedir();
+  if (home && home.length > 3) {
+    const esc = home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    t = t.replace(new RegExp(esc, 'gi'), '~');
+  }
+  return t.length > TRAY_MSG_MAX ? t.slice(0, TRAY_MSG_MAX - 1) + '…' : t;
+}
+// Pure: what a tray run's captured output says went wrong. No line of the
+// script's own → PowerShell's own error text (printed before the script ran:
+// policy, antivirus, parse errors — first paragraph, + "(line N)" from its
+// "At …:N char:M" line). Otherwise the script's last ERROR line (step +
+// tray.ps1 line + exception) > its last WARN line (lost lock, unreachable) >
+// PowerShell's text > its last line. Handles UTF-16 and the CLIXML form
+// PowerShell uses when it thinks its caller is PowerShell.
+function summarizeTrayOutput(buf, code) {
+  let text = '';
+  if (Buffer.isBuffer(buf) && buf.length) {
+    // UTF-16LE (no BOM) = NULs at odd offsets only. A NUL run at both (a
+    // hole: an older instance still writing past our truncation) is not.
+    let odd = 0, even = 0;
+    const n = Math.min(buf.length, 400);
+    for (let i = 0; i < n; i++) if (buf[i] === 0) { if (i % 2) odd++; else even++; }
+    if (buf[0] === 0xff && buf[1] === 0xfe) text = buf.subarray(2).toString('utf16le');
+    else if (n > 8 && odd > n / 4 && even < n / 40) text = buf.toString('utf16le');
+    else text = buf.toString('utf8');
+  } else if (typeof buf === 'string') text = buf;
+  text = text.replace(/^\uFEFF/, '');
+  if (/^#< CLIXML/m.test(text)) {
+    const errs = [];
+    text.replace(/<S S="Error">([\s\S]*?)<\/S>/g, (_, s) => { errs.push(s); return ''; });
+    const dec = errs.join('')
+      .replace(/_x([0-9A-Fa-f]{4})_/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+      .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
+    text = text.replace(/^#< CLIXML.*$/mg, '').replace(/<Objs[\s\S]*?(<\/Objs>|$)/g, '') + '\n' + dec;
+  }
+  const OWN = /^\S+\s+(INFO|WARN|ERROR)\s+\[burnglass\] tray: (.*)$/;
+  const NOISE = /^(At |\+|~|CategoryInfo|FullyQualifiedErrorId|#< CLIXML|<Objs)/;
+  const lines = text.split(/\r\n|\r|\n/).map((l) => l.replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, '').trim());
+  // "At <file>:<line> char:<col>" follows a runtime error's message and
+  // precedes a parse error's (with its "+ ~~~" marker lines in between).
+  const AT = /^At .*:(\d+) char:\d+/;
+  let ownErr = null, ownWarn = null, lastOwn = null, foreign = null, constrained = false, atBefore = null;
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    const m = OWN.exec(l);
+    if (m) {
+      if (m[1] === 'ERROR') ownErr = m[2]; // the LAST one ended it (trapped ones are non-fatal)
+      if (m[1] === 'WARN') ownWarn = m[2];
+      if (/^starting \(/.test(m[2]) && /ConstrainedLanguage|RestrictedLanguage|NoLanguage/.test(m[2])) constrained = true;
+      lastOwn = m[2];
+      continue;
+    }
+    if (foreign !== null) continue;
+    const a = AT.exec(l);
+    if (a) atBefore = { line: a[1], i };
+    if (!l || NOISE.test(l)) continue;
+    let para = l, j = i + 1;
+    for (; j < lines.length; j++) {
+      const u = lines[j];
+      if (!u || NOISE.test(u) || OWN.test(u)) break;
+      para += ' ' + u;
+    }
+    const after = j < lines.length ? AT.exec(lines[j]) : null;
+    const lineNo = after ? after[1] : atBefore && i - atBefore.i <= 4 ? atBefore.line : null;
+    foreign = para + (lineNo ? ' (line ' + lineNo + ')' : '');
+  }
+  const pick = ownErr !== null ? ownErr : ownWarn !== null ? ownWarn : foreign !== null ? foreign : lastOwn;
+  const message = trayCleanText(pick || '');
+  let kind = 'error';
+  const all = message + ' ' + (foreign || '');
+  if (constrained || /language mode|only core types/i.test(all)) kind = 'language-mode';
+  else if (/running scripts is disabled|not digitally signed|execution polic/i.test(all)) kind = 'policy';
+  else if (/malicious content|antivirus|antimalware/i.test(all)) kind = 'antivirus';
+  else if (code === 4 || /already owns the icon/.test(message)) kind = 'lock';
+  else if (code === 5 || /server unreachable/.test(message)) kind = 'unreachable';
+  else if (!message) kind = 'no-output';
+  return { message, kind };
+}
+function readTrayOutput(file) {
+  try {
+    const fd = fs.openSync(file, 'r');
+    try {
+      const buf = Buffer.alloc(64 * 1024);
+      const n = fs.readSync(fd, buf, 0, buf.length, 0);
+      return buf.subarray(0, n);
+    } finally { fs.closeSync(fd); }
+  } catch (_) { return null; }
+}
+function onTrayExit(child, spawnedAt, errPath, code, signal) {
+  const now = Date.now();
+  if (trayProc.child === child) trayProc.child = null;
+  // It was the one checking in: "running" ends now, not 75 s from now.
+  if (trayProc.seenPid !== null && trayProc.seenPid === child.pid) { trayProc.seenAt = null; trayProc.seenPid = null; }
+  const ran = now - spawnedAt;
+  const secs = Math.max(0, Math.round(ran / 1000));
+  const { message, kind } = summarizeTrayOutput(readTrayOutput(errPath), code);
+  // Exit 0 soon after start is a failure too (PowerShell ending quietly),
+  // unless its last line says it was asked to go.
+  const deliberate = /chosen from the menu|turned off in the dashboard|relaunching from the rewritten script/.test(message);
+  const failed = (typeof code === 'number' && code !== 0) || !!signal
+    || (ran < TRAY_EARLY_EXIT_MS && trayEnabledNow() && !deliberate);
+  if (!failed) {
+    console.log('[burnglass] tray icon exited after ' + slDur(ran) + (message ? ' (its last line: ' + message + ')' : ''));
+    return;
+  }
+  // Its first action is the "starting" line, so no output at all means
+  // PowerShell ended before the script ran (or the output was not captured).
+  const text = message || (errPath ? 'no output: PowerShell ended before the first line of tray.ps1 ran' : 'no output captured');
+  trayProc.lastError = { code: typeof code === 'number' ? code : null, at: now, message: text, kind };
+  if (code === 4) trayProc.lockHeldAt = now;
+  const line = '[burnglass] tray icon exited (' + trayExitCodeText(code, signal) + ', ' + secs + ' s after start): ' + text +
+    (errPath ? ' — its full output: ' + errPath : '');
+  if (kind === 'lock') console.log(line); else console.warn(line);
+}
+// A spawn that could not happen (non-loopback bind, spawn error): say so in
+// the dashboard instead of a toggle that reads On over nothing.
+function noteTrayNotStarted(kind, message) {
+  trayProc.lastError = { code: null, at: Date.now(), message: trayCleanText(message), kind };
+  if (kind === 'not-loopback') console.warn('[burnglass] tray icon not started: ' + message);
 }
 
 function startTray(port) {
   trayDesired = true;
+  const testScript = trayTestScript();
   // Test hook FIRST, before the platform gate: its log line is the e2e proof
   // that a boot path reached startTray at all, and the suites run on Linux —
   // behind the win32 check the boot-path regression guard could never fire.
-  if (envv('NO_TRAY_SPAWN')) {
+  if (envv('NO_TRAY_SPAWN') && !testScript) {
     console.log('[burnglass] tray spawn suppressed (BURNGLASS_NO_TRAY_SPAWN / PULSE_NO_TRAY_SPAWN — test hook)');
     return;
   }
-  if (process.platform !== 'win32') {
+  if (process.platform !== 'win32' && !testScript) {
     console.log('[burnglass] --tray is Windows-only (notification-area icon) — ignored on this OS.');
     return;
   }
-  const scriptPath = path.join(appHome(), 'tray.ps1');
+  // Absolute everywhere: the child's cwd is the home (below), so a relative
+  // pinned home (BURNGLASS_HOME=./x) would otherwise resolve twice.
+  const home = path.resolve(appHome());
+  const scriptPath = path.join(home, 'tray.ps1');
   try {
-    fs.mkdirSync(appHome(), { recursive: true });
+    fs.mkdirSync(home, { recursive: true });
     fs.writeFileSync(scriptPath, trayScript(port));
   } catch (e) {
     console.warn('[burnglass] tray: could not write script: ' + e.message);
+    noteTrayNotStarted('spawn', 'tray.ps1 could not be written: ' + e.message);
     return;
   }
+  // stdout + stderr → <home>/tray-error.log, a descriptor WE open (truncated
+  // per spawn) and hand over: works with detached, and holds PowerShell's own
+  // errors from before the script runs. Unopenable → start it without.
+  const errPath = trayErrorLogPath();
+  let out = null;
+  try { out = fs.openSync(errPath, 'w'); } catch (e) {
+    console.warn('[burnglass] tray: could not open ' + errPath + ' for its output (' + e.message + ') — starting it without');
+  }
+  const spawnedAt = Date.now();
+  trayProc.lastError = null;
+  trayProc.lockHeldAt = null;
   try {
-    const child = require('child_process').spawn(powershellExe(),
-      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', scriptPath],
-      { detached: true, stdio: 'ignore', windowsHide: true });
+    const cmd = testScript ? process.execPath : powershellExe();
+    const args = testScript ? [testScript, String(port), scriptPath]
+      : ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', scriptPath];
+    // cwd = the home: tray.ps1 starts msedge / a relaunch by name, and a bare
+    // name is looked up in the current folder first — the server's own cwd
+    // is wherever it was started (Downloads, for a portable exe).
+    const child = require('child_process').spawn(cmd, args,
+      { detached: true, stdio: out !== null ? ['ignore', out, out] : 'ignore', windowsHide: true, cwd: home });
+    trayProc.child = child;
+    trayProc.spawnedAt = spawnedAt;
+    let ended = false;
     // Spawn failures surface as an ASYNC 'error' event, not a throw — without
     // this listener a blocked/missing powershell.exe would crash the whole
     // server (and with {"tray": true} persisted, crash-loop every start).
-    child.on('error', (e) => console.warn('[burnglass] tray failed to start: ' + e.message));
+    child.on('error', (e) => {
+      console.warn('[burnglass] tray failed to start: ' + e.message);
+      if (ended) return;
+      ended = true;
+      if (trayProc.child === child) trayProc.child = null;
+      noteTrayNotStarted('spawn', path.basename(cmd) + ' could not be started: ' + e.message);
+    });
+    child.on('exit', (code, signal) => {
+      if (ended) return;
+      ended = true;
+      onTrayExit(child, spawnedAt, out !== null ? errPath : null, code, signal);
+    });
     child.unref();
-    console.log('[burnglass] tray icon started (Windows notification area) — right-click it for the menu.');
+    if (child.pid) console.log('[burnglass] tray icon starting (Windows notification area, pid ' + child.pid + ') — right-click it for the menu.');
   } catch (e) {
     console.warn('[burnglass] tray failed to start: ' + e.message);
+    noteTrayNotStarted('spawn', 'the tray could not be started: ' + e.message);
+  } finally {
+    if (out !== null) { try { fs.closeSync(out); } catch (_) {} }
   }
 }
 // ---- OPENUSAGE COMPANION (opt-in, Windows) -------------------------------
@@ -7757,6 +8079,8 @@ function startServer(port, host, opts) {
       }
       if (route === '/api/statusline') {
         // Slim, memoized feed for `pulse --statusline` (see STATUSLINE FEED).
+        // A tray's poll doubles as its heartbeat (?from=tray, additive).
+        noteTrayPoll(req, parsed.query);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
         res.end(JSON.stringify(statuslineData()));
         return;
@@ -7946,11 +8270,15 @@ function startServer(port, host, opts) {
         writeConfig({ tray: on });
         trayDesired = on;
         console.log('[burnglass] tray ' + (on ? 'enabled' : 'disabled') + ' from the dashboard');
-        // Enable starts it right now (Windows only). Disable is picked up by
-        // the running tray's own poll: the feed carries trayEnabled.
-        if (on && process.platform === 'win32' && boundLoopback) startTray(port);
+        // Enable starts it right now (Windows only) — also the dashboard's
+        // Retry. Disable is picked up by the running tray's own poll: the
+        // feed carries trayEnabled.
+        if (on && trayCanSpawn()) {
+          if (boundLoopback) startTray(port);
+          else noteTrayNotStarted('not-loopback', 'this server listens on ' + host + ', and the tray icon only runs beside a server bound to 127.0.0.1');
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, tray: { supported: process.platform === 'win32', enabled: on } }));
+        res.end(JSON.stringify({ ok: true, tray: trayForPayload() }));
         return;
       }
       if (route === '/api/strip/enable' || route === '/api/strip/disable') {
@@ -8212,7 +8540,10 @@ function startServer(port, host, opts) {
     // spawn meant every restart silently lost the icon while payload.tray kept
     // reporting enabled:true — the toggle looked on with nothing on screen.
     // Matches how openusage/strip launch from config on the next two lines.
-    if (((opts && opts.tray) || readConfig().tray === true) && LOOPBACK_HOSTS.has(host)) startTray(port);
+    if ((opts && opts.tray) || readConfig().tray === true) {
+      if (LOOPBACK_HOSTS.has(host)) startTray(port);
+      else if (trayCanSpawn()) noteTrayNotStarted('not-loopback', 'this server listens on ' + host + ', and the tray icon only runs beside a server bound to 127.0.0.1');
+    }
     // OpenUsage companion (opt-in) — start the taskbar app alongside Burnglass.
     if (readConfig().openusage === true && LOOPBACK_HOSTS.has(host)) launchOpenUsage();
     // Burnglass Strip (opt-in) — the own taskbar strip companion. On the
@@ -9558,5 +9889,5 @@ if (require.main === module) main();
 module.exports = {
   PRICING, priceFor, costForEntry, normalize, dedupKey,
   computeBlocks, floorToHour, aggregate, parseAll, tokensOf, localDateStr,
-  psQuote, trayScript, integrationTargetExists, sameEntry,
+  psQuote, trayScript, summarizeTrayOutput, integrationTargetExists, sameEntry,
 };

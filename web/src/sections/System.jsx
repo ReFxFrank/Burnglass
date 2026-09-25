@@ -260,6 +260,31 @@ function ServerColumn({ data, gfx, theme, onStopped }) {
 }
 
 // =============================================================================
+// Tray icon diagnosis (payload.tray, additive in rc.3): running = a tray polled
+// within ~75 s (null = can't tell yet: another copy holds the icon lock, or the
+// server just started), starting = spawned < 20 s ago, alive = the process this
+// server spawned has not exited, lastError = {code, at, message, kind}.
+// =============================================================================
+const TRAY_HINTS = {
+  policy: 'A Group Policy blocks PowerShell scripts on this PC, so the icon cannot run here.',
+  antivirus: 'Your antivirus blocked tray.ps1. Allow it, then Retry.',
+  'language-mode': 'PowerShell runs in Constrained Language mode here (an AppLocker or WDAC policy), which the icon cannot run under.',
+  lock: 'Another tray process holds the icon but is not answering. End the powershell.exe running tray.ps1 in Task Manager, then Retry.',
+  unreachable: 'It could not reach this server on 127.0.0.1.',
+};
+const exitCodeText = (c) => (c > 0xffff || c < -0xffff ? '0x' + (c >>> 0).toString(16).toUpperCase() : String(c));
+// → { stat, state: 'off' | 'on' | 'running' | 'starting' | 'checking' | 'silent' | 'down' }
+function trayView(tray, on, pending) {
+  if (!on) return { stat: <Stat>Off</Stat>, state: 'off' };
+  if (tray.running === undefined) return { stat: <Stat tone="good">On</Stat>, state: 'on' }; // payload without diagnosis
+  if (tray.running === true) return { stat: <Stat tone="good">Icon running</Stat>, state: 'running' };
+  if (tray.starting || pending) return { stat: <Stat tone="idle">Starting…</Stat>, state: 'starting' };
+  if (tray.running === null) return { stat: <Stat tone="idle">Checking…</Stat>, state: 'checking' };
+  if (tray.alive) return { stat: <Stat tone="warn">No check-in</Stat>, state: 'silent' };
+  return { stat: <Stat tone={tray.lastError ? 'crit' : 'warn'}>Not running</Stat>, state: 'down' };
+}
+
+// =============================================================================
 // Integrations: one ToggleRow per opt-in
 // =============================================================================
 function ToggleRow({ title, on, status, busy, disabled, onToggle, children, extra, note, className }) {
@@ -375,6 +400,46 @@ function Integrations({ data, notify, thresholds, ovr }) {
               : <>Get {STRIP_EXE_NAME} from the release page.</>}
     </span>
   ) : null;
+  // Tray icon: say what the process is doing, and why it is not there.
+  const trayV = trayView(tray, on('tray'), on('tray') && !tray.enabled);
+  const trayErr = tray.lastError;
+  const trayRetry = (
+    <Btn size="sm" icon="refresh" disabled={busy === 'tray'}
+      onClick={() => toggle('tray', true, () => 'Starting the tray icon again…', 'Retry failed: ')}>
+      {busy === 'tray' ? 'Retrying…' : 'Retry'}
+    </Btn>
+  );
+  const trayFiles = (
+    <>See <span className="mono">burnglass.log</span> and <span className="mono">tray-error.log</span> in <span className="mono">{homePath(data)}</span>.</>
+  );
+  const trayExtra = trayV.state === 'running' ? (
+    <span className="hint">Windows hides new tray icons behind the ^ chevron at the right of the taskbar. Drag {BRAND} out of it to keep it visible.</span>
+  ) : trayV.state === 'checking' ? (
+    <span className="hint">{trayErr && trayErr.kind === 'lock'
+      ? 'Another tray process holds the icon. Waiting for it to check in…'
+      : 'Waiting for the tray icon to check in…'}</span>
+  ) : trayV.state === 'silent' ? (
+    <>
+      <span className="hint sys-tray-err">
+        <b>Started{tray.spawnedAt ? ' ' + ago(tray.spawnedAt) : ''}, but it has not checked in.</b> {trayFiles}
+      </span>
+      {trayRetry}
+    </>
+  ) : trayV.state === 'down' ? (
+    <>
+      <span className="hint sys-tray-err">
+        {trayErr ? (
+          <>
+            <b>{trayErr.code === null || trayErr.code === undefined ? 'Not started:' : `Exited with code ${exitCodeText(trayErr.code)}:`}</b>{' '}
+            {trayErr.message || 'no output.'}{/[.!?)]$/.test(trayErr.message || '.') ? '' : '.'}{' '}
+            {TRAY_HINTS[trayErr.kind] ? TRAY_HINTS[trayErr.kind] + ' ' : ''}
+          </>
+        ) : <><b>The icon is not checking in.</b> It stops when you choose Exit tray from its menu.{' '}</>}
+        {trayFiles}
+      </span>
+      {trayRetry}
+    </>
+  ) : null;
 
   return (
     <section className="sys-col sys-int" aria-labelledby="sys-int-h">
@@ -477,9 +542,10 @@ function Integrations({ data, notify, thresholds, ovr }) {
           <ToggleRow
             title="Tray icon"
             on={on('tray')}
-            status={onOff('tray')}
+            status={trayV.stat}
             busy={busy === 'tray'}
             note={noteFor('tray')}
+            extra={trayExtra}
             onToggle={(next) => toggle('tray', next, (n) => (n
               ? `Tray icon starting. Windows hides new icons behind the ^ chevron; drag ${BRAND} onto the taskbar once to pin it.`
               : 'Tray off. It exits within ~30 seconds.'), 'Could not toggle the tray: ')}
