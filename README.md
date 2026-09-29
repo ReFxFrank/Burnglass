@@ -72,8 +72,9 @@ small executable, needs no configuration, and your usage data never leaves your 
 - **Claude Code and OpenAI Codex**, read automatically, subagents and advisor calls included.
 - **Gemini CLI, Continue, Cline and Roo Code**, read from their own local logs.
 - **Custom sources**: point Burnglass at a JSONL log your own agent writes.
-- **Current list prices** for Anthropic, OpenAI, Google Gemini and Z.ai GLM, including
-  cache reads and writes, fast mode, long context and US-only inference.
+- **Current list prices** for Anthropic, OpenAI, Google Gemini, Z.ai GLM and DeepSeek,
+  including cache reads and writes, fast mode, long context, US-only inference and
+  DeepSeek's off-peak discount.
 
 **See it anywhere**
 - A **mini view** for a narrow docked window, and a layout that works from a phone to a 4K monitor.

@@ -1,5 +1,35 @@
 # Changelog
 
+## v2.0.2 — New models: Sonnet 5.5, GPT-6.1 Sol, DeepSeek
+
+- **Claude Sonnet 5.5** (released 2026-09-28, now Claude Code's default Sonnet) has its
+  own price row: $2 / $10, the same as Sonnet 5. It already cost the right amount, but it
+  was logged as an unknown model.
+- **GPT-6.1 Sol** (released 2026-09-29, now Codex's default model) is priced at $2 / $10,
+  with cached input at $0.10 (5%) and cache writes at $2.50. Its Fast mode and
+  long-context rates are included. Before this it fell back to the default price.
+- **Ultrafast mode** for GPT-6 Astra (`service_tier: "ultrafast"`) is priced at 6× the
+  standard rates and counts toward fast-mode spend. It used to be priced as standard.
+  GPT-5.3-Codex's Fast price (2×) is now included too.
+- **DeepSeek** is priced, whether you use it through Claude Code (DeepSeek's
+  Anthropic-compatible endpoint) or as a Codex model provider: `deepseek-flash`
+  (V4.1-Flash), `deepseek-v4-pro`, and the legacy `deepseek-v4-flash`, `deepseek-chat` and
+  `deepseek-reasoner` names. Before this they fell back to a default price that was
+  several times too high.
+  - **Off-peak half price** is applied per message. Peak is 01:00–04:00 and 06:00–10:00
+    UTC, Monday to Friday, except Chinese public holidays (2026 is listed).
+  - Cache hits are priced at DeepSeek's own rate, with no cache-write charge.
+  - Older DeepSeek messages keep the price that applied on their date.
+- **Refusal fallback:** when Claude Code lets another model answer a request that the
+  requested model declined, the turn is now billed and listed under the model that
+  answered.
+- **Ultracode toggle** (Claude Code 2.1.284+): `/effort ultracode off` now turns the ULTRA
+  chip off (it used to turn it on), and changing the effort level no longer ends
+  Ultracode. The new picker messages are read too. Older transcripts keep their old
+  meaning, where choosing another level ended Ultracode.
+- **Discord presence on Linux and macOS** also looks for Discord's socket under `$TMP` and
+  `$TEMP`, following Discord's documented search order.
+
 ## v2.0.1 — Animated Clawd built in
 
 - **Discord Rich Presence now shows an animated Clawd out of the box.** While you use

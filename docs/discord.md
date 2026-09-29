@@ -146,7 +146,10 @@ The built-in keys `claude`, `codex` and `pulse` name art uploaded to the Burngla
 application (the idle key is still called `pulse` from before the rename; it now holds
 the Burnglass art). If you use your own application ID, upload images under those keys in
 the Discord Developer Portal (your application → Rich Presence → Art Assets), or put
-links in the slots. A key that doesn't exist just shows no image.
+links in the slots. A key that doesn't exist just shows no image. Use square images,
+1024×1024 if you can (512×512 is Discord's minimum), with an opaque background or a mark
+that stays visible on both dark and light themes: a black logo on transparency all but
+disappears on Discord's dark themes.
 
 ## How it works and privacy
 

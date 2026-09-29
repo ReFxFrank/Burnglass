@@ -51,7 +51,7 @@ const crypto = require('crypto');
 
 // Version — keep in sync with package.json (build/make-exe.mjs enforces this).
 // The constant keeps its v1 NAME: make-exe's drift check greps for it.
-const PULSE_VERSION = '2.0.1';
+const PULSE_VERSION = '2.0.2';
 const BRAND = 'Burnglass';
 
 // BURNGLASS_<NAME> wins; PULSE_<NAME> (the v1 spelling) stays a permanent,
@@ -581,6 +581,23 @@ function once(fn) {
 // This object is the single source of truth: updating a price is a one-line
 // edit here.
 // ---------------------------------------------------------------------------
+// DeepSeek rows (shared by aliases). No cache-write premium (cacheWriteMult 1:
+// DeepSeek reports no write tokens; if it ever did they are plain input) and
+// no per-call web-search fee (it bills the search as model tokens).
+const DS_ROW = { cacheWriteMult: 1, webSearchPer1k: 0, tod: 'deepseek' };
+const DS_FLASH = { ...DS_ROW, input: 0.30, output: 1.20, cacheReadMult: 0.02 }; // V4.1-Flash, 2026-09-10 04:00Z
+const DS_V4_FLASH_HISTORY = [
+  { untilMs: Date.parse('2026-08-16T16:00:00Z'), input: 0.14, output: 0.28, cacheReadMult: 0.02, tod: null },
+  { untilMs: Date.parse('2026-09-10T04:00:00Z'), input: 0.44, output: 1.32, cacheReadMult: 0.014 / 0.44 },
+];
+// The legacy v4-flash names are served by V4.1-Flash at the Flash price now.
+const DS_V4_FLASH = { ...DS_FLASH, history: DS_V4_FLASH_HISTORY };
+const DS_V4_PRO = { ...DS_ROW, input: 1.32, output: 3.96, cacheReadMult: 0.044 / 1.32,
+  history: [{ untilMs: Date.parse('2026-08-16T16:00:00Z'), input: 0.435, output: 0.87, cacheReadMult: 0.003625 / 0.435, tod: null }] };
+const DS_LEGACY_CHAT = { ...DS_FLASH, history: [
+  { untilMs: Date.parse('2026-04-24T00:00:00Z'), input: 0.28, output: 0.42, cacheReadMult: 0.1, tod: null },
+  ...DS_V4_FLASH_HISTORY,
+] };
 const PRICING = {
   // model string : { input, output }  in $/MTok
   //
@@ -617,6 +634,11 @@ const PRICING = {
   // 2026-08-10 Anthropic made that the permanent list price (the scheduled
   // $3/$15 step-up never happened), so the row is plain. priceFor still
   // honours intro* fields for any future time-limited launch price.
+  // Sonnet 5.5 (2026-09-28; Claude Code's default Sonnet since 2.1.284): the
+  // same prices as Sonnet 5 incl. the standard 1.25x/2x/0.1x cache ($2.50 /
+  // $4 / $0.20), no fast mode, no intro price. Verified 2026-09-29 against
+  // platform.claude.com pricing + the sonnet-5-5 model page.
+  'claude-sonnet-5-5': { input: 2,  output: 10 },
   'claude-sonnet-5':   { input: 2,  output: 10 },
   'claude-sonnet-4-6': { input: 3,  output: 15 },
   'claude-sonnet-4-5': { input: 3,  output: 15 },
@@ -663,6 +685,24 @@ const PRICING = {
   'glm-4.5-x':         { input: 2.2,  output: 8.9 },
   'glm-4.5':           { input: 0.6,  output: 2.2 },
   'glm-4-32b':         { input: 0.1,  output: 0.1 },
+
+  // DeepSeek — used THROUGH Claude Code via DeepSeek's Anthropic-compatible
+  // endpoint (ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic), so
+  // deepseek-* ids land in ~/.claude like glm-* (Codex rows: PRICING_OPENAI).
+  // Rows hold the PEAK list price; tod:'deepseek' halves every rate off-peak
+  // (deepseekOffPeak, since 2026-08-16 16:00 UTC). Cache reads bill at the
+  // row's own hit/miss ratio; DeepSeek has no cache-write charge and no
+  // per-search fee. Current prices verified 2026-09-29 (api-docs.deepseek.com);
+  // the older history steps come from third-party price trackers (DeepSeek's
+  // docs keep no history), each `untilMs` an EXCLUSIVE UTC instant.
+  'deepseek-flash':               DS_FLASH,
+  'deepseek-v4-flash':            DS_V4_FLASH,
+  'deepseek-v4-flash-vision-exp': DS_V4_FLASH,
+  'deepseek-v4-pro':              DS_V4_PRO,
+  // Retired 2026-07-24 (V3.2 until 2026-04-24, then served by V4-Flash);
+  // DeepSeek's Anthropic endpoint now maps unknown names to deepseek-flash.
+  'deepseek-chat':                DS_LEGACY_CHAT,
+  'deepseek-reasoner':            DS_LEGACY_CHAT,
 
   // Claude Code's placeholder for non-billable internal turns — free, and not
   // a real model. Priced at zero and hidden from the by-model breakdown.
@@ -722,7 +762,7 @@ function canonicalClaudeModel(model) {
     .replace(/-v\d+(?::\d+)?$/, '')
     .replace(/@(\d{8})$/, '-$1');
 }
-function priceFor(model, ts, speed) {
+function priceFor(model, ts, speed, listPrice) {
   const m = canonicalClaudeModel(model);
   let p = PRICING[m];
   if (!p && m) {
@@ -734,8 +774,8 @@ function priceFor(model, ts, speed) {
     }
     if (best) p = PRICING[best];
     // A claude-* id whose remainder is not a date stamp (or "-latest") is a
-    // model Pulse has NO row for — typically a point release (claude-sonnet-5-5
-    // lands on claude-sonnet-5). Keep the parent's rate as the closest
+    // model Pulse has NO row for — typically a point release (a future
+    // claude-sonnet-5-6 would land on claude-sonnet-5). Keep the parent's rate as the closest
     // estimate, but say so: claude-opus-5-5 sat silently on Opus 5's $5/$25
     // (vs its real $4/$20) until this was made visible.
     if (best && best.startsWith('claude-') && !/^(?:-v\d+)?-(?:\d{8}|latest)$/.test(m.slice(best.length))) {
@@ -746,19 +786,27 @@ function priceFor(model, ts, speed) {
     logUnknownModel(model);
     p = PRICING.__default__;
   }
+  // The price in force at the entry's own time (dated `history` steps), then
+  // DeepSeek's off-peak half price — skipped for the list-price view.
+  p = priceStep(p, ts);
+  if (!listPrice) p = timeOfDayPrice(p, ts);
   // Cache reads bill at the ROW's multiplier when it has one (Fable/Mythos 5.1
   // = 0.025×), else the standard 0.10× — carried on the resolved price so every
-  // cost path (cost, standard baseline, cache economics) agrees.
+  // cost path (cost, standard baseline, cache economics) agrees. Same for a
+  // row-level cache-write multiplier (DeepSeek: 1 = no write premium) and
+  // web-search fee (DeepSeek: none).
   const cacheReadMult = p.cacheReadMult != null ? p.cacheReadMult : CACHE_READ_MULT;
+  const cacheWriteMult = p.cacheWriteMult != null ? p.cacheWriteMult : null;
+  const webSearchPer1k = p.webSearchPer1k != null ? p.webSearchPer1k : WEB_SEARCH_PER_1K;
   // Fast mode is a per-request premium, so it wins over the (model-level)
   // introductory price — no current model carries both.
   if (speed === 'fast' && p.fastInput != null) {
-    return { input: p.fastInput, output: p.fastOutput, cacheReadMult };
+    return { input: p.fastInput, output: p.fastOutput, cacheReadMult, cacheWriteMult, webSearchPer1k };
   }
   if (p.introUntil && localDateStr(ts) <= p.introUntil) {
-    return { input: p.introInput, output: p.introOutput, cacheReadMult };
+    return { input: p.introInput, output: p.introOutput, cacheReadMult, cacheWriteMult, webSearchPer1k };
   }
-  return { input: p.input, output: p.output, cacheReadMult };
+  return { input: p.input, output: p.output, cacheReadMult, cacheWriteMult, webSearchPer1k };
 }
 
 // Token-category cost on the Claude path at a resolved price row. Cache reads
@@ -766,12 +814,17 @@ function priceFor(model, ts, speed) {
 // 4.6+ models) bills EVERY token category at 1.1× — the surcharge applies to
 // the token terms only, never to per-call server tools (web search).
 const INFERENCE_GEO_US_MULT = 1.1;
+function claudeWriteMults(price) {
+  const w = price.cacheWriteMult;
+  return w != null ? [w, w] : [CACHE_WRITE_5M_MULT, CACHE_WRITE_1H_MULT];
+}
 function claudeTokenCost(e, price) {
+  const [w5, w1] = claudeWriteMults(price);
   const tokens =
     (e.inputTokens  / 1e6) * price.input +
     (e.outputTokens / 1e6) * price.output +
-    (e.cacheWrite5m / 1e6) * price.input * CACHE_WRITE_5M_MULT +
-    (e.cacheWrite1h / 1e6) * price.input * CACHE_WRITE_1H_MULT +
+    (e.cacheWrite5m / 1e6) * price.input * w5 +
+    (e.cacheWrite1h / 1e6) * price.input * w1 +
     (e.cacheRead    / 1e6) * price.input * price.cacheReadMult;
   return e.geoUs ? tokens * INFERENCE_GEO_US_MULT : tokens;
 }
@@ -790,8 +843,8 @@ function costForEntry(e) {
       (e.cacheRead    / 1e6) * cachedPrice
     );
   }
-  return claudeTokenCost(e, priceFor(e.model, e.ts, e.speed)) +
-    (e.webSearches / 1000) * WEB_SEARCH_PER_1K;
+  const price = priceFor(e.model, e.ts, e.speed);
+  return claudeTokenCost(e, price) + (e.webSearches / 1000) * price.webSearchPer1k;
 }
 
 // What prompt caching actually bought on ONE entry, at that entry's own price
@@ -817,8 +870,9 @@ function cacheEconomicsForEntry(e) {
     // read saving scales with it (openaiTokenCost applies the same test).
     const isOpenAI = e.provider === 'openai';
     const im = isOpenAI && openaiLongContext(e, p) ? OPENAI_LONG_CTX_INPUT_MULT : 1;
-    // Fast scales every rate, so the read saving and write premium scale too.
-    const fm = isOpenAI && e.speed === 'fast' && p.fastMult ? p.fastMult : 1;
+    // Fast / Ultrafast scale every rate, so the read saving and write premium
+    // scale too.
+    const fm = isOpenAI ? openaiSpeedMult(e, p, e.speed) : 1;
     // Only OpenAI rows with a PUBLISHED cache-write price (cacheWriteMult)
     // carry a write premium; Gemini caching is implicit, no surcharge.
     const wp = isOpenAI && p.cacheWriteMult
@@ -830,13 +884,14 @@ function cacheEconomicsForEntry(e) {
   }
   const price = priceFor(e.model, e.ts, e.speed);
   const geo = e.geoUs ? INFERENCE_GEO_US_MULT : 1; // the surcharge scales savings and premiums alike
+  const [w5, w1] = claudeWriteMults(price);
   return {
     // Same zero-price rule as above — covers "<synthetic>" and the free
     // glm-*-flash rows, whose reads are real tokens but worth nothing saved.
     read: price.input > 0 ? read : 0,
     saved: (read / 1e6) * price.input * (1 - price.cacheReadMult) * geo,
-    writePremium: ((e.cacheWrite5m / 1e6) * price.input * (CACHE_WRITE_5M_MULT - 1)
-                 + (e.cacheWrite1h / 1e6) * price.input * (CACHE_WRITE_1H_MULT - 1)) * geo,
+    writePremium: ((e.cacheWrite5m / 1e6) * price.input * (w5 - 1)
+                 + (e.cacheWrite1h / 1e6) * price.input * (w1 - 1)) * geo,
   };
 }
 
@@ -847,8 +902,8 @@ function cacheEconomicsForEntry(e) {
 // table, forced to standard.
 function standardCostForEntry(e) {
   if (e.provider === 'openai') return openaiTokenCost(e, priceForOpenAI(e.model, e.ts), 'standard');
-  return claudeTokenCost(e, priceFor(e.model, e.ts, 'standard')) +
-    (e.webSearches / 1000) * WEB_SEARCH_PER_1K;
+  const price = priceFor(e.model, e.ts, 'standard');
+  return claudeTokenCost(e, price) + (e.webSearches / 1000) * price.webSearchPer1k;
 }
 
 // ---------------------------------------------------------------------------
@@ -871,26 +926,45 @@ function standardCostForEntry(e) {
 //   `until` (inclusive, entry-local date); an entry dated before a price cut
 //   keeps the rate it was actually billed at (priceStep). Ascending by until.
 //   fastMult — the row's published Fast-mode (service_tier "priority")
-//   multiplier on EVERY rate. Not uniform: 2× for the GPT-6 / 5.6 families,
-//   5.4, 5.2, 5.1, 5; 2.5× for gpt-5.5; 1.8× gpt-5-mini. No fastMult = no
+//   multiplier on EVERY rate. Not uniform: 2× for the GPT-6.1 / 6 / 5.6
+//   families, 5.4, 5.3-codex, 5.2, 5.1, 5; 2.5× for gpt-5.5; 1.8× gpt-5-mini. No fastMult = no
 //   published Fast price (a "fast" entry then prices at standard).
+//   ultrafastMult — the published Ultrafast multiplier (service_tier
+//   "ultrafast", 2026-09-29: GPT-6 Astra only, 6× every rate). An ultrafast
+//   entry on a row without one prices standard, like fast without fastMult.
 //   cacheWriteMult — rows with a PUBLISHED cache-write price (1.25× input:
-//   GPT-6 Astra/Sol/Luna, the 5.6 family, 5.6-cyber). Without it, cache-write
-//   tokens bill as plain input (older models have no write surcharge).
-// Verified 2026-09-06, rows added/extended 2026-09-24 against the
-// developers.openai.com pricing page (Standard / Fast / Daybreak tables).
+//   GPT-6.1 Sol, GPT-6 Astra/Sol/Luna, the 5.6 family, 5.6-cyber). Without it,
+//   cache-write tokens bill as plain input (older models have no surcharge).
+//   history steps may use `untilMs` (an EXCLUSIVE UTC instant) instead of
+//   `until` — for providers that change prices mid-day (DeepSeek).
+//   tod: 'deepseek' — half price off-peak (timeOfDayPrice).
+// Verified 2026-09-06, rows added/extended 2026-09-24 and 2026-09-29 against
+// the developers.openai.com pricing page (Standard / Fast / Ultrafast /
+// Daybreak tables).
 const GPT56_SOL = {
   // Cut 2026-08-21 from $5/$30 — "promotional pricing available at least
   // through November 21, 2026": re-check then; if it reverts, add a step.
   input: 4, output: 20, cachedInput: 0.4, longContext: true, fastMult: 2, cacheWriteMult: 1.25,
   history: [{ until: '2026-08-20', input: 5, output: 30, cachedInput: 0.5 }],
 };
+// DeepSeek through Codex (a `model_provider` with wire_api "responses",
+// Codex ≥ 0.144): same prices as the Claude-path rows, OpenAI row shape.
+const DSO_FLASH = { input: 0.30, output: 1.20, cachedInput: 0.006, tod: 'deepseek' };
+const DSO_V4_FLASH = { ...DSO_FLASH, history: [
+  { untilMs: Date.parse('2026-08-16T16:00:00Z'), input: 0.14, output: 0.28, cachedInput: 0.0028, tod: null },
+  { untilMs: Date.parse('2026-09-10T04:00:00Z'), input: 0.44, output: 1.32, cachedInput: 0.014 },
+] };
 const PRICING_OPENAI = {
-  // GPT-6 Astra (2026-09-03) — Codex's bundled default since 0.153.4
-  // (2026-09-04). "-wm" is Codex's undocumented daybreak variant of the same
-  // model (codex-rs daybreak.rs maps both ids to Astra) — priced identically.
-  'gpt-6-astra':        { input: 10,   output: 50,  cachedInput: 1, longContext: true, fastMult: 2, cacheWriteMult: 1.25 },
-  'gpt-6-astra-wm':     { input: 10,   output: 50,  cachedInput: 1, longContext: true, fastMult: 2, cacheWriteMult: 1.25 },
+  // GPT-6.1 Sol (2026-09-29) — Codex's bundled default since 0.159.1. Cached
+  // input is 5% of input (not the family's 10%). Unlike GPT-6 Sol/Luna, its
+  // catalog entry has no default service tier, so new sessions run Standard.
+  'gpt-6.1-sol':        { input: 2,    output: 10,  cachedInput: 0.1, longContext: true, fastMult: 2, cacheWriteMult: 1.25 },
+  // GPT-6 Astra (2026-09-03) — Codex's bundled default from 0.153.4
+  // (2026-09-04) until 0.159.1. "-wm" is Codex's undocumented daybreak variant
+  // of the same model (codex-rs daybreak.rs maps both ids to Astra) — priced
+  // identically. Ultrafast (2026-09-29) = 6× every Standard rate.
+  'gpt-6-astra':        { input: 10,   output: 50,  cachedInput: 1, longContext: true, fastMult: 2, ultrafastMult: 6, cacheWriteMult: 1.25 },
+  'gpt-6-astra-wm':     { input: 10,   output: 50,  cachedInput: 1, longContext: true, fastMult: 2, ultrafastMult: 6, cacheWriteMult: 1.25 },
   // GPT-6 Sol + Luna (2026-09-22; in Codex's catalog since 0.156). Codex's
   // TUI runs BOTH on Fast (service_tier "priority") by default — the rollout
   // records the effective tier, see parseCodexFile.
@@ -916,12 +990,13 @@ const PRICING_OPENAI = {
   'gpt-5.5-pro':        { input: 30,   output: 180, cachedInput: 30 },
   'gpt-5.5':            { input: 5,    output: 30,  cachedInput: 0.5, longContext: true, fastMult: 2.5 },
   // gpt-5.4 / -mini retired from Codex (ChatGPT sign-in) 2026-08-31 → terra /
-  // luna; still on the API, prices unchanged.
+  // luna and left Codex's bundled catalog in 0.158.0; still on the API, prices
+  // unchanged.
   'gpt-5.4-mini':       { input: 0.75, output: 4.5, cachedInput: 0.075, fastMult: 2 },
   'gpt-5.4-nano':       { input: 0.2,  output: 1.25, cachedInput: 0.02 },
   'gpt-5.4-pro':        { input: 30,   output: 180, cachedInput: 30 },
   'gpt-5.4':            { input: 2.5,  output: 15,  cachedInput: 0.25, longContext: true, fastMult: 2 },
-  'gpt-5.3-codex':      { input: 1.75, output: 14,  cachedInput: 0.175 },
+  'gpt-5.3-codex':      { input: 1.75, output: 14,  cachedInput: 0.175, fastMult: 2 },
   'gpt-5.2-pro':        { input: 21,   output: 168, cachedInput: 21 },
   'gpt-5.2-codex':      { input: 1.75, output: 14,  cachedInput: 0.175 },
   'gpt-5.2':            { input: 1.75, output: 14,  cachedInput: 0.175, fastMult: 2 },
@@ -954,6 +1029,13 @@ const PRICING_OPENAI = {
   'gpt-4.1':            { input: 2,    output: 8,   cachedInput: 0.5 },
   'gpt-4o-mini':        { input: 0.15, output: 0.6, cachedInput: 0.075 },
   'gpt-4o':             { input: 2.5,  output: 10,  cachedInput: 1.25 },
+  // DeepSeek via Codex (see DSO_FLASH). No cache-write charge.
+  'deepseek-flash':     DSO_FLASH,
+  'deepseek-v4-flash':  DSO_V4_FLASH,
+  'deepseek-v4-flash-vision-exp': DSO_V4_FLASH,
+  'deepseek-v4-pro':    { input: 1.32, output: 3.96, cachedInput: 0.044, tod: 'deepseek', history: [
+    { untilMs: Date.parse('2026-08-16T16:00:00Z'), input: 0.435, output: 0.87, cachedInput: 0.003625, tod: null },
+  ] },
   // Fallback for unknown / new model strings (logged once, same as Claude).
   '__default__':        { input: 1.25, output: 10 },
 };
@@ -971,14 +1053,51 @@ function canonicalOpenAIModel(model) {
   return model ? model.replace(/^(?:[a-z]+(?:-[a-z]+)*\.)?openai\./, '') : model;
 }
 // The price in force at an entry's own date: `history` steps are older prices,
-// each valid through its `until` (inclusive); the first step the date falls
-// within wins, else the row's current price. The step inherits row-level
-// flags (longContext) it doesn't restate.
+// each valid through its `until` (inclusive, entry-local date) or before its
+// `untilMs` (exclusive UTC instant); the first step the entry falls within
+// wins, else the row's current price. The step inherits row-level flags
+// (longContext, tod) it doesn't restate. Shared by the Claude and OpenAI
+// tables.
 function priceStep(p, ts) {
   if (!p.history || ts == null) return p;
-  const ds = localDateStr(ts);
-  for (const h of p.history) if (ds <= h.until) return { ...p, ...h, history: undefined };
+  let ds = null;
+  for (const h of p.history) {
+    const inStep = h.untilMs != null ? ts < h.untilMs : (ds || (ds = localDateStr(ts))) <= h.until;
+    if (inStep) return { ...p, ...h, history: undefined };
+  }
   return p;
+}
+
+// DeepSeek peak/off-peak pricing (since 2026-08-16 16:00 UTC): "Peak hours are
+// 01:00 - 04:00 and 06:00 - 10:00 UTC, Monday through Friday, excluding
+// Chinese public holidays. All other hours are off-peak, including weekends
+// and Chinese public holidays in full", and off-peak rates are half the peak
+// rates. Judged in UTC at the entry's own timestamp (never local time).
+// CN_PUBLIC_HOLIDAYS = the State Council's holiday periods (Beijing dates —
+// inside peak hours the UTC date IS the Beijing date), whole periods incl.
+// their swapped rest days. It needs a yearly update (the next year's notice
+// usually lands in November); a missing year errs toward peak, never below.
+const DEEPSEEK_OFF_PEAK_MULT = 0.5;
+const CN_PUBLIC_HOLIDAYS = new Set([
+  // 2026 (国办发明电〔2025〕7号)
+  ['2026-01-01', 3], ['2026-02-15', 9], ['2026-04-04', 3], ['2026-05-01', 5],
+  ['2026-06-19', 3], ['2026-09-25', 3], ['2026-10-01', 7],
+].flatMap(([start, days]) => Array.from({ length: days }, (_, i) =>
+  new Date(Date.parse(start + 'T00:00:00Z') + i * 864e5).toISOString().slice(0, 10))));
+function deepseekOffPeak(ts) {
+  const d = new Date(ts);
+  const dow = d.getUTCDay(), h = d.getUTCHours();
+  if (dow === 0 || dow === 6) return true;
+  if (!((h >= 1 && h < 4) || (h >= 6 && h < 10))) return true;
+  return CN_PUBLIC_HOLIDAYS.has(d.toISOString().slice(0, 10));
+}
+// Apply a row's time-of-day rule. Ratios (cacheReadMult) are unchanged; the
+// absolute rates halve, so cache savings halve with them.
+function timeOfDayPrice(p, ts) {
+  if (p.tod !== 'deepseek' || ts == null || !deepseekOffPeak(ts)) return p;
+  const m = DEEPSEEK_OFF_PEAK_MULT;
+  return { ...p, input: p.input * m, output: p.output * m,
+    cachedInput: p.cachedInput != null ? p.cachedInput * m : p.cachedInput, tod: null };
 }
 function priceForOpenAI(model, ts) {
   const m = canonicalOpenAIModel(model);
@@ -1000,15 +1119,20 @@ function priceForOpenAI(model, ts) {
     logUnknownModel(model);
     p = PRICING_OPENAI.__default__;
   }
-  return priceStep(p, ts);
+  return timeOfDayPrice(priceStep(p, ts), ts);
 }
 // OpenAI token cost at a resolved row. Cached input bills at the row's own
 // published rate; the long-context tier scales the whole request.
 // Rollout cache-WRITE tokens (`cache_write_input_tokens`, a subset of input)
 // arrive in cacheWrite5m and bill at the row's cacheWriteMult (else as plain
-// input). `speed === 'fast'` (Codex service_tier "priority") multiplies EVERY
-// rate by the row's published fastMult; a row without one prices standard.
+// input). `speed === 'fast'` (Codex service_tier "priority"/"fast") multiplies
+// EVERY rate by the row's published fastMult, and service_tier "ultrafast" by
+// its ultrafastMult; a row without the multiplier prices standard.
 // The prompt size for the long-context test is uncached + written + cached.
+function openaiSpeedMult(e, p, speed) {
+  if (speed !== 'fast') return 1;
+  return (e.serviceTier === 'ultrafast' ? p.ultrafastMult : p.fastMult) || 1;
+}
 function openaiLongContext(e, p) {
   return !!p.longContext && (e.inputTokens + e.cacheWrite5m + e.cacheRead) > OPENAI_LONG_CONTEXT_TOKENS;
 }
@@ -1017,7 +1141,7 @@ function openaiTokenCost(e, p, speed) {
   const long = openaiLongContext(e, p);
   const im = long ? OPENAI_LONG_CTX_INPUT_MULT : 1;
   const om = long ? OPENAI_LONG_CTX_OUTPUT_MULT : 1;
-  const fm = speed === 'fast' && p.fastMult ? p.fastMult : 1;
+  const fm = openaiSpeedMult(e, p, speed);
   const cw = p.cacheWriteMult || 1;
   return fm * (
     (e.inputTokens  / 1e6) * p.input * im +
@@ -1414,8 +1538,39 @@ function claudeConvStep(rec, open, st) {
 }
 
 // Reasoning-effort level names Claude Code accepts for `/effort` (ultracode is
-// handled separately — it is xhigh plus workflow orchestration, shown as ULTRA).
+// handled separately — workflow orchestration on top of a level, shown as ULTRA).
 const EFFORT_LEVELS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+
+// Claude Code 2.1.284 made Ultracode its own toggle (`/effort ultracode
+// [on|off]`, Tab in the picker): it no longer forces xhigh, stays on at any
+// level, and setting a level leaves it alone. Before that, `/effort
+// ultracode` WAS a level (xhigh + workflows) and any other level ended it.
+// Events carry the era so both kinds of transcript keep their own meaning;
+// the record's own `version` decides (a line without one is the old era).
+const ULTRACODE_TOGGLE_VERSION = versionNum('2.1.284');
+function ultracodeToggleEra(rec) {
+  return !!rec && typeof rec.version === 'string' && versionNum(rec.version) >= ULTRACODE_TOGGLE_VERSION;
+}
+
+// Parse `/effort <args>` into an effort event, or null. An event field left
+// UNDEFINED means "unchanged" (a toggle-era level leaves ultracode alone, an
+// ultracode toggle leaves the level alone); null effort = back to the default.
+function parseEffortArgs(args, toggle) {
+  const w = String(args || '').toLowerCase().split(/\s+/).filter(Boolean);
+  const lvl = w[0];
+  if (!lvl) return null;
+  if (lvl === 'ultracode') {
+    if (!toggle) return { effort: null, ultracode: true };
+    // Claude Code's own grammar: `ultracode`, `ultracode on`, `ultracode off`;
+    // anything longer is rejected as an invalid argument.
+    if (w.length > 2) return null;
+    if (w[1] === undefined || w[1] === 'on') return { ultracode: true, toggle: true };
+    return w[1] === 'off' ? { ultracode: false, toggle: true } : null;
+  }
+  if (lvl === 'auto' || lvl === 'unset') return toggle ? { effort: null, toggle: true } : { effort: null, ultracode: false };
+  if (EFFORT_LEVELS.has(lvl)) return toggle ? { effort: lvl, toggle: true } : { effort: lvl, ultracode: false };
+  return null;
+}
 
 // Detect a local-command user record (`/effort`, `/model`, …). Claude Code
 // writes these into the transcript as XML-ish tags:
@@ -1443,16 +1598,36 @@ function parseLocalCommand(txt) {
 //   "Set effort level to high (this session only)"
 //   "Set effort level to ultracode (this session only): xhigh + dynamic ..."
 //   "Kept effort level as max" · "Effort level set to auto"
+// Toggle era (Claude Code ≥ 2.1.284, `toggle` true) adds
+//   "Ultracode on (this session only): … Effort stays high."
+//   "Ultracode off. Effort stays high."
+// and the picker joins its parts with " · ", so a level echo may end in
+// " · Ultracode on" / " · Ultracode off" (a level alone leaves it unchanged).
 // Only CLI-written stdout is matched (never prompt text), anchored at the
 // start, so a user QUOTING these words can't forge an event.
-function parseEffortStdout(stdout) {
-  const m = /^(?:Set effort level to|Kept effort level as|Effort level set to)\s+([a-z]+)/i.exec(stdout || '');
+function parseEffortStdout(stdout, toggle) {
+  const s = stdout || '';
+  if (toggle) {
+    const u = /^Ultracode (on|off)\b/i.exec(s);
+    if (u) return { ultracode: u[1].toLowerCase() === 'on', toggle: true };
+  }
+  const m = /^(?:Set effort level to|Kept effort level as|Effort level set to)\s+([a-z]+)/i.exec(s);
   if (!m) return null;
   const lvl = m[1].toLowerCase();
-  if (lvl === 'ultracode') return { effort: null, ultracode: true };
-  if (lvl === 'auto') return { effort: null, ultracode: false }; // back to default → no chip
-  if (EFFORT_LEVELS.has(lvl)) return { effort: lvl, ultracode: false };
-  return null;
+  if (!toggle) {
+    if (lvl === 'ultracode') return { effort: null, ultracode: true };
+    if (lvl === 'auto') return { effort: null, ultracode: false }; // back to default → no chip
+    if (EFFORT_LEVELS.has(lvl)) return { effort: lvl, ultracode: false };
+    return null;
+  }
+  let ev;
+  if (lvl === 'ultracode') ev = { ultracode: true, toggle: true };
+  else if (lvl === 'auto') ev = { effort: null, toggle: true };
+  else if (EFFORT_LEVELS.has(lvl)) ev = { effort: lvl, toggle: true };
+  else return null;
+  const t = /\s\u00b7\s+Ultracode (on|off)\b/i.exec(s);
+  if (t) ev.ultracode = t[1].toLowerCase() === 'on';
+  return ev;
 }
 
 // String intern pool. model/source/project/sessionId values repeat across
@@ -1499,7 +1674,7 @@ function normalize(rec) {
   const e = {
     ts,
     provider: 'anthropic',
-    model: intern(msg.model || 'unknown'),
+    model: intern(servedModel(msg, u)),
     source: intern(rec.entrypoint || 'cli'), // §3.4 — default cli when absent
     // Execution mode as recorded by Claude Code. `speed` (fast vs standard)
     // and `service_tier` live in usage. Reasoning effort: Claude Code ≥ 2.1.212
@@ -1537,6 +1712,27 @@ function normalize(rec) {
   e.cost = costForEntry(e);
   return e;
 }
+// The model that actually produced a message. Server-side refusal fallback
+// (Claude Code ≥ 2.1.285 sends server-side-fallback-2026-07-01): when the
+// requested model declines, another model serves the turn and
+// usage.iterations records every attempt — the declined one as an ordinary
+// `message` item, the one that served as `fallback_message` — while the
+// top-level usage counts ONLY the served attempt. On a mid-stream decline
+// message.model can still name the REQUESTED model (message_start went out
+// first), so the last fallback_message item's model is the one those tokens
+// bill at (Claude Code's own /cost does the same). `message` items are never
+// added: on an ordinary turn they just repeat the top-level usage.
+function servedModel(msg, u) {
+  const its = u && u.iterations;
+  if (Array.isArray(its)) {
+    for (let i = its.length - 1; i >= 0; i--) {
+      const it = its[i];
+      if (it && it.type === 'fallback_message' && typeof it.model === 'string' && it.model) return it.model;
+    }
+  }
+  return msg.model || 'unknown';
+}
+
 // The per-message reasoning-effort level Claude Code ≥ 2.1.212 writes on each
 // assistant transcript entry (a short lowercase word: low/medium/high/xhigh/max).
 // Non-levels: "auto"/"default" mean "no explicit level" (the /effort echo
@@ -1672,11 +1868,8 @@ function parseFile(filePath) {
         // time-stamped event: works retroactively, no hook required.
         if (sid && cmd.name === '/effort' && cmd.args) {
           const ts = Date.parse(rec.timestamp);
-          const lvl = cmd.args.toLowerCase().split(/\s+/)[0];
-          if (isFinite(ts)) {
-            if (lvl === 'ultracode') effortEvents.push({ sessionId: sid, ts, effort: null, ultracode: true });
-            else if (EFFORT_LEVELS.has(lvl)) effortEvents.push({ sessionId: sid, ts, effort: lvl, ultracode: false });
-          }
+          const ev = parseEffortArgs(cmd.args, ultracodeToggleEra(rec));
+          if (ev && isFinite(ts)) effortEvents.push({ sessionId: sid, ts, ...ev });
         }
         // Bare `/effort` (the interactive picker, the desktop-app default)
         // leaves args empty — the chosen level only exists in the CLI's
@@ -1684,7 +1877,7 @@ function parseFile(filePath) {
         // command event and an echo event with the same value — harmless,
         // the join reads them as identical state snapshots.
         if (sid && cmd.stdout) {
-          const ev = parseEffortStdout(cmd.stdout);
+          const ev = parseEffortStdout(cmd.stdout, ultracodeToggleEra(rec));
           const ts = Date.parse(rec.timestamp);
           if (ev && isFinite(ts)) effortEvents.push({ sessionId: sid, ts, ...ev });
         }
@@ -1887,7 +2080,10 @@ function parseCodexFile(filePath) {
       // cache_write_input_tokens (rollouts ≥ 0.145) is ALSO a subset of input,
       // disjoint from cached; absent in older rollouts → 0.
       const written = Math.min(num(u.cache_write_input_tokens), Math.max(0, input - cached));
-      const fast = serviceTier === 'priority' || serviceTier === 'fast';
+      // Ultrafast (2026-09-29, GPT-6 Astra) is a faster, pricier tier of the
+      // same kind — speed 'fast' keeps the fast-mode spend and chips; its own
+      // multiplier comes from serviceTier (openaiSpeedMult).
+      const fast = serviceTier === 'priority' || serviceTier === 'fast' || serviceTier === 'ultrafast';
       const e = {
         ts,
         provider: 'openai',
@@ -2479,25 +2675,40 @@ function readModes() {
 }
 
 // Merge the hook sidecar with transcript-parsed /effort events into one
-// per-session, time-sorted snapshot list. Copies the cached sidecar arrays —
-// never mutates them.
+// per-session, time-sorted list. Copies the cached sidecar arrays — never
+// mutates them. A field left undefined means "unchanged" (toggle-era events,
+// see parseEffortArgs). The hook only ever records ultracode TRUE (keyword or
+// a persisted "ultracode" level); in a session whose transcript is toggle-era
+// its `false` is an absence, not an "off", so it must not end a toggle.
 function mergeModes(sidecarBySession, effortEvents) {
   const out = {};
-  for (const sid of Object.keys(sidecarBySession || {})) out[sid] = sidecarBySession[sid].slice();
+  const toggleSids = new Set();
+  for (const ev of effortEvents || []) if (ev.sessionId && ev.toggle) toggleSids.add(ev.sessionId);
+  for (const sid of Object.keys(sidecarBySession || {})) {
+    out[sid] = toggleSids.has(sid)
+      ? sidecarBySession[sid].map((r) => ({ ts: r.ts, effort: r.effort, ultracode: r.ultracode ? true : undefined }))
+      : sidecarBySession[sid].slice();
+  }
   for (const ev of effortEvents || []) {
     if (!ev.sessionId) continue;
-    (out[ev.sessionId] = out[ev.sessionId] || []).push({ ts: ev.ts, effort: ev.effort || null, ultracode: !!ev.ultracode });
+    (out[ev.sessionId] = out[ev.sessionId] || []).push({
+      ts: ev.ts,
+      effort: ev.effort === undefined ? undefined : ev.effort || null,
+      ultracode: ev.ultracode === undefined ? undefined : !!ev.ultracode,
+    });
   }
   for (const k of Object.keys(out)) out[k].sort((a, b) => a.ts - b.ts);
   return out;
 }
 
 // Annotate entries in place with { effort, ultracode }. Mode records — hook
-// sidecar lines and transcript /effort events — are state snapshots; each
-// entry takes the latest snapshot at or before it in its session. So an
-// /effort mid-session applies from that point on, and switching (e.g.
-// ultracode → max) turns the previous state off. The ultracode keyword in a
-// real prompt still opts the whole session in.
+// sidecar lines and transcript /effort events — are state changes; each
+// entry takes, per field, the latest record at or before it in its session
+// that SETS that field (undefined = unchanged). Old-era records set both, so
+// they act as full snapshots: an /effort mid-session applies from that point
+// on, and switching (e.g. ultracode → max) turns the previous state off. A
+// toggle-era level leaves ultracode alone and vice versa. The ultracode
+// keyword in a real prompt still opts the whole session in.
 function annotateModes(entriesAsc, modesBySession, ultracodeSessions) {
   for (const e of entriesAsc) {
     // Codex entries carry effort from their rollout's turn_context, stored in
@@ -2508,18 +2719,18 @@ function annotateModes(entriesAsc, modesBySession, ultracodeSessions) {
     let ultra = ultracodeSessions.has(e.sessionId);
     const recs = modesBySession[e.sessionId];
     if (recs && recs.length) {
-      let chosen = null;
+      let lvl, uc; // undefined until a record sets the field
       for (const r of recs) {
-        if (r.ts <= e.ts) chosen = r; else break;
+        if (r.ts > e.ts) break;
+        if (r.effort !== undefined) lvl = r.effort;
+        if (r.ultracode !== undefined) uc = r.ultracode;
       }
-      if (chosen) {
-        // A parse-time recorded level (Codex turn_context, Claude Code ≥ 2.1.212
-        // per-message `effort`) is authoritative for that entry; the sidecar /
-        // echo events only fill the gaps. Ultracode is never recorded, so it
-        // always comes from the events.
-        if (!e.parseEffort) effort = chosen.effort;
-        if (chosen.ultracode) ultra = true;
-      }
+      // A parse-time recorded level (Codex turn_context, Claude Code ≥ 2.1.212
+      // per-message `effort`) is authoritative for that entry; the sidecar /
+      // echo events only fill the gaps. Ultracode is never recorded, so it
+      // always comes from the events.
+      if (!e.parseEffort && lvl !== undefined) effort = lvl;
+      if (uc) ultra = true;
     }
     e.effort = effort;
     e.ultracode = ultra;
@@ -3428,7 +3639,7 @@ function buildPricingView(now) {
   const out = {};
   for (const model of Object.keys(PRICING)) {
     if (model === '__default__' || HIDDEN_MODELS.has(model)) continue;
-    const p = priceFor(model, now);
+    const p = priceFor(model, now, 'standard', true); // list (peak) price
     out[model] = { input: p.input, output: p.output };
   }
   return out;
@@ -5634,8 +5845,10 @@ function discordIpcCandidates() {
     }
     return out;
   }
+  // Discord's own search order (RPC-over-IPC docs, 2026-04): XDG_RUNTIME_DIR,
+  // TMPDIR, TMP, TEMP, then /tmp.
   const bases = [];
-  for (const b of [process.env.XDG_RUNTIME_DIR, process.env.TMPDIR, '/tmp']) {
+  for (const b of [process.env.XDG_RUNTIME_DIR, process.env.TMPDIR, process.env.TMP, process.env.TEMP, '/tmp']) {
     if (b && !bases.includes(b)) bases.push(b);
   }
   for (const b of bases) {
@@ -5984,6 +6197,8 @@ function prettyModelName(model) {
       : 'GPT ' + [v, ...rest].map(cap).join(' ');
   }
   if (m.startsWith('glm-')) return 'GLM-' + m.slice(4);
+  // deepseek-v4-pro → "DeepSeek V4 Pro", deepseek-flash → "DeepSeek Flash"
+  if (m.startsWith('deepseek-')) return 'DeepSeek ' + m.slice(9).split('-').map((p) => (/^v\d/.test(p) ? p.toUpperCase() : cap(p))).join(' ');
   return m;
 }
 // Effort level as the presence shows it ("Sonnet 5 · Medium"): xhigh reads as
@@ -9909,4 +10124,5 @@ module.exports = {
   PRICING, priceFor, costForEntry, normalize, dedupKey,
   computeBlocks, floorToHour, aggregate, parseAll, tokensOf, localDateStr,
   psQuote, trayScript, summarizeTrayOutput, integrationTargetExists, sameEntry, discordClaudeArt, DISCORD_DEFAULT_CLAUDE_ART,
+  parseFile, parseEffortArgs, parseEffortStdout, mergeModes, annotateModes, discordIpcCandidates,
 };

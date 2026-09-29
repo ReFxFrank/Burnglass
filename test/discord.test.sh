@@ -305,6 +305,20 @@ ok(hActs.length >= 2 && hActs[0].payload.args.activity.assets.large_image === "h
   ok(dflt.claudeWorking === D.working && dflt.claude === D.idle && dflt.codex === "codex" && dflt.idle === "pulse",
      "I: payload.discord.images.defaults says what an empty slot shows (additive)");
 }
+// ---- J: Unix socket search follows Discord's documented order, incl. TMP / TEMP
+if (process.platform !== "win32") {
+  const { discordIpcCandidates: cands } = require(process.argv[3] + "/server.js");
+  const keep = { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR, TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP,
+                 PULSE_DISCORD_IPC: process.env.PULSE_DISCORD_IPC, BURNGLASS_DISCORD_IPC: process.env.BURNGLASS_DISCORD_IPC };
+  delete process.env.PULSE_DISCORD_IPC; delete process.env.BURNGLASS_DISCORD_IPC;
+  process.env.XDG_RUNTIME_DIR = "/run/u"; process.env.TMPDIR = "/run/u"; process.env.TMP = "/x/tmp"; process.env.TEMP = "/x/temp";
+  const c = cands();
+  const firstOf = (b) => c.indexOf(b + "/discord-ipc-0");
+  ok(firstOf("/run/u") === 0 && firstOf("/x/tmp") > 0 && firstOf("/x/temp") > firstOf("/x/tmp") && firstOf("/tmp") > firstOf("/x/temp"),
+     "J: socket dirs tried in order XDG_RUNTIME_DIR, TMPDIR, TMP, TEMP, /tmp (deduped)");
+  ok(c.filter((p) => p === "/run/u/discord-ipc-0").length === 1, "J: a repeated dir is tried once");
+  for (const [k, v] of Object.entries(keep)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+}
 process.exit(fail);
 ' "$TMP" "$ECONN" "$ROOT"
 RES=$?

@@ -86,12 +86,16 @@ lines.push({ type: "assistant", timestamp: "2026-09-23T10:00:00.000Z",
 lines.push({ type: "assistant", timestamp: "2026-09-23T11:00:00.000Z",
   sessionId: "o55f-s", requestId: "ro55f", cwd: "/p",
   message: { id: "mo55f", model: "claude-opus-5-5", usage: { input_tokens: 1000000, output_tokens: 1000000, speed: "fast" } } });
-// A point release Pulse has NO row for (Sonnet 5.5 is announced, unpriced):
-// it borrows the Sonnet 5 row (2/10) (1M+1M = 12) as the closest estimate, but must
-// be LOGGED — silently, this is how Opus 5.5 hid on the Opus 5 rate.
+// Sonnet 5.5 (2026-09-28) has its own row now: 2/10 (1M+1M = 12), SILENTLY.
 lines.push({ type: "assistant", timestamp: "2026-09-23T12:00:00.000Z",
   sessionId: "s55-s", requestId: "rs55", cwd: "/p",
   message: { id: "ms55", model: "claude-sonnet-5-5", usage: { input_tokens: 1000000, output_tokens: 1000000 } } });
+// A point release Burnglass has NO row for (hypothetical claude-sonnet-5-6):
+// it borrows the Sonnet 5 row (2/10) (1M+1M = 12) as the closest estimate, but must
+// be LOGGED — silently, this is how Opus 5.5 hid on the Opus 5 rate.
+lines.push({ type: "assistant", timestamp: "2026-09-23T12:30:00.000Z",
+  sessionId: "s56-s", requestId: "rs56", cwd: "/p",
+  message: { id: "ms56", model: "claude-sonnet-5-6", usage: { input_tokens: 1000000, output_tokens: 1000000 } } });
 // Version-stamped Vertex id: claude-3-5-sonnet-v2@20241022 -> the 3.5 Sonnet
 // row (3/15 -> 1M+1M = 18) SILENTLY (a -v2 stamp is not a point release).
 lines.push({ type: "assistant", timestamp: "2026-09-23T13:00:00.000Z",
@@ -295,7 +299,9 @@ const sepM = mon("2026-09");
 const o55 = (sepM.byModel || {})["claude-opus-5-5"];
 ok(o55 && Math.abs(o55.cost - 72.2) < 0.005, "opus-5-5: 4/20 + 0.05x read (24.20) + fast 8/40 (48) = 72.20 (got " + (o55 ? o55.cost.toFixed(2) : "missing") + ")");
 const s55 = (sepM.byModel || {})["claude-sonnet-5-5"];
-ok(s55 && Math.abs(s55.cost - 12) < 0.005, "claude-sonnet-5-5 (no row) borrows Sonnet 5 2/10 = 12 (got " + (s55 ? s55.cost.toFixed(2) : "missing") + ")");
+ok(s55 && Math.abs(s55.cost - 12) < 0.005, "claude-sonnet-5-5 has its own row: 2/10 = 12 (got " + (s55 ? s55.cost.toFixed(2) : "missing") + ")");
+const s56 = (sepM.byModel || {})["claude-sonnet-5-6"];
+ok(s56 && Math.abs(s56.cost - 12) < 0.005, "claude-sonnet-5-6 (no row) borrows Sonnet 5 2/10 = 12 (got " + (s56 ? s56.cost.toFixed(2) : "missing") + ")");
 for (const [m, want] of Object.entries({ "gpt-6-sol": 20.4, "gpt-6-luna": 0.51, "gpt-daybreak-red-latest": 10.3125,
     "gpt-daybreak-blue-latest": 20.4, "gpt-5.2": 14.175, "gpt-5.2-codex": 14.175, "gpt-5.2-pro": 170.1, "us.openai.gpt-5.5": 8.75, "claude-3-5-sonnet-v2@20241022": 18 })) {
   const r = (sepM.byModel || {})[m];
@@ -314,13 +320,140 @@ ok(o5fast && Math.abs(o5fast.cost - 60) < 0.005, "opus-5 fast mode at 10/50 = 60
 // The ONLY unknown-model warnings allowed are the two deliberate guard cases
 // — the guard must be VISIBLE (warn), every listed model must price silently.
 const unk = log.split("\n").filter((l) => /unknown model/.test(l));
-const deliberate = /gemini-3\.5-flash-lite|gemini-2\.5-flash-preview-tts|claude-sonnet-5-5/;
+const deliberate = /gemini-3\.5-flash-lite|gemini-2\.5-flash-preview-tts|claude-sonnet-5-6/;
 ok(unk.length === 3 && unk.every((l) => deliberate.test(l)),
    "exactly the three deliberate unknown-model warnings, nothing else (got " + unk.length + ": " + unk.join(" | ") + ")");
-ok(unk.some((l) => /claude-sonnet-5-5.*priced as "claude-sonnet-5"/.test(l)),
+ok(!unk.some((l) => /claude-sonnet-5-5/.test(l)), "claude-sonnet-5-5 prices silently (its own row)");
+ok(unk.some((l) => /claude-sonnet-5-6.*priced as "claude-sonnet-5"/.test(l)),
    "the point-release warning names the row it borrowed (not a false \"__default__\")");
 process.exit(fail);
 ' "$TMP"
 RES=$?
+
+# ---- 2026-09-29 rows: DeepSeek (both paths, peak/off-peak, holidays, dated
+# steps), GPT-6.1 Sol, GPT-6 Astra Ultrafast, server-side refusal fallback.
+# Own fixture homes + server, so the September totals above stay untouched.
+CL2=$TMP/claude2; CX2=$TMP/codex2; PH2=$TMP/pulse2
+mkdir -p "$CL2/projects/ds" "$CX2/sessions/2026/09/29" "$PH2"
+node -e '
+const fs = require("fs");
+const [cl, cx] = process.argv.slice(1);
+const A = (iso, id, model, usage, extra) => Object.assign({ type: "assistant", timestamp: iso,
+  sessionId: "ds-" + id, requestId: "r" + id, cwd: "/p",
+  message: { id: "m" + id, model, usage: Object.assign({ input_tokens: 1000000, output_tokens: 1000000 }, usage || {}) } }, extra || {});
+const lines = [
+  // deepseek-flash, 1M miss + 1M out: peak (Tue 02:00Z) 0.30 + 1.20 = 1.50
+  A("2026-09-29T02:00:00.000Z", "f-peak", "deepseek-flash"),
+  // off-peak (Tue 05:00Z, between the two peak windows) = 0.75
+  A("2026-09-29T05:00:00.000Z", "f-off", "deepseek-flash"),
+  // Mid-Autumn holiday (Fri 2026-09-25 02:00Z, inside peak HOURS) = off-peak 0.75
+  A("2026-09-25T02:00:00.000Z", "f-hol", "deepseek-flash"),
+  // weekend (Sun 2026-09-27 08:00Z) = 0.75
+  A("2026-09-27T08:00:00.000Z", "f-wkd", "deepseek-flash"),
+  // 1M cache-hit reads at peak: hit rate 0.006 (0.02 x 0.30), + 1M "write"
+  // billed as plain miss input (no write premium), 0 in / 0 out = 0.306
+  A("2026-09-29T03:00:00.000Z", "f-cache", "deepseek-flash",
+    { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 1000000, cache_creation_input_tokens: 1000000,
+      server_tool_use: { web_search_requests: 1000 } }),
+  // legacy v4-flash name: Thu 2026-09-10 03:59Z = the OLD peak 0.44 + 1.32 = 1.76
+  A("2026-09-10T03:59:00.000Z", "v4-old", "deepseek-v4-flash"),
+  // 04:00Z the same day = the new Flash price, and off-peak (04-06Z gap) = 0.75
+  A("2026-09-10T04:00:00.000Z", "v4-new", "deepseek-v4-flash"),
+  // v4-pro before peak pricing began (2026-08-10, flat) = 0.435 + 0.87 = 1.305
+  A("2026-08-10T02:00:00.000Z", "p-aug", "deepseek-v4-pro"),
+  // v4-pro now, peak = 1.32 + 3.96 = 5.28
+  A("2026-09-29T09:00:00.000Z", "p-now", "deepseek-v4-pro"),
+  // Refusal fallback: requested Sonnet 5.5 declined mid-stream, Opus 4.8
+  // served — message.model still names the requested model, the top-level
+  // usage is the served attempt, so it must bill at Opus 4.8 5/25 = 30 and be
+  // attributed to it. The declined "message" item is NOT added.
+  A("2026-09-29T11:00:00.000Z", "fb", "claude-sonnet-5-5", { iterations: [
+    { type: "message", model: "claude-sonnet-5-5", input_tokens: 1000000, output_tokens: 5 },
+    { type: "fallback_message", model: "claude-opus-4-8", input_tokens: 1000000, output_tokens: 1000000 },
+  ] }),
+  // An ordinary turn repeats its usage in one "message" item: counted ONCE (12).
+  A("2026-09-29T12:00:00.000Z", "plain", "claude-sonnet-5-5", { iterations: [
+    { type: "message", input_tokens: 1000000, output_tokens: 1000000 } ] }),
+];
+fs.writeFileSync(cl + "/projects/ds/s.jsonl", lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+// Codex: [model, uncached in, out, cached, tier] per turn, via
+// thread_settings_applied snapshots like the v1.31 rollout above.
+const iso = (ms) => new Date(ms).toISOString();
+const roll = (sid, base, turns) => {
+  const out = [{ timestamp: iso(base - 60e3), type: "session_meta", payload: { session_id: sid, cwd: "/p" } }];
+  turns.forEach(([m, inp, o, cached, tier], i) => {
+    const t = base + (i + 1) * 60e3;
+    out.push({ timestamp: iso(t - 10e3), type: "event_msg", payload: { type: "thread_settings_applied",
+      thread_settings: Object.assign({ model: m, model_provider_id: "openai" }, tier ? { service_tier: tier } : {}) } });
+    out.push({ timestamp: iso(t), type: "turn_context", payload: { turn_id: sid + "-t" + i, model: m } });
+    const u = { input_tokens: inp + cached, cached_input_tokens: cached, output_tokens: o, total_tokens: inp + cached + o };
+    out.push({ timestamp: iso(t + 30e3), type: "event_msg", payload: { type: "token_count", info: { last_token_usage: u } } });
+  });
+  return out.map((l) => JSON.stringify(l)).join("\n") + "\n";
+};
+// Tue 2026-09-29 11:00Z onward = DeepSeek off-peak (after 10:00Z).
+fs.writeFileSync(cx + "/sessions/2026/09/29/rollout-a.jsonl", roll("cx-a", Date.parse("2026-09-29T11:00:00.000Z"), [
+  // GPT-6.1 Sol standard: 100K in + 1M out + 100K cached (5% rate) = 0.2 + 10 + 0.01 = 10.21
+  ["gpt-6.1-sol", 100000, 1000000, 100000, null],
+  // GPT-6 Astra ULTRAFAST: 6x (1 + 50) = 306 (at fast 2x it would be 102)
+  ["gpt-6-astra", 100000, 1000000, 0, "ultrafast"],
+  // DeepSeek via Codex, off-peak: 1M in (+1M cached) + 1M out = 0.15 + 0.003 + 0.60 = 0.753
+  ["deepseek-flash", 1000000, 1000000, 1000000, null],
+]));
+// A second session for GPT-6.1 Sol FAST + long context (300K prompt > 272K):
+// 2 x (300K x $4 + 100K x $15) = 2 x (1.2 + 1.5) = 5.4, and an Ultrafast turn
+// on a row WITHOUT an ultrafast price (gpt-6-sol) prices standard: 0.2 + 10 = 10.2
+fs.writeFileSync(cx + "/sessions/2026/09/29/rollout-b.jsonl", roll("cx-b", Date.parse("2026-09-29T13:00:00.000Z"), [
+  ["us.openai.gpt-6.1-sol", 300000, 100000, 0, "priority"],
+  ["gpt-6-sol", 100000, 1000000, 0, "ultrafast"],
+]));
+' "$CL2" "$CX2"
+
+PORT2=4921
+CLAUDE_DIR=$CL2 CODEX_DIR=$CX2 GEMINI_DIR=$TMP/no-gemini PULSE_HOME=$PH2 \
+node "$ROOT/server.js" --port $PORT2 --no-update-check >"$TMP/srv2.log" 2>&1 &
+SRV2=$!
+sleep 2.5
+curl -s "http://127.0.0.1:$PORT2/api/summary" > "$TMP/out2.json"
+kill $SRV2 2>/dev/null
+
+node -e '
+const s = require(process.argv[1] + "/out2.json");
+const log = require("fs").readFileSync(process.argv[1] + "/srv2.log", "utf8");
+let fail = 0;
+const ok = (cond, msg) => { console.log((cond ? "PASS" : "FAIL") + "  " + msg); if (!cond) fail = 1; };
+const S = require(process.argv[2] + "/server.js");
+const near = (a, b) => typeof a === "number" && Math.abs(a - b) < 0.0005;
+// Per-entry costs straight from the price model (the sessions are 1 entry each).
+const sess = {};
+for (const r of s.recentSessions || []) sess[r.sessionId] = r;
+const cost = (sid) => sess[sid] ? sess[sid].cost : undefined;
+const WANT = { "ds-f-peak": 1.5, "ds-f-off": 0.75, "ds-f-hol": 0.75, "ds-f-wkd": 0.75, "ds-f-cache": 0.306,
+               "ds-v4-old": 1.76, "ds-v4-new": 0.75, "ds-p-aug": 1.305, "ds-p-now": 5.28,
+               "ds-fb": 30, "ds-plain": 12 };
+for (const [sid, want] of Object.entries(WANT)) ok(near(cost(sid), want), sid + " = $" + want + " (got " + cost(sid) + ")");
+const sep = ((s.periods || []).find((p) => p.key === "2026-09") || {}).byModel || {};
+ok(sep["claude-opus-4-8"] && near(sep["claude-opus-4-8"].cost, 30), "refusal fallback is attributed to the SERVING model (claude-opus-4-8 = 30)");
+ok(sep["claude-sonnet-5-5"] && near(sep["claude-sonnet-5-5"].cost, 12), "the requested model keeps only its own ordinary turn (12)");
+const cx = { "gpt-6.1-sol": 10.21, "gpt-6-astra": 306, "deepseek-flash": 0.753 + 1.5 + 0.75 * 3 + 0.306,
+             "us.openai.gpt-6.1-sol": 5.4, "gpt-6-sol": 10.2 };
+for (const [m, want] of Object.entries(cx)) ok(sep[m] && near(sep[m].cost, want), "Sep " + m + " = $" + want.toFixed(4) + " (got " + (sep[m] ? sep[m].cost.toFixed(4) : "missing") + ")");
+// Ultrafast is fast-mode spend: premium = Astra (306 - 51) + 6.1 Sol fast (5.4 - 2.7) = 257.7
+const fp = ((s.periods || []).find((p) => p.key === "2026-09") || {}).speedSpend;
+ok(fp && near(fp.fastPremium, 257.7), "fast premium includes the Ultrafast premium: 255 + 2.7 = 257.7 (got " + (fp && fp.fastPremium) + ")");
+// Cache economics on DeepSeek (Claude path): 1M reads at peak saved 0.30 - 0.006 = 0.294,
+// and a write premium of 0 (no write surcharge).
+const e = { provider: "anthropic", model: "deepseek-flash", ts: Date.parse("2026-09-29T03:00:00Z"), inputTokens: 0, outputTokens: 0,
+  cacheWrite5m: 1e6, cacheWrite1h: 1e6, cacheRead: 1e6, webSearches: 0, speed: "standard" };
+ok(near(S.costForEntry(e), 0.3 + 0.3 + 0.006), "DeepSeek 5m and 1h writes both bill as plain input: 0.606 (got " + S.costForEntry(e) + ")");
+// The list-price view never shows an off-peak rate.
+const view = s.pricing || {};
+ok(view["deepseek-v4-pro"] && view["deepseek-v4-pro"].input === 1.32, "pricing view shows the PEAK list price (got " + JSON.stringify(view["deepseek-v4-pro"]) + ")");
+const unk = log.split("\n").filter((l) => /unknown model/.test(l));
+ok(unk.length === 0, "every 2026-09-29 row prices silently (got " + unk.length + ": " + unk.join(" | ") + ")");
+process.exit(fail);
+' "$TMP" "$ROOT"
+RES2=$?
+[ $RES -eq 0 ] && RES=$RES2
 echo "---- exit $RES"
 exit $RES

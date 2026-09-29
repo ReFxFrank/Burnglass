@@ -248,6 +248,8 @@ export function prettyModel(model) {
       : 'GPT ' + [v, ...rest].map(cap).join(' ');
   }
   if (m.startsWith('glm-')) return 'GLM-' + m.slice(4);
+  // deepseek-v4-pro → "DeepSeek V4 Pro", deepseek-flash → "DeepSeek Flash"
+  if (m.startsWith('deepseek-')) return 'DeepSeek ' + m.slice(9).split('-').map((p) => (/^v\d/.test(p) ? p.toUpperCase() : cap(p))).join(' ');
   if (m.startsWith('gemini-')) return 'Gemini ' + m.slice(7).split('-').map(cap).join(' ');
   return m;
 }

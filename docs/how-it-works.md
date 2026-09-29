@@ -67,8 +67,8 @@ Your own agent can be added as a [custom source](custom-sources.md).
 
 Every entry is priced at its provider's **API list price**, at the rate in force on the
 entry's own date. The rates live in three commented tables near the top of `server.js`:
-`PRICING` (Anthropic, plus Z.ai GLM models used through Claude Code), `PRICING_OPENAI` and
-`PRICING_GOOGLE`.
+`PRICING` (Anthropic, plus Z.ai GLM and DeepSeek models used through Claude Code),
+`PRICING_OPENAI` and `PRICING_GOOGLE`.
 
 **Claude:**
 
@@ -81,17 +81,30 @@ entry's own date. The rates live in three commented tables near the top of `serv
 
 Dated ids and Bedrock / Vertex ids price as their base model.
 
+**Refusal fallback:** when a model declines a request and another model answers it
+(Claude Code ≥ 2.1.285 lets the API do that), the turn is billed and listed under the
+model that **answered**, read from the transcript's `usage.iterations`.
+
 **OpenAI (Codex):** list prices including the cached-input discount, the cache-write rate
 where OpenAI publishes one, the >272K-token long-context tier on the models that have one, and **Fast mode** with each
-model's published multiplier. The Codex TUI runs GPT-6 Sol and Luna on Fast by default.
+model's published multiplier. **Ultrafast** (`service_tier: "ultrafast"`, GPT-6 Astra only)
+costs 6× the standard rates and counts as fast-mode spend. The Codex TUI runs GPT-6 Sol and
+Luna on Fast by default; GPT-6.1 Sol (the default model since Codex 0.159.1) starts on Standard.
 Fast mode is priced only where the rollout records the tier, and Codex doesn't record it
 for a brand-new session until it's resumed, compacted or its settings change. Until then,
 those turns price at standard: Burnglass can under-count, but it never guesses high.
 
 **Google Gemini:** Gemini API list prices, with cached input at 10% of the input rate.
 
+**DeepSeek** (through Claude Code's `ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic`,
+or as a Codex model provider): DeepSeek's list prices, with cache hits at their own rate and
+no cache-write charge. DeepSeek bills **half price off-peak**: peak is 01:00–04:00 and
+06:00–10:00 UTC, Monday to Friday, except Chinese public holidays. Burnglass applies that per
+entry, from the entry's own timestamp. The holiday list covers 2026; a year that isn't listed
+yet prices its holidays at peak.
+
 **Unknown models** fall back to a default price and are logged once in the server log. An
-unpriced point release (for example a new `claude-*-5-5`) borrows its parent's rate and is
+unpriced point release (for example a new `claude-sonnet-5-6`) borrows its parent's rate and is
 logged too, so a gap is never silent.
 
 **Price changes** reach every day that's still in your logs, and the archive heals on
@@ -109,7 +122,8 @@ The **Spend** section's strip shows:
 
 ## Costs are estimates, not a bill
 
-Costs are computed at each provider's API list prices (Anthropic, OpenAI, Google, Z.ai).
+Costs are computed at each provider's API list prices (Anthropic, OpenAI, Google, Z.ai,
+DeepSeek).
 On a Pro / Max or ChatGPT subscription they express your **relative** usage (which
 sessions, models and time windows are heavy), not an amount you'll be charged.
 
@@ -130,7 +144,9 @@ ultracode) and when fast mode was used, with **zero setup**:
 - For older sessions, Burnglass reads the `/effort` commands you typed (including the
   interactive picker's confirmation) straight from the transcripts, **retroactively**.
 - `/effort ultracode`, or typing `ultracode` in a prompt, flags the session ULTRA
-  (ultracode is never recorded as data).
+  (ultracode is never recorded as data). Since Claude Code 2.1.284 Ultracode is its own
+  toggle: `/effort ultracode off` turns it off, and changing the level leaves it on.
+  Older transcripts keep their old meaning, where another level ended it.
 - Codex effort comes from each turn's context in the rollout.
 - A session that never set a level shows no chip. Burnglass won't guess, and `auto` /
   `default` never become chips.

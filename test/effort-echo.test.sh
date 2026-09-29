@@ -92,5 +92,98 @@ ok(T2 && (T2.efforts || []).includes("medium") && (T2.efforts || []).includes("h
 process.exit(fail);
 ' "$TMP"
 RES=$?
+
+# ---- Claude Code >= 2.1.284: Ultracode is its own toggle ------------------
+# `/effort ultracode [on|off]` flips it without touching the level, and a level
+# change leaves it alone. Old-era transcripts (no version / < 2.1.284) keep the
+# old meaning: ultracode was a level and any other level ended it.
+mkdir -p "$TMP/t2/projects/demo"
+node -e '
+const fs = require("fs");
+const path = require("path");
+const S = require(process.argv[1] + "/server.js");
+let fail = 0;
+const ok = (cond, msg) => { console.log((cond ? "PASS" : "FAIL") + "  " + msg); if (!cond) fail = 1; };
+const J = JSON.stringify;
+
+// parseEffortArgs
+ok(J(S.parseEffortArgs("ultracode off", true)) === J({ ultracode: false, toggle: true }), "args: ultracode off turns it OFF (toggle era)");
+ok(J(S.parseEffortArgs("ultracode on", true)) === J({ ultracode: true, toggle: true }), "args: ultracode on");
+ok(J(S.parseEffortArgs("ultracode", true)) === J({ ultracode: true, toggle: true }), "args: bare ultracode = on");
+ok(S.parseEffortArgs("ultracode off now", true) === null, "args: extra words are rejected like Claude Code does");
+ok(S.parseEffortArgs("ultracode maybe", true) === null, "args: unknown toggle value is rejected");
+ok(J(S.parseEffortArgs("High", true)) === J({ effort: "high", toggle: true }), "args: a level leaves ultracode unchanged (toggle era)");
+ok(J(S.parseEffortArgs("auto", true)) === J({ effort: null, toggle: true }), "args: auto clears the level only");
+ok(J(S.parseEffortArgs("ultracode off", false)) === J({ effort: null, ultracode: true }), "args: old era keeps the old meaning");
+ok(J(S.parseEffortArgs("max", false)) === J({ effort: "max", ultracode: false }), "args: old era level ends ultracode");
+ok(S.parseEffortArgs("banana", true) === null, "args: unknown level ignored");
+
+// parseEffortStdout
+const on = "Ultracode on (this session only): dynamic workflow orchestration. Effort stays high.";
+ok(J(S.parseEffortStdout(on, true)) === J({ ultracode: true, toggle: true }), "echo: Ultracode on (effort unchanged)");
+ok(J(S.parseEffortStdout("Ultracode off. Effort stays xhigh.", true)) === J({ ultracode: false, toggle: true }), "echo: Ultracode off");
+ok(J(S.parseEffortStdout("Set effort level to high (this session only): Deeper reasoning · Ultracode on", true)) === J({ effort: "high", toggle: true, ultracode: true }), "echo: picker level + trailing Ultracode on");
+ok(J(S.parseEffortStdout("Set effort level to low (this session only): Fast · Ultracode off", true)) === J({ effort: "low", toggle: true, ultracode: false }), "echo: picker level + trailing Ultracode off");
+ok(J(S.parseEffortStdout("Effort level set to auto · Ultracode off", true)) === J({ effort: null, toggle: true, ultracode: false }), "echo: auto + Ultracode off");
+ok(J(S.parseEffortStdout("Set effort level to medium (this session only)", true)) === J({ effort: "medium", toggle: true }), "echo: a plain level leaves ultracode unchanged (toggle era)");
+ok(S.parseEffortStdout("Ultracode on (this session only)", false) === null, "echo: the toggle echo is not parsed in an old-era record");
+ok(J(S.parseEffortStdout("Set effort level to high (this session only)", false)) === J({ effort: "high", ultracode: false }), "echo: old era unchanged");
+ok(S.parseEffortStdout("why is Ultracode on", true) === null, "echo: not anchored at the start -> nothing");
+
+// End to end through parseFile + mergeModes + annotateModes.
+const now = Date.parse("2026-09-29T12:00:00Z");
+const iso = (m) => new Date(now - m * 60e3).toISOString();
+const U = (min, sid, content, version) => Object.assign({ type: "user", timestamp: iso(min), sessionId: sid, cwd: "/p",
+  message: { role: "user", content } }, version ? { version } : {});
+const A = (min, sid, id, effort, version) => Object.assign({ type: "assistant", timestamp: iso(min), sessionId: sid, requestId: "r" + id, cwd: "/p",
+  message: { id: "m" + id, model: "claude-opus-5-5", usage: { input_tokens: 10, output_tokens: 10 } } }, effort ? { effort } : {}, version ? { version } : {});
+const CMD = (a) => "<command-name>/effort</command-name>\n<command-message>effort</command-message>\n<command-args>" + a + "</command-args>";
+const OUT = (t) => "<local-command-stdout>" + t + "</local-command-stdout>";
+const V = "2.1.285", OLD = "2.1.283";
+const lines = [
+  // NEW: on -> level change keeps it -> off
+  U(60, "new", CMD("ultracode on"), V), U(59, "new", OUT(on), V),
+  A(58, "new", 1, "high", V),
+  U(50, "new", CMD("max"), V), U(49, "new", OUT("Set effort level to max (this session only)"), V),
+  A(48, "new", 2, "max", V),
+  U(40, "new", CMD("ultracode off"), V), U(39, "new", OUT("Ultracode off. Effort stays max."), V),
+  A(38, "new", 3, "max", V),
+  // picker turns it on alongside a level
+  U(30, "new", CMD(""), V), U(29, "new", OUT("Set effort level to low (this session only): Fast · Ultracode on"), V),
+  A(28, "new", 4, "low", V),
+  // OLD era (2.1.283): ultracode then a level ends it; "ultracode off" args = ON (old grammar had no off)
+  U(60, "old", CMD("ultracode"), OLD), A(58, "old", 5, "xhigh", OLD),
+  U(50, "old", CMD("max"), OLD), A(48, "old", 6, "max", OLD),
+  // No version field at all = old era
+  U(60, "nov", CMD("ultracode"), null), A(58, "nov", 7, null, null),
+  U(50, "nov", OUT("Set effort level to high (this session only)"), null), A(48, "nov", 8, null, null),
+];
+const f = path.join(process.argv[2], "projects/demo/t.jsonl");
+fs.writeFileSync(f, lines.map((l) => J(l)).join("\n") + "\n");
+const r = S.parseFile(f);
+const ev = r.effortEvents;
+ok(ev.filter((e) => e.sessionId === "new").every((e) => e.toggle === true), "parseFile: toggle-era events are marked");
+ok(ev.filter((e) => e.sessionId !== "new").every((e) => !e.toggle), "parseFile: old-era events are not");
+// A hook sidecar record (ultracode false = absence) after the toggle must not end it.
+const side = { new: [{ ts: now - 53 * 60e3, effort: "max", ultracode: false }] };
+const modes = S.mergeModes(side, ev);
+const entries = r.entries.slice().sort((a, b) => a.ts - b.ts);
+S.annotateModes(entries, modes, new Set(r.ultracodeSessions || []));
+const at = (id) => { const e = entries.find((x) => x.key === "m:m" + id); return e ? [e.effort, e.ultracode] : null; };
+ok(J(at(1)) === J(["high", true]), "new: ultracode on keeps the recorded level (high + ULTRA) - got " + J(at(1)));
+ok(J(at(2)) === J(["max", true]), "new: a level change leaves ultracode ON (max + ULTRA) - got " + J(at(2)));
+ok(J(at(3)) === J(["max", false]), "new: /effort ultracode off turns it OFF - got " + J(at(3)));
+ok(J(at(4)) === J(["low", true]), "new: picker level + Ultracode on - got " + J(at(4)));
+ok(J(at(5)) === J(["xhigh", true]), "old: ultracode level flags ULTRA - got " + J(at(5)));
+ok(J(at(6)) === J(["max", false]), "old: a later level ends ultracode (old meaning kept) - got " + J(at(6)));
+ok(J(at(7)) === J([null, true]), "no version: old era, ultracode on - got " + J(at(7)));
+ok(J(at(8)) === J(["high", false]), "no version: level echo ends ultracode - got " + J(at(8)));
+// Without the toggle-era marker a sidecar false still acts as a full snapshot (old behaviour).
+const oldModes = S.mergeModes({ old: [{ ts: now - 55 * 60e3, effort: null, ultracode: false }] }, ev.filter((e) => e.sessionId === "old"));
+ok(oldModes.old.some((m) => m.ultracode === false && m.effort === null), "old: sidecar snapshot semantics unchanged");
+process.exit(fail);
+' "$ROOT" "$TMP/t2"
+RES2=$?
+[ $RES -eq 0 ] && RES=$RES2
 echo "---- exit $RES"
 exit $RES
