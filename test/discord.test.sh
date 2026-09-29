@@ -305,7 +305,7 @@ ok(hActs.length >= 2 && hActs[0].payload.args.activity.assets.large_image === "h
   ok(dflt.claudeWorking === D.working && dflt.claude === D.idle && dflt.codex === "codex" && dflt.idle === "pulse",
      "I: payload.discord.images.defaults says what an empty slot shows (additive)");
 }
-// ---- J: Unix socket search follows Discord's documented order, incl. TMP / TEMP
+// ---- J: Unix socket search follows the documented Discord order, incl. TMP / TEMP
 if (process.platform !== "win32") {
   const { discordIpcCandidates: cands } = require(process.argv[3] + "/server.js");
   const keep = { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR, TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP,
