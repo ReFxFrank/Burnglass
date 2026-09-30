@@ -16,7 +16,9 @@ mkdir -p "$CL/projects/demo" "$CX/sessions/2026/07/15" "$PH"
 # must emit an RFC-4180 quoted cell.
 node -e '
 const fs = require("fs"); const now = Date.now();
-const iso = (m) => new Date(now - m * 60e3).toISOString();
+// Never before local midnight: just after 00:00 "20 minutes ago" is yesterday.
+const day0 = new Date(now).setHours(0, 0, 0, 0);
+const iso = (m) => new Date(Math.max(now - m * 60e3, day0)).toISOString();
 fs.writeFileSync(process.argv[1] + "/projects/demo/s.jsonl", [
   { type: "user", timestamp: iso(20), sessionId: "s1", cwd: "/p",
     message: { role: "user", content: "Fix the \"big, scary\" bug" } },
@@ -30,7 +32,8 @@ fs.writeFileSync(process.argv[1] + "/projects/demo/s.jsonl", [
 # whole request bills at 2x input / 1.5x output: 0.40 + 1.80 = $2.20 today.
 node -e '
 const fs = require("fs"); const now = Date.now();
-const iso = (ms) => new Date(ms).toISOString();
+const day0 = new Date(now).setHours(0, 0, 0, 0); // "today" entries stay today after midnight
+const iso = (ms) => new Date(Math.max(ms, day0)).toISOString();
 const lines = [
   { timestamp: iso(now - 3600e3), type: "session_meta", payload: { session_id: "cx1", cwd: "/p" } },
   { timestamp: iso(now - 30 * 60e3), type: "turn_context",

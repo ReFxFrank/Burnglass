@@ -65,7 +65,10 @@ SECRET="msy-SECRET-KEY-do-not-leak-4711"
 # the status line at an exe that no longer exists (read-only check).
 node -e '
 const fs = require("fs"); const now = Date.now();
-const A = (ms, sid, id, out) => ({ type: "assistant", timestamp: new Date(ms).toISOString(), sessionId: sid,
+// Never before local midnight: an hour ago is YESTERDAY just after 00:00, and a
+// past day gets sealed into a history month file (M7 counts those).
+const day0 = new Date(now).setHours(0, 0, 0, 0);
+const A = (ms, sid, id, out) => ({ type: "assistant", timestamp: new Date(Math.max(ms, day0)).toISOString(), sessionId: sid,
   requestId: "r" + id, cwd: "/p", message: { id: "m" + id, model: "claude-fable-5", usage: { input_tokens: 0, output_tokens: out } } });
 fs.writeFileSync(process.argv[1] + "/projects/demo/s.jsonl",
   [A(now - 3600e3, "s1", 1, 100000), A(now - 3500e3, "s2", 2, 200000)].map(JSON.stringify).join("\n") + "\n");
