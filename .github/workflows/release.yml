@@ -332,8 +332,10 @@ jobs:
             executable. Usage data never leaves your machine.
             Network calls: the GitHub version check and public download/star counters (on by default;
             `--no-update-check` disables both) and, only if you turn them on, the account meters
-            (`api.anthropic.com`, `chatgpt.com`) and Meshy credits (`api.meshy.ai`). Discord presence
-            (opt-in) talks only to the Discord desktop app's local socket.
+            (`api.anthropic.com`, `chatgpt.com`) and Meshy credits (`api.meshy.ai`), and, only while
+            you show amounts in a non-USD currency without a fixed rate, the European Central Bank's
+            public daily exchange rates (nothing is sent). Discord presence (opt-in) talks only to
+            the Discord desktop app's local socket.
 
             See the [README](${{ github.server_url }}/${{ github.repository }}#readme) for every feature
             and the [CHANGELOG](${{ github.server_url }}/${{ github.repository }}/blob/main/CHANGELOG.md)
