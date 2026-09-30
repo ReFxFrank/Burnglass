@@ -26,6 +26,7 @@ import { SpendChart, Sparkline } from '../charts.jsx';
 import {
   money, tokens, num, srcLabel, shortDate, localDateStr, exportHref, EXPORT_SETS,
   useMedia, BP,
+  displayCurrency,
 } from '../lib.js';
 import './Spend.css';
 
@@ -86,7 +87,8 @@ function SpendPanel({ data, period, colorMap, srcFilter, scope }) {
   const legendSrcs = (period.sources || []).length ? period.sources : Object.keys(period.bySource || {});
 
   const exportItems = [
-    { header: `CSV · ${period.label} · ${scope}` },
+    // Exports are data: amounts stay US dollars (the columns say cost_usd).
+    { header: `CSV · ${period.label} · ${scope}${displayCurrency().code !== 'USD' ? ' · amounts in USD' : ''}` },
     ...EXPORT_SETS.map(([label, set]) => ({
       label, hint: set, href: exportHref({ format: 'csv', data: set }, period.key, srcFilter), download: '',
     })),

@@ -120,6 +120,9 @@ Set a spend target inline (the **Edit** button on the budget card) or with `budg
 - The gauge turns amber at 80% of the target and red once the target is reached. An
   amount of 0 clears the budget.
 - The budget counts the sources selected in the filter.
+- The amount is in your [display currency](configuration.md#display-currency) and stays
+  in it: a €400 budget reads €400 every day, while the comparison runs in US dollars at
+  today's rate.
 
 ## Plan value
 
@@ -133,7 +136,8 @@ It always covers **all sources**, because your plan doesn't change with the filt
 Every tool is repriced at list prices (Continue's local estimates and Cline's and Roo's
 own recorded costs are folded in as they are), so it's a measure of value, not a bill.
 A month under 1× is shown neutrally, never in red. Setting the amount to 0 clears both
-the cost and the label.
+the cost and the label. Enter the price in your display currency, the way your plan bills
+you; the multiple doesn't depend on the currency.
 
 ## The 5-hour block
 

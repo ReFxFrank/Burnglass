@@ -9,7 +9,8 @@
 //               daemon, packaged, update{status,latest,checkedAt,installSupported,releasesUrl,error},
 //               history{enabled,archivedDays}, meters{enabled,status,fetchedAt},
 //               discord{enabled,status,error,images{…6 slots}}, agentState,
-//               meshy{enabled,hasKey,status,fetchedAt}, tray/strip/startup{supported,enabled[,path]}
+//               meshy{enabled,hasKey,status,fetchedAt}, tray/strip/startup{supported,enabled[,path]},
+//               currency{code,rate,prefix,digits,source,asOf,status,requested,supported[],ecb?,typedRate?}
 //   gfx         { mode, lite, set } → Graphics <Seg>
 //   theme       { pref, effective, set } → Theme <Seg>
 //   notify      { permission, request } → "Desktop alerts" row
@@ -22,12 +23,16 @@
 // /api/discord/enable|disable, /api/discord/images (JSON body, ONLY the edited
 // slots), /api/meshy/enable|disable (+ key in the BODY via MeshyKeyForm),
 // /api/tray/…, /api/strip/…, /api/startup/enable|disable,
+// /api/currency/set?code[&rate] (then lib.requestRefresh → a fresh payload),
 // /api/shutdown. Logs: lib.useLogs → GET /api/logs every 10 s.
 // =============================================================================
 import { useEffect, useId, useRef, useState } from 'react';
 import { Section, Panel, Btn, Badge, Switch, Seg, Field, Input, InfoTip, StopButton, cx } from '../ui.jsx';
 import { Icon } from '../icons.jsx';
-import { BRAND, FORMER_BRAND, STRIP_EXE_NAME, exeName, launchInfo, homePath, BP, ago, clockTime, dur, hm, postJson, useLogs, useMedia } from '../lib.js';
+import {
+  BRAND, FORMER_BRAND, STRIP_EXE_NAME, exeName, launchInfo, homePath, BP, ago, clockTime, dur, hm, postJson, useLogs, useMedia,
+  setDisplayCurrency, requestRefresh,
+} from '../lib.js';
 import { integrationRows } from '../notices.js';
 import { MeshyKeyForm } from './Meshy.jsx';
 import './System.css';
@@ -61,6 +66,150 @@ function useOverrides() {
 }
 
 const agentWord = (a) => (a ? (a.provider === 'codex' ? 'Codex' : 'Claude') + ' is ' + (a.state === 'waiting' ? 'waiting on you' : a.state) : null);
+
+// =============================================================================
+// Currency (Appearance): what money is SHOWN in. Costs stay US dollars in the
+// payload; the server converts with the ECB's daily reference rates (fetched
+// only while a non-USD currency is in use) or a rate the user types.
+// =============================================================================
+const OTHER = '__other';
+function currencyName(code) {
+  try { return new Intl.DisplayNames(['en'], { type: 'currency' }).of(code) || code; } catch (_) { return code; }
+}
+function rateText(r) {
+  if (!(r > 0)) return '';
+  return r >= 100 ? r.toFixed(2) : r >= 1 ? r.toFixed(4) : r.toPrecision(4);
+}
+function CurrencySetting({ currency }) {
+  const cur = currency || null;
+  const supported = (cur && Array.isArray(cur.supported) && cur.supported.length ? cur.supported : ['USD']);
+  const requested = (cur && cur.requested) || 'USD';
+  const listed = supported.includes(requested);
+  const typed = cur && cur.typedRate > 0 ? cur.typedRate : null;
+  const [pick, setPick] = useState(null);      // a select choice not saved yet (OTHER, or a code while saving)
+  const [code, setCode] = useState('');        // "Other" code
+  const [fixed, setFixed] = useState(null);    // null = follow the payload (typed rate on/off)
+  const [rate, setRate] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const selId = useId(), rateId = useId(), codeId = useId();
+  if (!cur) return null; // an older server: nothing to set
+
+  const selected = pick || (listed ? requested : OTHER);
+  const other = selected === OTHER;
+  const otherCode = other ? (pick === OTHER ? code : requested).toUpperCase() : '';
+  const useFixed = other || (fixed != null ? fixed : !!typed);
+  const target = other ? otherCode : selected;
+
+  async function apply(nextCode, nextRate) {
+    setBusy(true); setMsg(null);
+    try {
+      const r = await postJson('/api/currency/set?code=' + encodeURIComponent(nextCode)
+        + (nextRate != null ? '&rate=' + encodeURIComponent(nextRate) : ''));
+      if (r.currency) setDisplayCurrency(r.currency);
+      requestRefresh();
+      setPick(null); setFixed(null); setRate(''); setCode('');
+      if (r.currency && r.currency.status !== 'ok') {
+        setMsg({ bad: true, text: r.currency.status === 'pending' ? 'Fetching exchange rates…' : 'No exchange rate yet — amounts stay in US dollars for now.' });
+      }
+    } catch (e) {
+      setMsg({ bad: true, text: 'Couldn’t change the currency: ' + e.message });
+    }
+    setBusy(false);
+  }
+  function onSelect(v) {
+    setMsg(null);
+    if (v === OTHER) { setPick(OTHER); setCode(''); setRate(''); return; }
+    setPick(v);
+    apply(v, null); // a listed currency switches at once, on the ECB rates
+  }
+  const rateNum = Number(String(rate).replace(',', '.'));
+  const rateOk = rateNum > 0 && rateNum <= 1e7 && (!other || /^[A-Za-z]{3}$/.test(otherCode));
+  const current = cur.code !== 'USD'
+    ? (cur.source === 'manual'
+      ? `Fixed rate: 1 USD = ${rateText(cur.rate)} ${cur.code}`
+      : `1 USD = ${rateText(cur.rate)} ${cur.code} · ECB reference rate${cur.asOf ? ' of ' + cur.asOf : ''}`)
+    : requested !== 'USD'
+      ? (cur.status === 'pending' ? `Fetching exchange rates for ${requested}…` : `No rate for ${requested} yet — showing US dollars`
+        + (cur.ecb && cur.ecb.error ? ` (${cur.ecb.error})` : ''))
+      : null;
+
+  return (
+    <div className="setting cur-set">
+      <label className="setting-l" htmlFor={selId}>Currency</label>
+      <select
+        id={selId}
+        className="input cur-sel"
+        value={selected}
+        disabled={busy}
+        onChange={(e) => onSelect(e.target.value)}
+      >
+        {supported.map((c) => <option key={c} value={c}>{c} — {currencyName(c)}</option>)}
+        <option value={OTHER}>Other currency (type its rate)…</option>
+      </select>
+      {selected !== 'USD' ? (
+        <>
+          {!other ? (
+            <label className="cur-fixed">
+              <input
+                type="checkbox"
+                checked={useFixed}
+                disabled={busy}
+                onChange={(e) => {
+                  setMsg(null);
+                  if (!e.target.checked && typed) { apply(target, null); return; } // back to the ECB rates
+                  setFixed(e.target.checked);
+                  setRate(e.target.checked && typed ? rateText(typed) : e.target.checked ? rateText(cur.rate) : '');
+                }}
+              />
+              <span>Use a fixed rate instead of the ECB’s daily rate</span>
+            </label>
+          ) : null}
+          {useFixed ? (
+            <div className="cur-rate">
+              {other ? (
+                <input
+                  id={codeId}
+                  className="input mono cur-code"
+                  type="text"
+                  maxLength={3}
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="ARS"
+                  aria-label="Currency code (ISO 4217)"
+                  value={pick === OTHER ? code : requested}
+                  disabled={busy}
+                  onChange={(e) => { setPick(OTHER); setCode(e.target.value.replace(/[^A-Za-z]/g, '').toUpperCase()); }}
+                />
+              ) : null}
+              <label htmlFor={rateId} className="cur-eq">1 USD =</label>
+              <input
+                id={rateId}
+                className="input mono cur-num"
+                type="text"
+                inputMode="decimal"
+                autoComplete="off"
+                placeholder={typed ? rateText(typed) : '0.92'}
+                aria-label={'Units of ' + (target || 'the currency') + ' per US dollar'}
+                value={rate}
+                disabled={busy}
+                onChange={(e) => setRate(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter' && rateOk && !busy) apply(target, rateNum); }}
+              />
+              <span className="cur-eq">{target || '???'}</span>
+              <Btn size="sm" variant="primary" disabled={busy || !rateOk} onClick={() => apply(target, rateNum)}>{busy ? 'Saving…' : 'Save'}</Btn>
+            </div>
+          ) : null}
+        </>
+      ) : null}
+      <span className={cx('hint', msg && msg.bad && 'cur-bad')} role="status" aria-live="polite">
+        {msg ? msg.text : current ? current + '. ' : ''}
+        {msg ? null : <>Costs are computed in US dollars at list prices and converted for display — exports stay in USD.
+          {selected !== 'USD' && !useFixed ? ' Rates are the European Central Bank’s, downloaded about once a day while a non-USD currency is in use (nothing about you is sent).' : ''}</>}
+      </span>
+    </div>
+  );
+}
 
 // =============================================================================
 // Server column: facts, actions, restart hint, appearance
@@ -247,6 +396,7 @@ function ServerColumn({ data, gfx, theme, onStopped }) {
             />
           </div>
         ) : null}
+        <CurrencySetting currency={data.currency} />
         {gfx ? (
           <div className="setting">
             <span className="setting-l">Graphics</span>

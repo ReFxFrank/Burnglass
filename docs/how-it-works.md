@@ -130,6 +130,9 @@ sessions, models and time windows are heavy), not an amount you'll be charged.
 - Cline and Roo report their own recorded cost, which Burnglass uses as-is.
 - Continue's token counts are its own local estimates (badged `est`).
 - Custom sources are $0 unless their records carry a cost.
+- In another [display currency](configuration.md#display-currency), amounts are these US
+  dollar list prices converted at the ECB's daily rate (or your fixed rate), not what a
+  provider would bill you in that currency.
 
 Check current list prices with each provider (for Claude,
 [docs.claude.com](https://docs.claude.com)) before relying on absolute figures.

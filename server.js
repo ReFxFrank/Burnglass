@@ -51,7 +51,7 @@ const crypto = require('crypto');
 
 // Version — keep in sync with package.json (build/make-exe.mjs enforces this).
 // The constant keeps its v1 NAME: make-exe's drift check greps for it.
-const PULSE_VERSION = '2.0.2';
+const PULSE_VERSION = '2.1.0';
 const BRAND = 'Burnglass';
 
 // BURNGLASS_<NAME> wins; PULSE_<NAME> (the v1 spelling) stays a permanent,
@@ -3888,6 +3888,10 @@ function buildSummary(sourceFilter, opts) {
   // Community reach (public GitHub counters) — present only once fetched; the
   // fetch itself is scheduled alongside the update check and shares its opt-out.
   payload.reach = reachForPayload();
+  // Display currency (additive; every cost above and below stays USD). Keeps
+  // the ECB table fresh while a non-USD currency is in use.
+  maybeRefreshFx();
+  payload.currency = currencyForPayload();
   payload.meters = metersForPayload(background);
   // Codex official meters come from rate_limits snapshots already present in
   // the local rollout logs — no opt-in needed, nothing leaves the machine.
@@ -3914,7 +3918,7 @@ function buildSummary(sourceFilter, opts) {
   // notifications (and burn the once-per-day dedup) off a scope the wording
   // never mentions.
   if (!appliedFilter) {
-    const anomaly = computeSpendAnomaly(payload.periods, Date.now());
+    const anomaly = computeSpendAnomaly(payload.periods, Date.now(), payload.currency);
     if (anomaly) payload.alerts.unshift(anomaly);
   }
   // Discord Rich Presence status (opt-in) — state only, no work done here.
@@ -4004,7 +4008,7 @@ function anomalyConfig() {
   const m = isFinite(n) && n > 0 ? Math.max(1.5, n) : 3;
   return { enabled: c.anomalyAlerts === true, multiplier: m };
 }
-function computeSpendAnomaly(periods, now) {
+function computeSpendAnomaly(periods, now, cur) {
   const { enabled, multiplier } = anomalyConfig();
   if (!enabled || !alertsEnabled()) return null;
   const p = (periods || []).find((x) => x.key === 'last30');
@@ -4026,7 +4030,7 @@ function computeSpendAnomaly(periods, now) {
     kind: 'anomaly',
     provider: 'pulse',
     label: "Today's spend",
-    detail: 'today $' + today.toFixed(2) + ' — ' + ratio.toFixed(1) + '× your recent daily average ($' + baseline.toFixed(2) + ')',
+    detail: 'today ' + money2(today, cur) + ' — ' + ratio.toFixed(1) + '× your recent daily average (' + money2(baseline, cur) + ')',
     ratio, todayCost: today, baseline,
     threshold: multiplier,
     pct: null,
@@ -4041,14 +4045,17 @@ function computeSpendAnomaly(periods, now) {
 // month = current calendar month (resets on the 1st); week = trailing 7 days
 // (payload.week, rolling — no hard reset). Returns null when unset.
 // ---------------------------------------------------------------------------
+// A budget entered in another currency (budgetCurrency + budgetAmount) is
+// compared in USD at today's rate; `budget` keeps the USD value from when it
+// was set (the fallback without a rate, and what older versions read).
 function budgetConfig() {
   const c = readConfig();
-  const target = typeof c.budget === 'number' && isFinite(c.budget) && c.budget > 0 ? c.budget : null;
+  const b = storedUsd(c, 'budget', 'budgetCurrency', 'budgetAmount');
   const period = c.budgetPeriod === 'week' ? 'week' : 'month';
-  return { target, period };
+  return { target: b.usd, period, currency: b.currency, amount: b.amount };
 }
 function computeBudget(periods, week, now) {
-  const { target, period } = budgetConfig();
+  const { target, period, currency, amount } = budgetConfig();
   if (!target) return null;
   let spent = 0, resetsAt = null, label, projected = null;
   if (period === 'week') {
@@ -4072,7 +4079,8 @@ function computeBudget(periods, week, now) {
   }
   const pct = (spent / target) * 100;
   const state = pct >= 100 ? 'over' : pct >= 80 ? 'warn' : 'ok';
-  return { target, period, label, spent, pct, remaining: Math.max(0, target - spent), resetsAt, state, projected };
+  // currency + amount (additive) = the target as the user entered it.
+  return { target, period, label, spent, pct, remaining: Math.max(0, target - spent), resetsAt, state, projected, currency, amount };
 }
 
 // ---------------------------------------------------------------------------
@@ -4089,21 +4097,30 @@ function computeBudget(periods, week, now) {
 // version can't still hijack the terminal.
 const CONTROL_CHARS = /[\x00-\x1f\x7f-\x9f]/g;
 const stripControl = (s) => String(s).replace(CONTROL_CHARS, '');
+// Exact money in the display currency ("€12.40", "¥1,860"-style digits, no
+// grouping) for server-written text such as the spend-anomaly alert.
+function money2(v, cur) {
+  const c = usableCurrency(cur);
+  return (c ? c.prefix : '$') + (c ? v * c.rate : v).toFixed(c ? c.digits : 2);
+}
 // Plausible range for a monthly subscription. Guards against denormals at the
 // bottom (Infinity multipliers) and nonsense at the top.
 const PLAN_COST_MIN = 0.01, PLAN_COST_MAX = 1e6;
 function planConfig() {
   const c = readConfig();
-  const cost = typeof c.planCost === 'number' && isFinite(c.planCost) && c.planCost > 0 ? c.planCost : null;
+  // Same storage as the budget: planCost = USD, planCurrency + planAmount =
+  // the price as entered (a plan billed in euros follows the euro).
+  const p = storedUsd(c, 'planCost', 'planCurrency', 'planAmount');
+  const cost = p.usd;
   const label = cost && typeof c.planLabel === 'string' && c.planLabel ? c.planLabel : null;
-  return { cost, label };
+  return { cost, label, currency: p.currency, amount: p.amount };
 }
 const PLAN_MONTHS = 6;
 // periods must be the SAME period objects the dashboard shows (live + archive
 // already merged per cell) — the multiplier has to agree with the spend figures
 // on screen, and archive-backed months must count.
 function computePlanValue(periods, now) {
-  const { cost, label } = planConfig();
+  const { cost, label, currency, amount } = planConfig();
   const list = periods || [];
   const last30 = list.find((p) => p.key === 'last30');
   const spend30 = last30 ? last30.cost : 0;
@@ -4134,6 +4151,9 @@ function computePlanValue(periods, now) {
     spend30,
     multiplier: cost ? spend30 / cost : null,
     months,
+    // Additive: the price as the user entered it (cost stays USD).
+    currency: cost ? currency : null,
+    amount: cost ? amount : null,
   };
 }
 
@@ -4612,6 +4632,263 @@ function reachForPayload() {
     fetchedAt: reachState.fetchedAt,
     repo: UPDATE_REPO,
   };
+}
+
+// ---------------------------------------------------------------------------
+// DISPLAY CURRENCY — every cost Burnglass computes stays in US dollars, the
+// providers' list-price unit: every payload number, the history archive and
+// the CSV / JSON exports are USD, and the API shapes are frozen. A chosen
+// currency only changes how money is SHOWN: payload.currency (additive, in
+// /api/summary and slimmed in /api/statusline) tells every client — the
+// dashboard, the status line, --summary, Discord, the tray and the strip —
+// the code, the rate (display units per 1 USD), the text to put before a
+// number and how many decimals to use.
+//
+// Rates are the European Central Bank's public daily reference rates
+// (eurofxref-daily.xml, ~30 currencies, published each working day around
+// 16:00 CET). They are fetched ONLY while a non-USD currency is in use — for
+// display, or for a budget / plan entered in it — that a typed rate doesn't
+// cover, so a USD user never makes the call. A plain GET of a public file:
+// nothing about the user is sent. Only the server that owns its port fetches
+// (fxOwner) and keeps the last-good table in <home>/fx-rates.json (tmp +
+// rename), so a restart or an offline day keeps working; short-lived commands
+// only read that file. A typed rate (config currencyRate, for the display
+// currency only) needs no network at all and is the only way to show a
+// currency the ECB doesn't publish.
+// ---------------------------------------------------------------------------
+const FX_API_URL = envv('FX_API') || 'https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml';
+const FX_OK_MS = Number(envv('FX_CACHE_MS')) || 12 * 3600 * 1000;
+const FX_ERR_MS = Math.min(FX_OK_MS, 3600 * 1000);
+const FX_FILE_MAX = 64 * 1024;
+const FX_RATE_MIN = 1e-6, FX_RATE_MAX = 1e7;
+const CURRENCY_CODE = /^[A-Z]{3}$/;
+// The ECB's reference currencies (BGN left in 2026 when Bulgaria adopted the
+// euro). The picker offers these plus USD; any other ISO code needs a typed rate.
+const ECB_CURRENCIES = ['AUD', 'BRL', 'CAD', 'CHF', 'CNY', 'CZK', 'DKK', 'EUR', 'GBP', 'HKD', 'HUF', 'IDR', 'ILS',
+  'INR', 'ISK', 'JPY', 'KRW', 'MXN', 'MYR', 'NOK', 'NZD', 'PHP', 'PLN', 'RON', 'SEK', 'SGD', 'THB', 'TRY', 'ZAR'];
+const fxState = { rates: null, date: null, fetchedAt: 0, status: 'idle', error: null, nextAttemptAt: 0, loaded: false };
+let fxInFlight = false;
+let fxOwner = false; // the port owner (set in the listen callback) fetches + writes; others only read
+const fxWaiters = [];
+
+function fxCachePath() { return path.join(appHome(), 'fx-rates.json'); }
+function validFxRate(x) { return typeof x === 'number' && isFinite(x) && x >= FX_RATE_MIN && x <= FX_RATE_MAX; }
+function currencyCode(v) {
+  const s = typeof v === 'string' ? v.trim().toUpperCase() : '';
+  return CURRENCY_CODE.test(s) ? s : null;
+}
+// The configured display currency (USD when unset or malformed).
+function configCurrency(c) { return currencyCode(c && c.currency) || 'USD'; }
+
+// eurofxref-daily.xml → { date, rates } with rates per 1 EUR (EUR itself = 1).
+// Hand-parsed (zero dependencies): only three-letter codes and plain decimals
+// are accepted, and USD must be there — without it nothing converts.
+function parseEcbXml(xml) {
+  if (typeof xml !== 'string' || xml.length > 4 * FX_FILE_MAX) return null;
+  const t = /<Cube\s+time=['"](\d{4}-\d{2}-\d{2})['"]/.exec(xml);
+  const rates = { EUR: 1 };
+  const re = /<Cube\s+currency=['"]([A-Z]{3})['"]\s+rate=['"](\d+(?:\.\d+)?)['"]\s*\/>/g;
+  let m, n = 0;
+  while ((m = re.exec(xml)) && n < 64) {
+    const r = parseFloat(m[2]);
+    if (validFxRate(r)) { rates[m[1]] = r; n++; }
+  }
+  if (!t || !rates.USD) return null;
+  return { date: t[1], rates };
+}
+// A cached table from disk: re-validated field by field (it is only a cache —
+// anything odd is ignored and the rates are fetched again).
+function validFxTable(j) {
+  if (!j || j.v !== 1 || typeof j.date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(j.date)) return null;
+  if (!j.rates || typeof j.rates !== 'object' || Array.isArray(j.rates)) return null;
+  const rates = {};
+  let n = 0;
+  for (const k of Object.keys(j.rates)) {
+    if (!CURRENCY_CODE.test(k) || !validFxRate(j.rates[k]) || ++n > 64) return null;
+    rates[k] = j.rates[k];
+  }
+  if (!rates.USD || rates.EUR !== 1) return null;
+  const fetchedAt = typeof j.fetchedAt === 'number' && isFinite(j.fetchedAt) ? j.fetchedAt : 0;
+  return { date: j.date, rates, fetchedAt };
+}
+function loadFxCache() {
+  if (fxState.loaded) return;
+  fxState.loaded = true;
+  try {
+    const f = fxCachePath();
+    if (fs.statSync(f).size > FX_FILE_MAX) return;
+    const t = validFxTable(JSON.parse(fs.readFileSync(f, 'utf8')));
+    if (!t) return;
+    fxState.rates = t.rates;
+    fxState.date = t.date;
+    fxState.fetchedAt = t.fetchedAt;
+    fxState.status = 'ok';
+  } catch (_) { /* no cache yet */ }
+}
+function persistFxCache() {
+  const f = fxCachePath();
+  const tmp = f + '.tmp';
+  try {
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(tmp, JSON.stringify({ v: 1, source: 'ecb', date: fxState.date, fetchedAt: fxState.fetchedAt, rates: fxState.rates }) + '\n');
+    fs.renameSync(tmp, f);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch (_) {}
+    console.warn('[burnglass] could not save exchange rates: ' + e.message);
+  }
+}
+
+// Units of `code` per 1 USD, or null when there is no rate for it. A typed
+// rate applies to the display currency only (it names that currency's rate).
+function fxRateFor(code, cfg) {
+  if (code === 'USD') return { rate: 1, source: 'usd', asOf: null };
+  const c = cfg || readConfig();
+  if (code === configCurrency(c) && validFxRate(c.currencyRate)) return { rate: c.currencyRate, source: 'manual', asOf: null };
+  loadFxCache();
+  const r = fxState.rates;
+  if (r && r[code] > 0 && r.USD > 0) return { rate: r[code] / r.USD, source: 'ecb', asOf: fxState.date };
+  return null;
+}
+// The ECB currencies something configured needs a fetched rate for.
+function fxNeededCodes(cfg) {
+  const c = cfg || readConfig();
+  const display = configCurrency(c);
+  const out = new Set();
+  for (const code of [display, currencyCode(c.budgetCurrency), currencyCode(c.planCurrency)]) {
+    if (!code || code === 'USD' || !ECB_CURRENCIES.includes(code)) continue;
+    if (code === display && validFxRate(c.currencyRate)) continue;
+    out.add(code);
+  }
+  return out;
+}
+// Lazily keep the table fresh (payload builds call this; cheap when nothing
+// is needed or the table is recent). Never fetches outside the port owner.
+function maybeRefreshFx(cfg) {
+  if (!fxOwner) return;
+  loadFxCache();
+  if (!fxNeededCodes(cfg).size || fxInFlight) return;
+  const now = Date.now();
+  if (now < fxState.nextAttemptAt) return;
+  if (fxState.status === 'ok' && fxState.fetchedAt && now - fxState.fetchedAt < FX_OK_MS) return;
+  refreshFx();
+}
+function refreshFx(done) {
+  if (done) fxWaiters.push(done);
+  if (fxInFlight) return;
+  fxInFlight = true;
+  fetchUrl(FX_API_URL, { timeoutMs: 15000, headers: { Accept: 'application/xml, text/xml;q=0.9, */*;q=0.1' } }, (err, body) => {
+    fxInFlight = false;
+    const now = Date.now();
+    const t = err ? null : parseEcbXml(body);
+    if (t) {
+      fxState.rates = t.rates;
+      fxState.date = t.date;
+      fxState.fetchedAt = now;
+      fxState.status = 'ok';
+      fxState.error = null;
+      fxState.nextAttemptAt = now + FX_OK_MS;
+      persistFxCache();
+      console.log('[burnglass] exchange rates: ECB reference rates of ' + t.date + ' (' + Object.keys(t.rates).length + ' currencies)');
+    } else {
+      fxState.error = err ? err.message : 'unexpected response';
+      fxState.status = fxState.rates ? 'stale' : 'error';
+      fxState.nextAttemptAt = now + FX_ERR_MS;
+      console.warn('[burnglass] exchange rates: fetch failed (' + fxState.error + ')' +
+        (fxState.rates ? ' — keeping the ECB rates of ' + fxState.date : ''));
+    }
+    // New rates change every displayed amount — no memoized payload may outlive them.
+    summaryMemo = { at: 0, payload: null };
+    statuslineMemo = { at: 0, data: null };
+    for (const w of fxWaiters.splice(0)) { try { w(fxState); } catch (_) {} }
+  });
+}
+
+// How a currency is written: the symbol en-US uses ("€", "£", "¥", "CA$",
+// "CHF"), the text to put before a number (a letter symbol gets a space:
+// "CHF 12.00") and its usual decimals (JPY / KRW / ISK: 0).
+const _currencyInfo = new Map();
+function currencyInfo(code) {
+  if (_currencyInfo.has(code)) return _currencyInfo.get(code);
+  let symbol = code, digits = 2;
+  try {
+    const nf = new Intl.NumberFormat('en-US', { style: 'currency', currency: code });
+    const part = nf.formatToParts(1).find((p) => p.type === 'currency');
+    if (part && part.value) symbol = part.value;
+    const d = nf.resolvedOptions().maximumFractionDigits;
+    if (Number.isInteger(d) && d >= 0 && d <= 4) digits = d;
+  } catch (_) { /* unknown to ICU: the code itself, 2 decimals */ }
+  if (code === 'USD') { symbol = '$'; digits = 2; }
+  const info = { symbol, prefix: /[A-Za-z]$/.test(symbol) ? symbol + ' ' : symbol, digits };
+  if (_currencyInfo.size < 512) _currencyInfo.set(code, info);
+  return info;
+}
+// Every ISO code this Node knows (for validating a typed-rate currency).
+function knownCurrency(code) {
+  if (code === 'USD' || ECB_CURRENCIES.includes(code)) return true;
+  try { return Intl.supportedValuesOf('currency').includes(code); } catch (_) { return CURRENCY_CODE.test(code); }
+}
+
+// payload.currency. `code` is what amounts are SHOWN in: the configured
+// currency once it has a rate, else USD (status pending = the first ECB fetch
+// is still to come; unavailable = no rate: a fetch failed with nothing cached,
+// or a currency the ECB doesn't publish without a typed rate).
+function currencyForPayload(cfg) {
+  const c = cfg || readConfig();
+  const requested = configCurrency(c);
+  const fx = fxRateFor(requested, c);
+  const code = fx ? requested : 'USD';
+  const info = currencyInfo(code);
+  let status = 'ok';
+  if (!fx) {
+    const fetchable = ECB_CURRENCIES.includes(requested) && fxOwner;
+    status = fetchable && (fxInFlight || !fxState.error) ? 'pending' : 'unavailable';
+  }
+  const out = {
+    code, rate: fx ? fx.rate : 1, symbol: info.symbol, prefix: info.prefix, digits: info.digits,
+    source: fx ? fx.source : 'usd', asOf: fx ? fx.asOf : null, status, requested,
+    supported: ['USD', ...ECB_CURRENCIES],
+  };
+  if (fxState.date || fxState.error) {
+    out.ecb = { date: fxState.date, fetchedAt: fxState.fetchedAt || null, status: fxState.status, error: fxState.error };
+  }
+  if (validFxRate(c.currencyRate) && requested !== 'USD') out.typedRate = c.currencyRate;
+  return out;
+}
+// The fields a formatter needs (the status line / tray feed and --summary).
+function slimCurrency(cur) {
+  if (!cur || cur.code === 'USD') return null;
+  return { code: cur.code, rate: cur.rate, prefix: cur.prefix, digits: cur.digits };
+}
+// A currency block as received (from a server over HTTP, or a cached file) →
+// something safe to format with, else null (= USD).
+function usableCurrency(cur) {
+  if (!cur || typeof cur !== 'object' || !validFxRate(cur.rate) || typeof cur.prefix !== 'string') return null;
+  const prefix = cur.prefix.replace(CONTROL_CHARS, '').slice(0, 8);
+  if (!prefix) return null;
+  const digits = Number.isInteger(cur.digits) && cur.digits >= 0 && cur.digits <= 4 ? cur.digits : 2;
+  return { rate: cur.rate, prefix, digits };
+}
+// A stored amount entered in some currency (budget / plan): its USD value at
+// today's rate, else the USD snapshot taken when it was set.
+function storedUsd(c, usdKey, curKey, amountKey) {
+  const usd = typeof c[usdKey] === 'number' && isFinite(c[usdKey]) && c[usdKey] > 0 ? c[usdKey] : null;
+  const code = currencyCode(c[curKey]);
+  const amount = typeof c[amountKey] === 'number' && isFinite(c[amountKey]) && c[amountKey] > 0 ? c[amountKey] : null;
+  if (!usd) return { usd: null, currency: 'USD', amount: null };
+  if (!code || code === 'USD' || !amount) return { usd, currency: 'USD', amount: usd };
+  const fx = fxRateFor(code, c);
+  return { usd: fx ? amount / fx.rate : usd, currency: code, amount };
+}
+// A budget / plan amount the dashboard sent in `code` → the config patch that
+// stores it (USD snapshot + the amount as entered), or an error string.
+function amountPatch(amount, code, usdKey, curKey, amountKey) {
+  if (!amount) return { patch: { [usdKey]: null, [curKey]: null, [amountKey]: null } };
+  if (code === 'USD') return { patch: { [usdKey]: amount, [curKey]: null, [amountKey]: null }, usd: amount };
+  const fx = fxRateFor(code);
+  if (!fx) return { error: 'no exchange rate for ' + code + ' yet' };
+  const usd = amount / fx.rate;
+  if (!(usd > 0 && isFinite(usd))) return { error: 'amount out of range' };
+  return { patch: { [usdKey]: usd, [curKey]: code, [amountKey]: amount }, usd };
 }
 
 // ---------------------------------------------------------------------------
@@ -5980,8 +6257,14 @@ function discordConnect() {
   tryNext();
 }
 
-// $ and token formatting for the activity strings (server-side, tiny).
-function fmtMoney(v) { return '$' + (v >= 100 ? v.toFixed(0) : v.toFixed(2)); }
+// Money and token formatting for the activity strings, the status line and
+// --summary (server-side, tiny). `cur` = a payload.currency block (or its slim
+// form from the statusline feed); absent / unusable = USD.
+function fmtMoney(v, cur) {
+  const c = usableCurrency(cur);
+  const x = c ? v * c.rate : v;
+  return (c ? c.prefix : '$') + (x >= 100 ? x.toFixed(0) : x.toFixed(c ? c.digits : 2));
+}
 function fmtTok(v) {
   if (v >= 1e9) return (v / 1e9).toFixed(2) + 'B';
   if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
@@ -6330,7 +6613,7 @@ function buildDiscordActivity() {
     { label: 'All-time', tokens: s.totals.tokens, cost: s.totals.cost },
   ];
   const p = pages[Math.floor(Date.now() / discordRotateMs()) % pages.length];
-  const details = p.label + ': ' + fmtTok(p.tokens) + ' tokens · ' + fmtMoney(p.cost);
+  const details = p.label + ': ' + fmtTok(p.tokens) + ' tokens · ' + fmtMoney(p.cost, s.currency);
   // The large logo tracks who you're actively using: Claude → the Claude art,
   // Codex → the Codex art, idle → Pulse. Asset keys must exist in the Discord
   // application's Rich Presence art (upload images keyed claude / codex / pulse);
@@ -6528,6 +6811,8 @@ function statuslineData() {
     // Additive: the tray's warn/crit levels = the dashboard's alertThresholds,
     // so the icon, the meters and the notifications always agree.
     trayLevels: trayLevels(),
+    // Additive: how to show money (null = USD) — the status line and the tray.
+    currency: slimCurrency(s.currency),
     version: PULSE_VERSION,
   } : { today: null, trayEnabled: trayDesired !== null ? trayDesired : readConfig().tray === true, stripEnabled: readConfig().strip === true, version: PULSE_VERSION };
   statuslineMemo = { at: now, data: d };
@@ -7056,6 +7341,15 @@ function trayScript(port) {
     "  if ($p -ge $w) { return 'warn' }",
     "  return 'good'",
     '}',
+    // Today's spend in the dashboard's display currency (the feed's additive
+    // `currency`: prefix / rate per USD / decimals; absent = USD). Invariant
+    // culture, so a comma-decimal Windows locale never prints "12,50".
+    'function Format-BgMoney([double]$usd, $cur) {',
+    "  $p = '$'; $r = 1.0; $d = 2",
+    '  if ($cur -and $cur.prefix -and [double]$cur.rate -gt 0) { $p = [string]$cur.prefix; $r = [double]$cur.rate; $d = [int]$cur.digits }',
+    '  if ($d -lt 0 -or $d -gt 4) { $d = 2 }',
+    "  return $p + ([math]::Round($usd * $r, $d)).ToString('N' + $d, [System.Globalization.CultureInfo]::InvariantCulture)",
+    '}',
     // Left-click opens the mini overview as a chromeless app window (Edge is
     // on every Windows 11 box); falls back to the default browser.
     // Both catch LOCALLY (see the no-trap note at the top): a missing Edge
@@ -7101,7 +7395,7 @@ function trayScript(port) {
     '      $ni.Visible = $false; [System.Windows.Forms.Application]::Exit(); return',
     '    }',
     "    $t = 'Burnglass'",
-    "    if ($s.today) { $t = 'Burnglass - today $' + [math]::Round([double]$s.today.cost, 2) }",
+    "    if ($s.today) { $t = 'Burnglass - today ' + (Format-BgMoney ([double]$s.today.cost) $s.currency) }",
     '    $m = $s.meters',
     "    if ($m -and $m.claudeFiveHour -ne $null) { $t = $t + ' - 5h ' + $m.claudeFiveHour + '%' }",
     "    if ($m -and $m.claudeWeekly -ne $null) { $t = $t + ' - wk ' + $m.claudeWeekly + '%' }",
@@ -8617,6 +8911,34 @@ function startServer(port, host, opts) {
           : { ok: false, error: r.error, startup: startupForPayload() }));
         return;
       }
+      if (route === '/api/currency/set') {
+        if (!allowMutation(req, res)) return;
+        const q = url.parse(req.url, true).query || {};
+        const code = currencyCode(String(q.code || 'USD'));
+        const rawRate = q.rate == null || q.rate === '' ? null : Number(q.rate);
+        const bad = (msg) => {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: msg }));
+        };
+        if (!code || !knownCurrency(code)) return bad('unknown currency code');
+        if (rawRate != null && !validFxRate(rawRate)) return bad('rate must be between ' + FX_RATE_MIN + ' and ' + FX_RATE_MAX);
+        const rate = code === 'USD' ? null : rawRate;
+        // A currency the ECB doesn't publish can only be shown with a typed rate.
+        if (code !== 'USD' && rate == null && !ECB_CURRENCIES.includes(code)) {
+          return bad(code + ' is not in the ECB reference rates — type its rate (1 USD = … ' + code + ')');
+        }
+        const next = writeConfig({ currency: code === 'USD' ? null : code, currencyRate: rate });
+        console.log('[burnglass] display currency ' + code +
+          (code === 'USD' ? '' : rate != null ? ' (typed rate ' + rate + ' per USD)' : ' (ECB reference rates)') + ' from the dashboard');
+        const reply = () => {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, currency: currencyForPayload() }));
+        };
+        // Wait for the first rates so the dashboard can switch in one step.
+        if (fxOwner && fxNeededCodes(next).size && !fxRateFor(code, next)) return refreshFx(reply);
+        maybeRefreshFx(next);
+        return reply();
+      }
       if (route === '/api/budget/set') {
         if (!allowMutation(req, res)) return;
         const q = url.parse(req.url, true).query || {};
@@ -8624,10 +8946,18 @@ function startServer(port, host, opts) {
         const period = q.period === 'week' ? 'week' : 'month';
         // amount <= 0 / blank / NaN clears the budget.
         const target = isFinite(amount) && amount > 0 ? amount : null;
-        writeConfig({ budget: target, budgetPeriod: period });
-        console.log('[burnglass] budget ' + (target ? '$' + target + '/' + period : 'cleared') + ' from the dashboard');
+        // Additive: `currency` = what the amount is in (absent = USD, as before).
+        const code = q.currency == null || q.currency === '' ? 'USD' : currencyCode(String(q.currency));
+        const ap = code ? amountPatch(target, code, 'budget', 'budgetCurrency', 'budgetAmount') : { error: 'bad currency code' };
+        if (ap.error) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: ap.error }));
+          return;
+        }
+        writeConfig({ ...ap.patch, budgetPeriod: period });
+        console.log('[burnglass] budget ' + (target ? target + ' ' + code + '/' + period : 'cleared') + ' from the dashboard');
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, budget: target ? { target, period } : null }));
+        res.end(JSON.stringify({ ok: true, budget: target ? { target: ap.usd, period, currency: code, amount: target } : null }));
         return;
       }
       if (route === '/api/plan/set') {
@@ -8647,7 +8977,15 @@ function startServer(port, host, opts) {
           res.end(JSON.stringify({ error: 'amount must be between ' + PLAN_COST_MIN + ' and ' + PLAN_COST_MAX }));
           return;
         }
-        const planCost = clearing ? null : amount;
+        const planCode = q.currency == null || q.currency === '' ? 'USD' : currencyCode(String(q.currency));
+        const pp = planCode ? amountPatch(clearing ? null : amount, planCode, 'planCost', 'planCurrency', 'planAmount')
+          : { error: 'bad currency code' };
+        if (pp.error) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: pp.error }));
+          return;
+        }
+        const planCost = clearing ? null : pp.usd;
         // Strip C0/C1 control characters BEFORE the length slice (slicing first
         // could cut a multi-byte escape and leave a fragment). An unsanitized
         // label reaches the terminal via --summary OUTSIDE the colour gate, so
@@ -8655,8 +8993,8 @@ function startServer(port, host, opts) {
         // screen) even under NO_COLOR, and be replayed from ~/.burnglass/burnglass.log.
         const rawLabel = typeof q.label === 'string' ? q.label.replace(CONTROL_CHARS, '').trim() : '';
         const planLabel = planCost && rawLabel ? rawLabel.slice(0, 60) : null;
-        writeConfig({ planCost, planLabel });
-        console.log('[burnglass] plan ' + (planCost ? '$' + planCost + '/mo' + (planLabel ? ' (' + planLabel + ')' : '') : 'cleared') + ' from the dashboard');
+        writeConfig({ ...pp.patch, planLabel });
+        console.log('[burnglass] plan ' + (planCost ? amount + ' ' + planCode + '/mo' + (planLabel ? ' (' + planLabel + ')' : '') : 'cleared') + ' from the dashboard');
         // Echo the payload block, not just the config, so the caller can render
         // the new state without a second round trip. writeConfig busted the
         // summary memo, so this build already reflects the new plan. If the
@@ -8757,6 +9095,9 @@ function startServer(port, host, opts) {
     // this restart — or the file's removal when the meters are off. Only the
     // port owner does this, after the migration settled the home.
     restoreMetersCache();
+    // Only the port owner fetches exchange rates and writes fx-rates.json.
+    fxOwner = true;
+    maybeRefreshFx();
     // Packaged exe on Windows: open the dashboard for the user.
     if (seaApi && process.platform === 'win32' && (!opts || opts.open !== false) && LOOPBACK_HOSTS.has(host)) {
       openBrowser(port);
@@ -9615,10 +9956,10 @@ function formatStatusline(ctx, data) {
   }
 
   if (data && data.today) {
-    seg.push(dim('today ') + bold(fmtMoney(data.today.cost)));
+    seg.push(dim('today ') + bold(fmtMoney(data.today.cost, data.currency)));
     if (data.block) {
       const left = data.block.endsAt - Date.now();
-      seg.push(dim('5h ') + bold(fmtMoney(data.block.cost)) + (left > 0 ? dim(' ' + slDur(left)) : ''));
+      seg.push(dim('5h ') + bold(fmtMoney(data.block.cost, data.currency)) + (left > 0 ? dim(' ' + slDur(left)) : ''));
     }
   }
 
@@ -9690,7 +10031,8 @@ function summaryLines(s) {
   out.push('');
 
   const p30 = (s.periods || []).find((p) => p.key === 'last30');
-  const spend = (label, o) => { if (o) row(label, bold(fmtMoney(o.cost || 0).padStart(9)), fmtTok(o.tokens || 0) + ' tokens'); };
+  const cur = s.currency;
+  const spend = (label, o) => { if (o) row(label, bold(fmtMoney(o.cost || 0, cur).padStart(9)), fmtTok(o.tokens || 0) + ' tokens'); };
   spend('today', s.today);
   spend('7 days', s.week);
   spend('30 days', p30);
@@ -9723,7 +10065,7 @@ function summaryLines(s) {
     // Re-strip on render: the label is printed outside the colour gate, so a
     // control character stored by an older Pulse must not reach the terminal.
     const plabel = pv.label ? stripControl(pv.label) : '';
-    row('plan', bold(mult), (plabel ? plabel + ' · ' : '') + fmtMoney(pv.cost) + '/mo vs ' + fmtMoney(pv.spend30) + ' in 30 days');
+    row('plan', bold(mult), (plabel ? plabel + ' · ' : '') + fmtMoney(pv.cost, cur) + '/mo vs ' + fmtMoney(pv.spend30, cur) + ' in 30 days');
   }
 
   const byModel = (p30 && p30.byModel) || {};
@@ -9731,7 +10073,7 @@ function summaryLines(s) {
   if (top.length) {
     out.push('');
     out.push('  ' + dim('top models (30 days)'));
-    for (const m of top) out.push('    ' + m.padEnd(26) + bold(fmtMoney(byModel[m].cost).padStart(9)));
+    for (const m of top) out.push('    ' + m.padEnd(26) + bold(fmtMoney(byModel[m].cost, cur).padStart(9)));
   }
   out.push('');
   return out.join('\n');
@@ -10125,4 +10467,5 @@ module.exports = {
   computeBlocks, floorToHour, aggregate, parseAll, tokensOf, localDateStr,
   psQuote, trayScript, summarizeTrayOutput, integrationTargetExists, sameEntry, discordClaudeArt, DISCORD_DEFAULT_CLAUDE_ART,
   parseFile, parseEffortArgs, parseEffortStdout, mergeModes, annotateModes, discordIpcCandidates,
+  fmtMoney, parseEcbXml, currencyInfo, usableCurrency,
 };

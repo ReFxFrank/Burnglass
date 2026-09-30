@@ -1,5 +1,25 @@
 # Changelog
 
+## v2.1.0 — Your currency
+
+- **Show every amount in your own currency.** Pick it in **System → Appearance →
+  Currency**: US dollars plus the 29 currencies in the European Central Bank's daily
+  reference rates (euro, pound, yen, Swiss franc, Canadian and Australian dollar, rupee,
+  real and more). The whole dashboard and mini view, the status line, `--summary`, Discord
+  presence, the tray tooltip and Burnglass Strip switch together, with the right symbol
+  and decimals (no cents for yen).
+- **Rates:** the ECB's public daily rates, downloaded about twice a day only while a
+  non-USD currency is in use, and kept on disk so a restart or an offline day keeps
+  working. Nothing about you is sent, and with US dollars Burnglass never makes the
+  request. Prefer no download at all? Tick **Use a fixed rate** and type your own. Any
+  other currency works with a typed rate too.
+- **Budgets and plan cost in your currency:** enter them in the display currency and they
+  stay in it (a €400 budget reads €400 every day), while the comparison runs at today's
+  rate.
+- Costs are still computed at the providers' US-dollar list prices. The API, the history
+  archive and CSV / JSON exports stay in US dollars; the payload adds a `currency` block
+  with the rate.
+
 ## v2.0.2 — New models: Sonnet 5.5, GPT-6.1 Sol, DeepSeek
 
 - **Claude Sonnet 5.5** (released 2026-09-28, now Claude Code's default Sonnet) has its

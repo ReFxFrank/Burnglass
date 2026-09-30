@@ -18,7 +18,12 @@
 #    the popover and the dashboard share — tones from the UNROUNDED % (79.5 is
 #    plain like on the dashboard, though it prints 80), spend amounts not
 #    pre-rounded (12.344996 must not become $12.35), a stale (rolled-over)
-#    Claude window dropped like a Codex one. With Playwright + Chromium the
+#    Claude window dropped like a Codex one. The display currency
+#    (DisplayCurrency, also compiled from Program.cs): no summary "currency"
+#    block = the dollar strings as before; EUR / JPY (0 digits) / CHF blocks
+#    convert every card line, chart point and source amount and are echoed as
+#    {code, prefix, digits}; the taskbar price (StripForm's parse + compact) in
+#    the same currency; hostile blocks fall back to dollars. With Playwright + Chromium the
 #    popover page (strip/web/index.html) then renders that payload (else SKIP)
 #    and plays its open motion: primeOpen holds the first frame and posts
 #    {primed}, playOpen / a lost playOpen / resetOpen / reduced motion all end
@@ -117,10 +122,10 @@ cat > "$H/harness.csproj" <<'XML'
   </ItemGroup>
 </Project>
 XML
-# Cut `static class AppPaths` and `WebAssets` (required), plus `MeterScale` and
-# `SummaryTransform` (the popover payload; optional, so STRIP_DIR can still
-# point at an older tree for the home checks) out of the real Program.cs
-# (brace matching that skips comments, strings and char literals).
+# Cut `static class AppPaths` and `WebAssets` (required), plus `MeterScale`,
+# `DisplayCurrency` and `SummaryTransform` (the popover payload; optional, so
+# STRIP_DIR can still point at an older tree for the home checks) out of the
+# real Program.cs (brace matching that skips comments, strings and char literals).
 if ! node - "$STRIP_DIR/Program.cs" "$H" <<'JS'
 const fs = require('fs'), path = require('path');
 const src = fs.readFileSync(process.argv[2], 'utf8');
@@ -144,7 +149,10 @@ function cut(name, optional) {
 const head = 'using System.Globalization;\nusing System.Text.Json;\nusing System.Text.Json.Nodes;\n\nnamespace BurnglassStrip;\n\n';
 fs.writeFileSync(path.join(process.argv[3], 'Extracted.cs'), head + cut('AppPaths') + '\n\n' + cut('WebAssets') + '\n');
 const ms = cut('MeterScale', true), st = cut('SummaryTransform', true);
-if (ms && st) fs.writeFileSync(path.join(process.argv[3], 'ExtractedUi.cs'), head + ms + '\n\n' + st + '\n');
+// The display currency (the transform converts with it, StripForm prices with it); a tree before it
+// has none, and its transform does not reference it.
+const dc = cut('DisplayCurrency', true);
+if (ms && st) fs.writeFileSync(path.join(process.argv[3], 'ExtractedUi.cs'), head + ms + '\n\n' + (dc ? dc + '\n\n' : '') + st + '\n');
 // The popover's open-motion curve (the host's window slide); optional like the above.
 const om = cut('OpenMotion', true);
 if (om) fs.writeFileSync(path.join(process.argv[3], 'ExtractedMotion.cs'), head + om + '\n');
@@ -250,6 +258,52 @@ static class UiHarness
                 Console.WriteLine(a + "=" + ((double)ease.Invoke(null, new object[] { double.Parse(a, inv) })!).ToString("R", inv));
             return 0;
         }
+        // `money <currency-json> <n>...` prints "<n>=<Compact>|<Exact>" per n under
+        // DisplayCurrency.FromUi(json) (the taskbar price / an exact amount). `stripprice <ui-file>`
+        // prints "<providerId>=<price>" per provider of a UI payload the way StripForm.SetData builds
+        // the taskbar price: the payload currency echo (FromUi), the "Last 30 Days" line amount
+        // (ParseAmount), compact (Compact) when > 0. By reflection, so a tree without
+        // DisplayCurrency still compiles and reports NO-CURRENCY.
+        if (args.Length >= 2 && (args[0] == "money" || args[0] == "stripprice"))
+        {
+            var dc = Type.GetType("BurnglassStrip.DisplayCurrency");
+            if (dc == null) { Console.WriteLine("NO-CURRENCY"); return 0; }
+            var fromUi = dc.GetMethod("FromUi")!;
+            var compact = dc.GetMethod("Compact")!;
+            var parse = dc.GetMethod("ParseAmount")!;
+            if (args[0] == "money")
+            {
+                var exact = dc.GetMethod("Exact")!;
+                using var cdoc = JsonDocument.Parse(args[1]);
+                var cur = fromUi.Invoke(null, new object[] { cdoc.RootElement })!;
+                foreach (var a in args.Skip(2))
+                {
+                    double n = double.Parse(a, inv);
+                    Console.WriteLine(a + "=" + compact.Invoke(cur, new object[] { n }) + "|" + exact.Invoke(cur, new object[] { n }));
+                }
+                return 0;
+            }
+            using var udoc = JsonDocument.Parse(File.ReadAllText(args[1]));
+            var root = udoc.RootElement;
+            bool wrapped = root.ValueKind == JsonValueKind.Object;
+            var echo = wrapped && root.TryGetProperty("currency", out var cu) ? cu : default;
+            var sc = fromUi.Invoke(null, new object[] { echo })!;
+            var provs = wrapped && root.TryGetProperty("providers", out var pv) ? pv : root;
+            if (provs.ValueKind == JsonValueKind.Array)
+                foreach (var p in provs.EnumerateArray())
+                {
+                    string id = p.TryGetProperty("providerId", out var pid) ? pid.GetString() ?? "" : "";
+                    double? spend30 = null;
+                    if (p.TryGetProperty("lines", out var lines))
+                        foreach (var l in lines.EnumerateArray())
+                            if (l.TryGetProperty("type", out var t) && t.GetString() == "text"
+                                && l.TryGetProperty("label", out var lab) && lab.GetString() == "Last 30 Days"
+                                && l.TryGetProperty("value", out var val))
+                                spend30 = (double?)parse.Invoke(sc, new object?[] { val.GetString() });
+                    Console.WriteLine(id + "=" + (spend30 is > 0 ? (string)compact.Invoke(sc, new object[] { spend30.Value })! : ""));
+                }
+            return 0;
+        }
         // `dismiss <case>...`: DismissHarness (compiled only when Program.cs has PopoverDismiss).
         if (args.Length >= 2 && args[0] == "dismiss")
         {
@@ -257,7 +311,7 @@ static class UiHarness
             if (dh == null) { Console.WriteLine("NO-DISMISS"); return 0; }
             return (int)dh.GetMethod("Run")!.Invoke(null, new object[] { args })!;
         }
-        Console.WriteLine("usage: transform <file> | tones <json> <pct>... | used <used> <limit> | linetone <json> <line>... | ease <t>... | dismiss <case>...");
+        Console.WriteLine("usage: transform <file> | tones <json> <pct>... | used <used> <limit> | linetone <json> <line>... | money <json> <n>... | stripprice <file> | ease <t>... | dismiss <case>...");
         return 2;
     }
 }
@@ -598,6 +652,167 @@ JS
     && pass "taskbar tone from the unrounded %: 79.5 prints 80 but stays plain, 94.5 prints 95 but stays amber (dashboard meterTone)" \
     || fail "taskbar tone: $out"
 
+  # F: the display currency. Every /api/summary amount is USD; a "currency" block
+  # {code, rate, prefix, digits, ...} makes the transform convert (x rate) and
+  # format (prefix, digits) every amount it emits, and echo {code, prefix, digits}.
+  # The same data without a block, with an explicit USD one, in EUR at 0.5, in
+  # JPY at 150 (0 digits), in CHF (a letter prefix) and under hostile blocks,
+  # which must fall back to US dollars (or, for bad digits, to 2 digits).
+  cat > "$T/summary-f.json" <<'JSON'
+{
+  "allSources": ["cli", "codex", "gemini"],
+  "alertThresholds": [80, 95],
+  "periods": [
+    { "key": "last30",
+      "bySource": { "cli": { "cost": 4357, "tokens": 2500000 }, "codex": { "cost": 7.2, "tokens": 1000 },
+        "gemini": { "cost": 0.012, "tokens": 10 } },
+      "daily": [
+        { "date": "2026-09-24", "bySource": { "cli": 4000, "codex": 3 } },
+        { "date": "2026-09-25", "bySource": { "cli": 357, "codex": 4.2, "gemini": 0.012 } } ] }
+  ]
+}
+JSON
+  node - "$T" <<'JS'
+const fs = require('fs'), path = require('path');
+const T = process.argv[2];
+const base = JSON.parse(fs.readFileSync(path.join(T, 'summary-f.json'), 'utf8'));
+const eur = { code: 'EUR', rate: 0.5, prefix: '€', symbol: '€', digits: 2, source: 'ecb', asOf: '2026-09-29', status: 'ok', requested: 'EUR' };
+const V = {
+  none: undefined,
+  usd: { code: 'USD', rate: 1, prefix: '$', symbol: '$', digits: 2, source: 'usd', asOf: null, status: 'ok', requested: 'USD' },
+  eur,
+  jpy: { code: 'JPY', rate: 150, prefix: '¥', symbol: '¥', digits: 0, source: 'manual', asOf: null, status: 'ok', requested: 'JPY' },
+  chf: { code: 'CHF', rate: 2, prefix: 'CHF ', symbol: 'CHF', digits: 2, source: 'ecb', asOf: '2026-09-29', status: 'ok', requested: 'CHF' },
+  // Hostile blocks: US dollars.
+  'rate-neg': { ...eur, rate: -1 }, 'rate-zero': { ...eur, rate: 0 }, 'rate-big': { ...eur, rate: 1e8 },
+  'rate-str': { ...eur, rate: '0.5' }, 'rate-null': { ...eur, rate: null }, 'rate-none': { ...eur, rate: undefined },
+  'prefix-ctrl': { ...eur, prefix: '€\u0007' }, 'prefix-long': { ...eur, prefix: 'ABCDEFGHI' },
+  'prefix-bidi': { ...eur, prefix: '‮€' }, 'prefix-zw': { ...eur, prefix: '€​' },
+  'prefix-empty': { ...eur, prefix: '' }, 'prefix-num': { ...eur, prefix: 5 }, 'prefix-lone': { ...eur, prefix: '€\ud800' },
+  'not-object': 'EUR', array: [eur],
+  // Bad digits alone: the currency stands, 2 digits. A bad code is dropped, not trusted.
+  'digits-9': { ...eur, digits: 9 }, 'digits-frac': { ...eur, digits: 1.5 }, 'digits-neg': { ...eur, digits: -1 },
+  'code-bad': { ...eur, code: '<b>' },
+};
+for (const [name, cur] of Object.entries(V)) {
+  const s = JSON.parse(JSON.stringify(base));
+  if (cur !== undefined) s.currency = cur;
+  fs.writeFileSync(path.join(T, 'summary-f-' + name + '.json'), JSON.stringify(s));
+}
+JS
+  for f in "$T"/summary-f-*.json; do
+    n=${f##*/summary-f-}; n=${n%.json}
+    ui transform "$f" > "$T/ui-f-$n.json" 2>&1
+    ui stripprice "$T/ui-f-$n.json" > "$T/price-f-$n.txt" 2>&1
+  done
+  # Payloads an older strip saved (no currency echo, "$" lines) and a tampered echo.
+  printf '%s' '{"providers":[{"providerId":"claude","lines":[{"label":"Last 30 Days","type":"text","value":"$2,263.58 · 1.2M tokens"}]}],"errors":[]}' > "$T/ui-legacy.json"
+  printf '%s' '[{"providerId":"codex","lines":[{"label":"Last 30 Days","type":"text","value":"$12.00"}]}]' > "$T/ui-legacy-bare.json"
+  printf '%s' '{"providers":[{"providerId":"claude","lines":[{"label":"Last 30 Days","type":"text","value":"$12.00 · 1 tokens"}]}],"currency":{"code":"EUR","prefix":"€","digits":2}}' > "$T/ui-mismatch.json"
+  printf '%s' '{"providers":[{"providerId":"claude","lines":[{"label":"Last 30 Days","type":"text","value":"€12.00 · 1 tokens"}]}],"currency":{"code":"EUR","prefix":"€\u0007","digits":2}}' > "$T/ui-tampered.json"
+  for n in legacy legacy-bare mismatch tampered; do ui stripprice "$T/ui-$n.json" > "$T/price-$n.txt" 2>&1; done
+  node - "$T" <<'JS' || FAILS=$((FAILS + 1))
+const fs = require('fs'), path = require('path');
+const T = process.argv[2];
+let bad = 0;
+const says = (c, m) => { console.log((c ? 'PASS: ' : 'FAIL: ') + m); if (!c) bad++; };
+const read = (n) => { try { return JSON.parse(fs.readFileSync(path.join(T, n), 'utf8')); } catch (e) { return { __err: String(e) }; } };
+const lines = (n) => { try { return fs.readFileSync(path.join(T, n), 'utf8').trim().split('\n'); } catch (e) { return [String(e)]; } };
+const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const near = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((x, i) => typeof x === 'number' && Math.abs(x - b[i]) < 1e-6);
+// What the popover and the strip get from one UI payload.
+const view = (name) => {
+  const ui = read('ui-f-' + name + '.json');
+  const prov = {};
+  for (const p of ui.providers || []) {
+    const ls = p.lines || [];
+    prov[p.providerId] = {
+      text: ls.filter((l) => l.type === 'text').map((l) => l.value),
+      labels: ls.filter((l) => l.type === 'barChart').flatMap((l) => l.points.map((x) => x.valueLabel)),
+      values: ls.filter((l) => l.type === 'barChart').flatMap((l) => l.points.map((x) => x.value)),
+    };
+  }
+  const src = Object.fromEntries((ui.sources || []).map((s) => [s.id, [s.today, s.week7, s.cost30]]));
+  return { ui, prov, src, currency: ui.currency, price: lines('price-f-' + name + '.txt') };
+};
+// fixture F: claude (cli) 4000 + 357 today, codex 3 + 4.2 today, gemini 0.012 today.
+const WANT = {
+  usd: { currency: { code: 'USD', prefix: '$', digits: 2 },
+    text: { claude: ['$357.00', '$4,357.00', '$4,357.00 · 2.5M tokens'], codex: ['$4.20', '$7.20', '$7.20 · 1.0K tokens'], gemini: ['$0.01', '$0.01', '$0.01 · 10 tokens'] },
+    labels: { claude: ['$4,000.00', '$357.00'], codex: ['$3.00', '$4.20'], gemini: ['$0.00', '$0.01'] },
+    values: { claude: [4000, 357], codex: [3, 4.2], gemini: [0, 0.012] },
+    src: { cli: [357, 4357, 4357], codex: [4.2, 7.2, 7.2], gemini: [0.012, 0.012, 0.012] },
+    price: ['claude=$4.4K', 'codex=$7', 'gemini=$0'] },
+  eur: { currency: { code: 'EUR', prefix: '€', digits: 2 },
+    text: { claude: ['€178.50', '€2,178.50', '€2,178.50 · 2.5M tokens'], codex: ['€2.10', '€3.60', '€3.60 · 1.0K tokens'], gemini: ['€0.01', '€0.01', '€0.01 · 10 tokens'] },
+    labels: { claude: ['€2,000.00', '€178.50'], codex: ['€1.50', '€2.10'], gemini: ['€0.00', '€0.01'] },
+    values: { claude: [2000, 178.5], codex: [1.5, 2.1], gemini: [0, 0.006] },
+    src: { cli: [178.5, 2178.5, 2178.5], codex: [2.1, 3.6, 3.6], gemini: [0.006, 0.006, 0.006] },
+    price: ['claude=€2.2K', 'codex=€4', 'gemini=€0'] },
+  jpy: { currency: { code: 'JPY', prefix: '¥', digits: 0 },
+    text: { claude: ['¥53,550', '¥653,550', '¥653,550 · 2.5M tokens'], codex: ['¥630', '¥1,080', '¥1,080 · 1.0K tokens'], gemini: ['¥2', '¥2', '¥2 · 10 tokens'] },
+    labels: { claude: ['¥600,000', '¥53,550'], codex: ['¥450', '¥630'], gemini: ['¥0', '¥2'] },
+    values: { claude: [600000, 53550], codex: [450, 630], gemini: [0, 1.8] },
+    src: { cli: [53550, 653550, 653550], codex: [630, 1080, 1080], gemini: [1.8, 1.8, 1.8] },
+    price: ['claude=¥654K', 'codex=¥1.1K', 'gemini=¥2'] },
+  chf: { currency: { code: 'CHF', prefix: 'CHF ', digits: 2 },
+    text: { claude: ['CHF 714.00', 'CHF 8,714.00', 'CHF 8,714.00 · 2.5M tokens'], codex: ['CHF 8.40', 'CHF 14.40', 'CHF 14.40 · 1.0K tokens'], gemini: ['CHF 0.02', 'CHF 0.02', 'CHF 0.02 · 10 tokens'] },
+    labels: { claude: ['CHF 8,000.00', 'CHF 714.00'], codex: ['CHF 6.00', 'CHF 8.40'], gemini: ['CHF 0.00', 'CHF 0.02'] },
+    values: { claude: [8000, 714], codex: [6, 8.4], gemini: [0, 0.024] },
+    src: { cli: [714, 8714, 8714], codex: [8.4, 14.4, 14.4], gemini: [0.024, 0.024, 0.024] },
+    price: ['claude=CHF 8.7K', 'codex=CHF 14', 'gemini=CHF 0'] },
+};
+const IDS = ['claude', 'codex', 'gemini'];
+const got = (v, k) => JSON.stringify(Object.fromEntries(IDS.map((id) => [id, v.prov[id] ? v.prov[id][k] : null])));
+// One aspect per line for the real currencies; everything at once for a variant that must equal one.
+function full(name, want, why) {
+  const v = view(name);
+  const text = IDS.every((id) => v.prov[id] && eq(v.prov[id].text, want.text[id]));
+  const labels = IDS.every((id) => v.prov[id] && eq(v.prov[id].labels, want.labels[id]));
+  const values = IDS.every((id) => v.prov[id] && near(v.prov[id].values, want.values[id]));
+  const src = Object.keys(want.src).every((id) => near(v.src[id], want.src[id]));
+  const cur = eq(v.currency, want.currency), price = eq(v.price, want.price);
+  if (why) {
+    says(text && labels && values && src && cur && price, why + ' (' + JSON.stringify({ currency: v.currency, claude: v.prov.claude && v.prov.claude.text, price: v.price }) + ')');
+    return;
+  }
+  says(text, name + ': provider card lines = ' + got(v, 'text'));
+  says(labels && values, name + ': daily chart points (value, valueLabel) = ' + got(v, 'values') + ' ' + got(v, 'labels'));
+  says(src, name + ': sources amounts (today, 7d, 30d; raw, converted) = ' + JSON.stringify(v.src));
+  says(cur, name + ': the payload carries currency ' + JSON.stringify(v.currency));
+  says(price, name + ': the taskbar price (StripForm: Last 30 Days amount, compact) = ' + v.price.join(' '));
+}
+full('none', WANT.usd);
+const noFetched = (n) => { try { return fs.readFileSync(path.join(T, n), 'utf8').replace(/"fetchedAt":"[^"]*"/g, ''); } catch (e) { return String(e); } };
+says(noFetched('ui-f-none.json') === noFetched('ui-f-usd.json'),
+  'usd: an explicit USD block (rate 1) yields exactly the payload of a summary without one');
+full('eur', WANT.eur);
+full('jpy', WANT.jpy);
+const jv = view('jpy');
+says(IDS.every((id) => jv.prov[id] && jv.prov[id].text.concat(jv.prov[id].labels).every((t) => /^¥[\d,]+( · |$)/.test(t))),
+  'jpy: 0 digits - no decimals in any amount');
+full('chf', WANT.chf);
+for (const n of ['rate-neg', 'rate-zero', 'rate-big', 'rate-str', 'rate-null', 'rate-none', 'prefix-ctrl', 'prefix-long',
+  'prefix-bidi', 'prefix-zw', 'prefix-empty', 'prefix-num', 'prefix-lone', 'not-object', 'array'])
+  full(n, WANT.usd, 'hostile currency ' + n + ' -> US dollars, amounts unconverted');
+for (const n of ['digits-9', 'digits-frac', 'digits-neg'])
+  full(n, WANT.eur, 'hostile currency ' + n + ' -> the currency stands with 2 digits');
+full('code-bad', { ...WANT.eur, currency: { code: '', prefix: '€', digits: 2 } }, 'currency code "<b>" is dropped (""), the amounts still in euros');
+says(eq(lines('price-legacy.txt'), ['claude=$2.3K']) && eq(lines('price-legacy-bare.txt'), ['codex=$12']),
+  'taskbar price: a payload an older strip saved (no currency echo, "$" lines) still prices in dollars (' + lines('price-legacy.txt').concat(lines('price-legacy-bare.txt')).join(' ') + ')');
+says(eq(lines('price-mismatch.txt'), ['claude=']) && eq(lines('price-tampered.txt'), ['claude=']),
+  'taskbar price: a line not in the echo currency, or a tampered echo (control char -> dollars), prices nothing rather than mixing units (' + lines('price-mismatch.txt').concat(lines('price-tampered.txt')).join(' ') + ')');
+process.exit(bad ? 1 : 0);
+JS
+  out=$(ui money '{}' 2263.58 91.15 0 | tr '\n' ' ')
+  [ "$out" = '2263.58=$2.3K|$2,263.58 91.15=$91|$91.15 0=$0|$0.00 ' ] \
+    && pass "money: no currency = the dollar formats as before ($out)" || fail "money usd: $out"
+  out=$(ui money '{"code":"KRW","prefix":"₩","digits":0}' 3049200 150000 1000 999.4 0.4 | tr '\n' ' ')
+  [ "$out" = '3049200=₩3.0M|₩3,049,200 150000=₩150K|₩150,000 1000=₩1.0K|₩1,000 999.4=₩999|₩999 0.4=₩0|₩0 ' ] \
+    && pass "money: 0 digits, K and M tiers on the taskbar ($out)" || fail "money krw: $out"
+  out=$(ui money '{"code":"BHD","prefix":"BD ","digits":3}' 1.5 | tr '\n' ' ')
+  [ "$out" = '1.5=BD 2|BD 1.500 ' ] && pass "money: 3 digits ($out)" || fail "money bhd: $out"
+
   # The popover page itself (strip/web/index.html) renders fixture D's payload.
   PWMOD=${PLAYWRIGHT_MODULE:-}
   [ -z "$PWMOD" ] && PWMOD=$(node -e 'try { console.log(require.resolve("playwright")) } catch (_) {}' 2>/dev/null)
@@ -610,14 +825,16 @@ JS
   if [ -z "$PWMOD" ]; then
     echo "SKIP: popover render (Playwright not found; set PLAYWRIGHT_MODULE)"
   else
-    node --input-type=module - "$PWMOD" "$CHROME" "$STRIP_DIR/web/index.html" "$T/ui-d.json" "$T/ease.txt" <<'JS' || FAILS=$((FAILS + 1))
-const [pwmod, chrome, page0, uiFile, easeFile] = process.argv.slice(2);
+    node --input-type=module - "$PWMOD" "$CHROME" "$STRIP_DIR/web/index.html" "$T/ui-d.json" "$T/ease.txt" \
+      "$T/ui-f-eur.json" "$T/ui-f-jpy.json" <<'JS' || FAILS=$((FAILS + 1))
+const [pwmod, chrome, page0, uiFile, easeFile, eurFile, jpyFile] = process.argv.slice(2);
 const { pathToFileURL } = await import('node:url');
 const fs = await import('node:fs');
 const pw = await import(pathToFileURL(pwmod).href);
 const chromium = pw.chromium || (pw.default && pw.default.chromium);
 let bad = 0;
 const says = (c, m) => { console.log((c ? 'PASS: ' : 'FAIL: ') + m); if (!c) bad++; };
+const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 let browser;
 try { browser = await chromium.launch({ ...(chrome ? { executablePath: chrome } : {}), args: ['--no-sandbox'] }); }
 catch (e) { console.log('SKIP: popover render (Chromium did not launch: ' + String(e.message).split('\n')[0] + ')'); process.exit(0); }
@@ -698,6 +915,54 @@ await page.emulateMedia({ reducedMotion: 'reduce' });
 await page.evaluate(() => { window.primeOpen(8, true); });
 const rm = await state();
 says(rm.cls === '' && rm.anims === 0 && rm.minOp === 1, 'open motion: reduced motion (Windows "Animation effects" off) -> no animation, content visible at once (' + JSON.stringify(rm) + ')');
+
+// The display currency: the host sends amounts already converted plus currency {code, prefix, digits};
+// the page only formats them (fixture F: 30 Days = cli 2178.50 + codex 3.60 + gemini 0.006 EUR, which prints <€0.01).
+const eurUi = JSON.parse(fs.readFileSync(eurFile, 'utf8')), jpyUi = JSON.parse(fs.readFileSync(jpyFile, 'utf8'));
+const shown = () => page.evaluate(() => ({
+  center: (document.querySelector('.donut .center') || {}).textContent || null,
+  legend: [...document.querySelectorAll('.legend .row')].map((x) => x.textContent.replace(/\s+/g, ' ').trim()),
+  rows: [...document.querySelectorAll('.trow')].map((x) => x.textContent.replace(/\s+/g, ' ').trim()),
+  bars: [...document.querySelectorAll('.spark .b')].map((b) => b.title).filter(Boolean).slice(0, 2),
+  dollar: /\$/.test(document.getElementById('app').textContent),
+  tags: document.querySelectorAll('#app b').length,
+}));
+await page.evaluate((p) => window.renderData(p), eurUi);
+const eurShown = await shown();
+says(eurShown.center === '€2.2K' && eq(eurShown.legend, ['Claude CLI€2,178.50', 'Codex€3.60', 'Gemini CLI<€0.01'])
+  && eurShown.rows.includes('Today€178.50') && eurShown.rows.includes('Last 30 Days€2,178.50 · 2.5M tokens')
+  && eurShown.bars[0] === '2026-09-24 · €2,000.00' && !eurShown.dollar,
+  'currency: a EUR payload shows € everywhere - donut centre, legend, card rows, chart titles - and no $ (' + JSON.stringify(eurShown) + ')');
+await page.evaluate((p) => window.renderData({ providers: p.providers, errors: [], currency: p.currency }), eurUi);
+const eurOld = await shown();
+says(eurOld.legend.includes('Claude€2,178.50') && eurOld.legend.includes('Codex€3.60'),
+  'currency: without sources the fallback donut reads the € card lines (' + JSON.stringify(eurOld.legend) + ')');
+await page.evaluate((p) => window.renderData(p), jpyUi);
+const jpyShown = await shown();
+const jpyFmt = await page.evaluate(() => [moneyFull(0.4), moneyFull(15234), moneyFull(0), money(13400), money(850), money(3049200)]);
+says(jpyShown.center === '¥655K' && eq(jpyShown.legend, ['Claude CLI¥653,550', 'Codex¥1,080', 'Gemini CLI¥2'])
+  && eq(jpyFmt, ['<¥1', '¥15,234', '¥0', '¥13.4K', '¥850', '¥3M']),
+  'currency: JPY (0 digits) - no decimals, <¥1 below one yen, compact ¥13.4K (' + JSON.stringify({ center: jpyShown.center, legend: jpyShown.legend, fmt: jpyFmt }) + ')');
+const hostile = await page.evaluate((p) => {
+  const q = JSON.parse(JSON.stringify(p)), out = {};
+  q.currency = { code: 'EUR', prefix: '<b>€</b>', digits: 9 };
+  window.renderData(q);
+  out.markup = [document.querySelector('.donut .center').textContent, document.querySelectorAll('#app b').length, moneyFull(1.5)];
+  for (const [k, pre] of [['bidi', '\u202e€'], ['ctrl', '€\u0007'], ['long', 'ABCDEFGHI'], ['empty', ''], ['num', 5]]) {
+    q.currency = { code: 'EUR', prefix: pre, digits: 2 };
+    window.renderData(q);
+    out[k] = document.querySelector('.donut .center').textContent;
+  }
+  window.renderData({ providers: p.providers, errors: [], sources: p.sources, currency: 'EUR' });
+  out.notObject = document.querySelector('.donut .center').textContent;
+  return out;
+}, eurUi);
+says(eq(hostile.markup, ['<b>€</b>2.2K', 0, '<b>€</b>1.50']) && ['bidi', 'ctrl', 'long', 'empty', 'num', 'notObject'].every((k) => hostile[k] === '$2.2K'),
+  'currency: the page re-checks the echo - a markup prefix stays text (digits 9 -> 2), a bidi / control / too long / empty / non-string prefix or a non-object block -> $ (' + JSON.stringify(hostile) + ')');
+await page.evaluate((p) => window.renderData(p), JSON.parse(fs.readFileSync(uiFile, 'utf8')));
+const usdFmt = await page.evaluate(() => [moneyFull(0.004), moneyFull(2178.09), money(13400), money(91.15), money(1500000)]);
+says(eq(usdFmt, ['<$0.01', '$2,178.09', '$13.4K', '$91.15', '$1.5M']),
+  'currency: back on a USD payload the formats are the dollar ones again (' + JSON.stringify(usdFmt) + ')');
 await browser.close();
 process.exit(bad ? 1 : 0);
 JS

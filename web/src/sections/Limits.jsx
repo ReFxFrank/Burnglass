@@ -10,8 +10,10 @@
 //                        lastGoodAt,fetchedAt,error}  (status: ok|loading|no-login|expired|error|rate-limited)
 //                 codexMeters{asOf,buckets[]} · codexUsage{enabled,status,stats{todayTokens,
 //                        last7Tokens,last30Tokens,lifetimeTokens,peakDailyTokens,currentStreakDays,buckets[]},lastGoodAt,error}
-//                 budget{target,period,label,spent,pct,remaining,resetsAt,state,projected}|null
-//                 planValue{configured,cost,label,spend30,multiplier,months[]{key,spend,multiplier,partial,elapsedFraction}}
+//                 budget{target,period,label,spent,pct,remaining,resetsAt,state,projected,currency,amount}|null
+//                 planValue{configured,cost,label,spend30,multiplier,months[]{key,spend,multiplier,partial,elapsedFraction},currency,amount}
+//                 (every amount is USD; currency + amount = the target / price as
+//                 entered, so an edit in the same currency shows exactly that)
 //                 generatedAt (to tell a post-save refetch from an older poll)
 //   thresholds  alert thresholds → MeterBar ticks + lib.meterTone colours
 //   srcFilter   budget spend follows the source filter (server-side); plan
@@ -22,8 +24,9 @@
 //
 // ENDPOINTS (mutations via lib.postJson, which adds X-Pulse: 1):
 //   POST /api/meters/recheck            (Connect card "Recheck now")
-//   POST /api/budget/set?amount&period  (amount ≤ 0 clears)
-//   POST /api/plan/set?amount&label     (amount ≤ 0 clears both)
+//   POST /api/budget/set?amount&period&currency  (amount ≤ 0 clears; amount
+//                                       in the display currency)
+//   POST /api/plan/set?amount&label&currency     (amount ≤ 0 clears both)
 //   GET  /api/summary[?sources=…]       once after each of those, so the new
 //                                       state shows at once instead of on the
 //                                       next 10 s poll (same URL App polls)
@@ -34,18 +37,34 @@
 import { useEffect, useRef, useState } from 'react';
 import { Section, Panel, Btn, Seg, InputGroup, Input, Tip, cx } from '../ui.jsx';
 import { AccountLimits } from '../meters.jsx';
-import { BRAND, MONTHS, dur, money, postJson } from '../lib.js';
+import { BRAND, MONTHS, curPrefix, displayCurrency, dur, money, postJson, toDisplay } from '../lib.js';
 import './Limits.css';
 
 // A user-entered round target reads as "$1,200", not "$1,200.00" (as in the
-// mockup); anything with cents falls back to money().
+// mockup); anything with cents falls back to money(). `v` is USD, shown in
+// the display currency (a €1,200 budget converts back to exactly €1,200).
 function moneyTarget(v) {
   if (v == null || !isFinite(v)) return '—';
-  return Number.isInteger(v) ? '$' + v.toLocaleString('en-US') : money(v);
+  const x = Math.round(toDisplay(v) * 1e6) / 1e6;
+  return Number.isInteger(x) ? curPrefix() + x.toLocaleString('en-US') : money(v);
 }
-// "$1,200" / "1200" / " 1,200.50 " → number (NaN when unparseable)
+// A stored target / price → the input's starting text, in the display
+// currency: the amount exactly as entered when it was entered in this
+// currency, else today's conversion rounded to the currency's decimals.
+function amountText(usd, entered, enteredIn) {
+  const cur = displayCurrency();
+  if (enteredIn === cur.code && entered > 0) return String(entered);
+  if (!(usd > 0)) return '';
+  const d = cur.digits;
+  return String(Math.round(toDisplay(usd) * 10 ** d) / 10 ** d);
+}
+// "$1,200" / "1200" / " 1,200.50 " / "€12,50" → number (NaN when
+// unparseable). Symbols and spaces go; a lone comma followed by one or two
+// digits is a decimal comma ("12,50"), any other comma groups thousands.
 function parseAmount(s) {
-  return parseFloat(String(s == null ? '' : s).replace(/[$,\s]/g, ''));
+  let t = String(s == null ? '' : s).replace(/[^\d.,-]/g, '');
+  t = /^-?\d+,\d{1,2}$/.test(t) ? t.replace(',', '.') : t.replace(/,/g, '');
+  return parseFloat(t);
 }
 // 13.6× / 2.4× / 0.62× — enough precision to move month to month without
 // implying more accuracy than list-price estimates have.
@@ -147,7 +166,7 @@ function BudgetPanel({ budget, filtered, onSaved }) {
   const { btn, form, track } = useReturnFocus(editing);
 
   function open() {
-    setAmount(budget ? String(budget.target) : '');
+    setAmount(budget ? amountText(budget.target, budget.amount, budget.currency) : '');
     setPeriod(budget ? budget.period : 'month');
     setErr(null);
     setEditing(true);
@@ -159,7 +178,8 @@ function BudgetPanel({ budget, filtered, onSaved }) {
     track();
     setBusy(true); setErr(null);
     try {
-      await postJson('/api/budget/set?amount=' + (isFinite(amt) ? amt : 0) + '&period=' + period);
+      await postJson('/api/budget/set?amount=' + (isFinite(amt) ? amt : 0) + '&period=' + period
+        + '&currency=' + displayCurrency().code);
       try { await onSaved(); } catch (_) { /* the next poll brings it */ }
       setEditing(false);
       if (clear) setAmount('');
@@ -190,13 +210,13 @@ function BudgetPanel({ budget, filtered, onSaved }) {
           ) : null}
           <div className="lf-row">
             <InputGroup
-              prefix="$"
+              prefix={curPrefix().trim()}
               className="lf-amt"
               type="text"
               inputMode="decimal"
               autoComplete="off"
               placeholder="1,200"
-              aria-label="Budget amount in US dollars"
+              aria-label={'Budget amount in ' + displayCurrency().code}
               value={amount}
               autoFocus={editing}
               readOnly={busy}
@@ -318,7 +338,7 @@ function PlanPanel({ plan, onSaved, periodKeys, current, onPeriod }) {
   if (!plan) return null; // a server without the planValue block — stay silent
 
   function open() {
-    setAmount(plan.cost ? String(plan.cost) : '');
+    setAmount(plan.cost ? amountText(plan.cost, plan.amount, plan.currency) : '');
     setLabel(plan.label || '');
     setErr(null);
     setEditing(true);
@@ -331,7 +351,8 @@ function PlanPanel({ plan, onSaved, periodKeys, current, onPeriod }) {
     setBusy(true); setErr(null);
     try {
       await postJson('/api/plan/set?amount=' + (isFinite(amt) ? amt : 0)
-        + '&label=' + encodeURIComponent(clear ? '' : label.trim()));
+        + '&label=' + encodeURIComponent(clear ? '' : label.trim())
+        + '&currency=' + displayCurrency().code);
       try { await onSaved(); } catch (_) { /* the next poll brings it */ }
       setEditing(false);
       if (clear) { setAmount(''); setLabel(''); }
@@ -359,14 +380,14 @@ function PlanPanel({ plan, onSaved, periodKeys, current, onPeriod }) {
           ) : null}
           <div className="lf-row">
             <InputGroup
-              prefix="$"
+              prefix={curPrefix().trim()}
               suffix="/mo"
               className="lf-amt"
               type="text"
               inputMode="decimal"
               autoComplete="off"
               placeholder="200"
-              aria-label="Plan cost per month in US dollars"
+              aria-label={'Plan cost per month in ' + displayCurrency().code}
               value={amount}
               autoFocus={editing}
               readOnly={busy}

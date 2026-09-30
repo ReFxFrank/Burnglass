@@ -50,7 +50,8 @@ Among the top-level fields of `/api/summary`:
 | `heatmap` | The weekday × hour grid. |
 | `meters`, `codexMeters`, `codexUsage` | Claude account meters, the Codex snapshot and Codex account tokens. |
 | `alerts`, `alertThresholds` | Active limit (and anomaly) alerts and your thresholds. |
-| `budget`, `planValue` | The budget goal and plan value. |
+| `budget`, `planValue` | The budget goal and plan value. Their amounts are USD; `currency` and `amount` give the target or price as you entered it. |
+| `currency` | How to **show** money: `code`, `rate` (units per 1 USD), `prefix` (the text before a number, e.g. `€` or `CHF `), `digits`, `source` (`usd`, `ecb` or `manual`), `asOf`, `status` (`ok`, `pending` or `unavailable`) and `requested`. Every other amount in the payload stays **US dollars**; `/api/statusline` carries `{code, rate, prefix, digits}` (null for USD). |
 | `agentState`, `activeNow` | What Claude or Codex is doing right now. |
 | `allSources`, `sourceMeta`, `sourceFilter` | Every source seen, custom-source labels, and the applied filter. |
 | `meshy`, `discord`, `tray`, `strip`, `startup` | Integration state (`meshy.hasKey`, never the key). |
@@ -80,8 +81,9 @@ header (a DNS-rebinding guard).
 | `/api/discord/enable` · `/api/discord/disable` | Turn Discord Rich Presence on or off. |
 | `/api/discord/images` | JSON body with any of `claude`, `claudeWorking`, `claudeThinking`, `claudeWaiting`, `codex`, `idle`. Only the slots present change; an empty value restores the built-in art. One invalid value rejects the whole request. |
 | `/api/meshy/enable` · `/api/meshy/disable` | Turn Meshy credits on or off. Enable takes an optional JSON body `{ "key": "…" }`; an empty key clears it. |
-| `/api/budget/set?amount=…&period=month\|week` | Set the budget; `amount` of 0 or less clears it. |
-| `/api/plan/set?amount=…&label=…` | Set the plan cost (0.01 to 1,000,000) and an optional label; `amount` of 0 or less clears both. |
+| `/api/budget/set?amount=…&period=month\|week[&currency=EUR]` | Set the budget; `amount` of 0 or less clears it. `currency` is what `amount` is in (default USD); a currency with no rate yet answers 400. |
+| `/api/plan/set?amount=…&label=…[&currency=EUR]` | Set the plan cost (0.01 to 1,000,000) and an optional label; `amount` of 0 or less clears both. `currency` as for the budget. |
+| `/api/currency/set?code=EUR[&rate=0.92]` | Set the display currency. Without `rate`, a currency from the ECB list uses the ECB's daily rates (the first download happens before the reply); with `rate`, that fixed rate (units per 1 USD) and no download. Any other ISO code needs a `rate`. `code=USD` clears both. |
 | `/api/tray/enable` · `/api/tray/disable` | Turn the tray icon on or off (Windows). Enable also starts it again (the dashboard's **Retry**). |
 | `/api/strip/enable` · `/api/strip/disable` | Turn Burnglass Strip on or off (Windows). |
 | `/api/startup/enable` · `/api/startup/disable` | Turn start with Windows on or off. |

@@ -331,16 +331,44 @@ const SERIES = ["#3987e5","#d95926","#199e70","#c98500","#d55181","#008300"];
 const OTHER_COLOR = "#8d92a4"; // --text3: the merged "Other" slice is not a source
 const safeColor = (c,i)=> /^#[0-9a-f]{6}$/i.test(String(c||"")) ? c : SERIES[i%SERIES.length];
 
-function money(n){ // compact center label: $13.4K, $2.5K, $91.15
-  if(n>=1000){ const k=n/1000; return "$"+(k>=100?Math.round(k):k.toFixed(1)).toString().replace(/\.0$/,"")+"K"; }
-  return "$"+n.toFixed(2);
+/* ---------- display currency ---------- */
+// The host converts every amount into the display currency before it gets here and sends the format
+// as payload.currency {code, prefix, digits} (none = US dollars). Checked again (strip-ui.json on disk
+// feeds the page too), by the host's DisplayCurrency rules: a prefix of 1-8 characters without
+// control / format (bidi, zero-width) / separator characters or unpaired surrogates, else "$" (the
+// host falls back to dollars, amounts unconverted, by the same rule); digits an integer 0-4, else 2.
+// The prefix only ever reaches the page as text (textContent / attributes), never as markup.
+const USD = { code:"USD", prefix:"$", digits:2 };
+let CUR = USD;
+const BAD_PREFIX = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Cs}]/u;
+function displayCurrency(c){
+  if(!c || typeof c!=="object" || Array.isArray(c)) return USD;
+  const p=c.prefix;
+  if(typeof p!=="string" || p.length<1 || p.length>8 || BAD_PREFIX.test(p)) return USD;
+  const digits = Number.isInteger(c.digits) && c.digits>=0 && c.digits<=4 ? c.digits : 2;
+  const code = typeof c.code==="string" && /^[A-Z]{3}$/.test(c.code) ? c.code : "";
+  return { code, prefix:p, digits };
 }
-// The dashboard's money(): "$2,178.09", "<$0.01".
+
+function money(n){ // compact center label: $13.4K, $2.5K, $91.15 — ¥13.4K, ¥850 with 0 digits
+  const P=CUR.prefix;
+  if(n>=1e6){ const m=n/1e6; return P+(m>=100?Math.round(m):m.toFixed(1)).toString().replace(/\.0$/,"")+"M"; }
+  if(n>=1000){ const k=n/1000; return P+(k>=100?Math.round(k):k.toFixed(1)).toString().replace(/\.0$/,"")+"K"; }
+  return P+n.toFixed(CUR.digits);
+}
+// The dashboard's money(): "$2,178.09", "<$0.01" — "¥15,234", "<¥1" with 0 digits.
 function moneyFull(n){
-  if(n>0 && n<0.01) return "<$0.01";
-  return "$"+n.toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
+  const d=CUR.digits, least=Math.pow(10,-d);
+  if(n>0 && n<least) return "<"+CUR.prefix+least.toFixed(d);
+  return CUR.prefix+n.toLocaleString("en-US",{minimumFractionDigits:d,maximumFractionDigits:d});
 }
-function parseDollars(s){ if(!s)return 0; const m=String(s).replace(/,/g,"").match(/\$([\d.]+)/); return m?parseFloat(m[1]):0; }
+// The amount after the currency prefix at the start of a card line ("€2,178.50 · 2.5M tokens").
+function parseAmount(s){
+  const t=String(s||"");
+  if(!t.startsWith(CUR.prefix)) return 0;
+  const m=t.slice(CUR.prefix.length).match(/^\s*([\d,]*\.?\d+)/);
+  return m?parseFloat(m[1].replace(/,/g,"")):0;
+}
 const num = v => { const n=Number(v); return isFinite(n) && n>0 ? n : 0; };
 
 // "Resets in 7m" · "Resets in 2h 05m" · "Resets in 40d 18h" (the dashboard's dur(), to the minute —
@@ -493,7 +521,7 @@ function spendSources(payload, providers){
     const row={ id:String(p.providerId||i), label:String(p.displayName||p.providerId||"?"), color:SERIES[i%SERIES.length] };
     for(const f in PERIOD_LINE){
       const line=(p.lines||[]).find(l=>l.type==="text"&&l.label===PERIOD_LINE[f]);
-      row[f]=parseDollars(line&&line.value);
+      row[f]=parseAmount(line&&line.value);
     }
     return row;
   });
@@ -715,7 +743,7 @@ function brandMark(){
   return b;
 }
 
-// Entry point the host calls: renderData(<array or {providers, errors, sources, thresholds}>)
+// Entry point the host calls: renderData(<array or {providers, errors, sources, thresholds, currency}>)
 window.renderData = function(payload){
   try{
     let providers = Array.isArray(payload) ? payload : (payload && payload.providers) || [];
@@ -723,6 +751,7 @@ window.renderData = function(payload){
     const byId={}; for(const e of errors){ if(e && e.providerId) byId[e.providerId]=e.message; }
     for(const p of providers){ if(byId[p.providerId]) p.__error=byId[p.providerId]; }
     THRESHOLDS = alertThresholds(payload && !Array.isArray(payload) ? payload.thresholds : null);
+    CUR = displayCurrency(payload && !Array.isArray(payload) ? payload.currency : null);
     SOURCES = spendSources(payload, providers);
     renderApp(providers, errors);
   }catch(err){ const a=document.getElementById("app"); a.textContent=""; const e=el("div","empty"); e.textContent=String(err); a.appendChild(e); }
@@ -734,7 +763,7 @@ window.renderData = function(payload){
 const SAMPLE=(()=>{
   const now=Date.now(), iso=ms=>new Date(now+ms).toISOString(), H=3600e3, D=24*H;
   const trend=(vals)=>({ label:"Daily Spend", type:"barChart", note:"Last 30 days",
-    points:vals.map((v,i)=>({ label:"d"+i, value:v, valueLabel:"$"+v.toFixed(2) })) });
+    points:vals.map((v,i)=>({ label:"d"+i, value:v, valueLabel:moneyFull(v) })) });
   const pct=(label,used,resetMs,periodMs,projected)=>Object.assign({ label, type:"progress", used, limit:100,
     format:{kind:"percent"}, resetsAt:iso(resetMs), periodDurationMs:periodMs }, projected!=null?{projected}:{});
   return {

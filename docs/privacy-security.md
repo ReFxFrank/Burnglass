@@ -7,8 +7,8 @@ What Burnglass reads, what it writes, every network call it can make, and how it
 ---
 
 **In short:** Burnglass runs on your machine, binds to `127.0.0.1`, only reads your
-agents' logs, and never sends your usage anywhere. With the update check off and nothing
-opted in, it makes no network calls at all.
+agents' logs, and never sends your usage anywhere. With the update check off, nothing
+opted in and amounts in US dollars, it makes no network calls at all.
 
 ## What it reads (read-only)
 
@@ -60,6 +60,12 @@ completely alone.
 2. **Account meters (opt-in):** `api.anthropic.com` and `chatgpt.com`, with each
    provider's own login token (below).
 3. **Meshy credits (opt-in):** `api.meshy.ai`, with the API key you paste.
+4. **Exchange rates (only with a non-USD currency):** the European Central Bank's public
+   daily reference rates (`www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml`), about
+   twice a day, only while a currency from its list is in use for display, a budget or a
+   plan price, and never with a fixed rate you typed. It's a plain download of a public
+   file: nothing about you or your usage is sent. With US dollars (the default) it never
+   happens.
 
 **Discord presence** (opt-in) talks to the Discord desktop app over its **local** socket,
 not the network. If you use `https://` image links, Discord's image proxy fetches them,

@@ -512,13 +512,126 @@ static class MeterScale
     }
 }
 
+/// The display currency. Every amount in /api/summary is US dollars (a frozen API); a server with a
+/// display currency adds a top-level block {code, rate, prefix, symbol, digits, source, asOf, status,
+/// requested} — rate = display units per 1 USD, prefix = the text before the number ("€", "CHF "),
+/// digits = fraction digits of an exact amount (0 for JPY, KRW…). SummaryTransform reads it with
+/// FromSummary, converts every amount it emits (Amount) and echoes the sanitized format as the UI
+/// payload's additive "currency" {code, prefix, digits}; StripForm reads that echo with FromUi (its
+/// amounts are already converted). Both treat the block defensively — strip-ui.json on disk feeds
+/// them too: accepted only when the rate (summary side) is finite in (0, 1e7] and the prefix is 1–8
+/// characters with no control / format (bidi, invisible) / line-separator / lone-surrogate
+/// character; otherwise the whole block falls back to US dollars ("$", rate 1). digits outside the
+/// integers 0–4 → 2. No block (an older server) = US dollars, exactly as before. Money is always
+/// formatted invariantly ("#,##0.00"): the dashboard prints en-US grouping for every currency.
+sealed class DisplayCurrency
+{
+    private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
+    public const double MaxRate = 1e7;
+    public const int MaxPrefix = 8;
+
+    public static readonly DisplayCurrency Usd = new("USD", "$", 2, 1);
+
+    public string Code { get; }
+    public string Prefix { get; }
+    public int Digits { get; }
+    /// Display units per 1 USD (1 for the UI payload's echo — its amounts are already converted).
+    public double Rate { get; }
+
+    private DisplayCurrency(string code, string prefix, int digits, double rate)
+    {
+        Code = code; Prefix = prefix; Digits = digits; Rate = rate;
+    }
+
+    /// The summary's "currency" block (any element; a missing property is ValueKind.Undefined).
+    public static DisplayCurrency FromSummary(JsonElement block) => Read(block, needRate: true);
+
+    /// The UI payload's "currency" echo {code, prefix, digits} — no rate, the amounts are converted.
+    public static DisplayCurrency FromUi(JsonElement block) => Read(block, needRate: false);
+
+    private static DisplayCurrency Read(JsonElement b, bool needRate)
+    {
+        try
+        {
+            if (b.ValueKind != JsonValueKind.Object) return Usd;
+            double rate = 1;
+            if (needRate && !(b.TryGetProperty("rate", out var r) && r.ValueKind == JsonValueKind.Number
+                    && r.TryGetDouble(out rate) && double.IsFinite(rate) && rate > 0 && rate <= MaxRate))
+                return Usd;
+            if (!(b.TryGetProperty("prefix", out var p) && p.ValueKind == JsonValueKind.String
+                    && p.GetString() is string prefix && CleanPrefix(prefix)))
+                return Usd;
+            int digits = b.TryGetProperty("digits", out var d) && d.ValueKind == JsonValueKind.Number
+                && d.TryGetDouble(out var dv) && dv >= 0 && dv <= 4 && dv == Math.Floor(dv) ? (int)dv : 2;
+            // Informational (ISO 4217); anything but three capital letters is dropped, not trusted.
+            string code = b.TryGetProperty("code", out var c) && c.ValueKind == JsonValueKind.String
+                && c.GetString() is string cs && cs.Length == 3 && cs.All(ch => ch >= 'A' && ch <= 'Z') ? cs : "";
+            return new DisplayCurrency(code, prefix, digits, rate);
+        }
+        catch { return Usd; } // e.g. a string holding an invalid surrogate escape: GetString throws
+    }
+
+    /// 1–8 UTF-16 units, none of them a control, format (bidi override, zero-width…), line /
+    /// paragraph separator or unpaired surrogate. The page applies the same rule (index.html).
+    public static bool CleanPrefix(string p)
+    {
+        if (p.Length == 0 || p.Length > MaxPrefix) return false;
+        for (int i = 0; i < p.Length; i++)
+        {
+            var cat = CharUnicodeInfo.GetUnicodeCategory(p, i); // a valid pair reads as its code point
+            if (cat is UnicodeCategory.Control or UnicodeCategory.Format or UnicodeCategory.LineSeparator
+                or UnicodeCategory.ParagraphSeparator or UnicodeCategory.Surrogate)
+                return false;
+            if (char.IsHighSurrogate(p[i])) i++;
+        }
+        return true;
+    }
+
+    /// A USD amount in display units (non-finite → 0: JSON has no NaN/Infinity). Rate 1 returns the
+    /// amount unchanged, so a US-dollar payload is bit-for-bit what it was before the currency.
+    public double Amount(double usd)
+    {
+        double v = usd * Rate;
+        return double.IsFinite(v) ? v : 0;
+    }
+
+    /// An exact (already converted) amount: "$2,263.58", "€1,131.79", "¥15,234", "CHF 12.30".
+    public string Exact(double amount) =>
+        Prefix + amount.ToString(Digits == 0 ? "#,##0" : "#,##0." + new string('0', Digits), Inv);
+
+    /// The taskbar's compact price (already converted): "$91", "$2.3K", "¥654K", "₩3.0M".
+    public string Compact(double n)
+    {
+        if (n >= 1e6) return Prefix + (n / 1e6).ToString(n / 1e6 >= 100 ? "0" : "0.0", Inv) + "M";
+        if (n >= 1000) return Prefix + (n / 1000).ToString(n / 1000 >= 100 ? "0" : "0.0", Inv) + "K";
+        return Prefix + n.ToString("0", Inv);
+    }
+
+    /// The amount at the start of a text line Exact wrote ("€2,178.50 · 2.5M tokens" → 2178.5), or
+    /// null when the line does not start with this prefix. Parsed invariantly: a culture-sensitive
+    /// double.TryParse reads '.' as a GROUP separator on comma-decimal locales (de-DE, pt-BR, …) and
+    /// turns 2263.58 into 226358 — a 100x-wrong strip.
+    public double? ParseAmount(string? s)
+    {
+        if (string.IsNullOrEmpty(s) || !s.StartsWith(Prefix, StringComparison.Ordinal)) return null;
+        var m = System.Text.RegularExpressions.Regex.Match(s[Prefix.Length..], @"^\s*([0-9][0-9,]*(?:\.[0-9]+)?)");
+        return m.Success && double.TryParse(m.Groups[1].Value.Replace(",", ""), NumberStyles.Float, Inv, out var v)
+            && double.IsFinite(v) ? v : null;
+    }
+
+    /// The UI payload's echo: what the page needs to format amounts it adds up itself.
+    public JsonObject ToJson() => new() { ["code"] = Code, ["prefix"] = Prefix, ["digits"] = Digits };
+}
+
 /// Transforms the server's /api/summary JSON into the providers[] schema the ported popover page and
 /// StripForm consume (ui-schema.md). Sources are classified: 'codex' → Codex; gemini/cline/roo/
 /// continue → their own providers; everything else (cli, claude-desktop, unknown, …) → Claude.
 /// Additive top-level keys beside providers/errors:
 ///   "sources"    — one row per SOURCE for the popover's spend donut, coloured and labelled exactly
 ///                  like the dashboard (see Sources below);
-///   "thresholds" — the summary's alertThresholds (MeterScale.Sanitize), for meter ticks + tones.
+///   "thresholds" — the summary's alertThresholds (MeterScale.Sanitize), for meter ticks + tones;
+///   "currency"   — {code, prefix, digits}: the display currency every amount here is already in
+///                  (DisplayCurrency; US dollars when the summary has none or a bad one).
 /// Never throws — any parse trouble yields an empty wrapper.
 static class SummaryTransform
 {
@@ -558,6 +671,9 @@ static class SummaryTransform
     {
         using var doc = JsonDocument.Parse(summaryJson);
         var root = doc.RootElement;
+        // Every amount below is converted into the display currency once, here in the transform: the
+        // page and the strip only format (with the "currency" echo) and never see a rate.
+        var cur = DisplayCurrency.FromSummary(root.TryGetProperty("currency", out var cy) ? cy : default);
 
         // ---- last30 period: per-class 30d totals + per-day cost series -------------------------
         JsonElement last30 = default;
@@ -643,7 +759,7 @@ static class SummaryTransform
             var lines = new JsonArray();
             foreach (var pr in claudeProgress) lines.Add(pr);
             AddSpendLines(lines, "claude", TodayFor("claude"), Week7For("claude"), claude30,
-                tokens30.GetValueOrDefault("claude"), daily);
+                tokens30.GetValueOrDefault("claude"), daily, cur);
             providers.Add(Provider("claude", "Claude", lines));
         }
         // No usable meters + a login problem → an actionable error card ("session" keeps it past the
@@ -683,7 +799,7 @@ static class SummaryTransform
             var lines = new JsonArray();
             foreach (var pr in codexProgress) lines.Add(pr);
             AddSpendLines(lines, "codex", TodayFor("codex"), Week7For("codex"), codex30,
-                tokens30.GetValueOrDefault("codex"), daily);
+                tokens30.GetValueOrDefault("codex"), daily, cur);
             providers.Add(Provider("codex", "Codex", lines));
         }
 
@@ -693,7 +809,7 @@ static class SummaryTransform
             double c30 = cost30.GetValueOrDefault(src);
             if (c30 <= 0) continue;
             var lines = new JsonArray();
-            AddSpendLines(lines, src, TodayFor(src), Week7For(src), c30, tokens30.GetValueOrDefault(src), daily);
+            AddSpendLines(lines, src, TodayFor(src), Week7For(src), c30, tokens30.GetValueOrDefault(src), daily, cur);
             providers.Add(Provider(src, char.ToUpperInvariant(src[0]) + src[1..], lines));
         }
 
@@ -705,18 +821,20 @@ static class SummaryTransform
         {
             ["providers"] = providers,
             ["errors"] = errors,
-            ["sources"] = Sources(root, srcCost30, dailySrc),
+            ["sources"] = Sources(root, srcCost30, dailySrc, cur),
             ["thresholds"] = thresholds,
+            ["currency"] = cur.ToJson(),
         }.ToJsonString(new JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping });
     }
 
     // The popover's spend donut, per SOURCE like the dashboard's (#mini MiniDonut): one row per key
     // of the server's allSources — alphabetical, and the order the dashboard colours by — with
     // colour SourceSeries[i % 6], the dashboard's label, and today (the last daily bucket), week7 (the
-    // last 7 daily buckets: the strip's calendar-day week) and cost30 (last30.bySource). A server
-    // without allSources falls back to the period's source keys, ordinal-sorted like a JS sort().
+    // last 7 daily buckets: the strip's calendar-day week) and cost30 (last30.bySource), each in the
+    // display currency. A server without allSources falls back to the period's source keys,
+    // ordinal-sorted like a JS sort().
     private static JsonArray Sources(JsonElement root, Dictionary<string, double> cost30,
-        List<Dictionary<string, double>> daily)
+        List<Dictionary<string, double>> daily, DisplayCurrency cur)
     {
         var order = new List<string>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
@@ -737,17 +855,18 @@ static class SummaryTransform
             double today = daily.Count > 0 ? daily[^1].GetValueOrDefault(id) : 0;
             double week7 = 0;
             for (int d = Math.Max(0, daily.Count - 7); d < daily.Count; d++) week7 += daily[d].GetValueOrDefault(id);
-            // Raw amounts, NOT pre-rounded: the popover rounds to cents once, like the dashboard's
-            // money() and this transform's own Money() for the provider card. A 4-decimal round
-            // first turned 12.344996 into 12.345 → "$12.35" beside "$12.34" everywhere else.
+            // Raw amounts (converted, NOT pre-rounded): the popover rounds to the currency's digits
+            // once, like the dashboard's money() and this transform's own Money() for the provider
+            // card. A 4-decimal round first turned 12.344996 into 12.345 → "$12.35" beside "$12.34"
+            // everywhere else.
             rows.Add(new JsonObject
             {
                 ["id"] = id,
                 ["label"] = SourceLabel(id, meta),
                 ["color"] = SourceSeries[i % SourceSeries.Length],
-                ["today"] = Finite(today),
-                ["week7"] = Finite(week7),
-                ["cost30"] = Finite(cost30.GetValueOrDefault(id)),
+                ["today"] = Finite(cur.Amount(today)),
+                ["week7"] = Finite(cur.Amount(week7)),
+                ["cost30"] = Finite(cur.Amount(cost30.GetValueOrDefault(id))),
             });
         }
         return rows;
@@ -807,18 +926,21 @@ static class SummaryTransform
             ? (int)Math.Round(Math.Clamp(100 - left, 0, 100), MidpointRounding.AwayFromZero)
             : null;
 
-    // The donut regex-parses "$X" out of lines labeled EXACTLY Today / Last 7 Days / Last 30 Days —
-    // keep the labels verbatim. No "All Time" line: per-source all-time isn't in the payload.
+    // The page's fallback donut (a payload without "sources") and the taskbar price parse the amount
+    // after the currency prefix out of lines labeled EXACTLY Today / Last 7 Days / Last 30 Days —
+    // keep the labels verbatim, the amount first. No "All Time" line: per-source all-time isn't in
+    // the payload. Amounts arrive in USD and leave in the display currency (cur).
     private static void AddSpendLines(JsonArray lines, string cls, double today, double week7,
-        double cost30, double tokens30, List<(string Date, Dictionary<string, double> ByClass)> daily)
+        double cost30, double tokens30, List<(string Date, Dictionary<string, double> ByClass)> daily,
+        DisplayCurrency cur)
     {
-        lines.Add(new JsonObject { ["label"] = "Today", ["type"] = "text", ["value"] = Money(today) });
-        lines.Add(new JsonObject { ["label"] = "Last 7 Days", ["type"] = "text", ["value"] = Money(week7) });
+        lines.Add(new JsonObject { ["label"] = "Today", ["type"] = "text", ["value"] = Money(today, cur) });
+        lines.Add(new JsonObject { ["label"] = "Last 7 Days", ["type"] = "text", ["value"] = Money(week7, cur) });
         lines.Add(new JsonObject
         {
             ["label"] = "Last 30 Days",
             ["type"] = "text",
-            ["value"] = Money(cost30) + " · " + Tokens(tokens30) + " tokens"
+            ["value"] = Money(cost30, cur) + " · " + Tokens(tokens30) + " tokens"
         });
         if (cost30 > 0 && daily.Count > 0)
         {
@@ -829,8 +951,8 @@ static class SummaryTransform
                 points.Add(new JsonObject
                 {
                     ["label"] = date,
-                    ["value"] = Math.Round(v, 4),
-                    ["valueLabel"] = Money(v),
+                    ["value"] = Math.Round(cur.Amount(v), 4),
+                    ["valueLabel"] = Money(v, cur),
                 });
             }
             lines.Add(new JsonObject
@@ -859,7 +981,8 @@ static class SummaryTransform
 
     private static string Capitalize(string s) => s.Length > 0 ? char.ToUpperInvariant(s[0]) + s[1..] : s;
 
-    private static string Money(double n) => "$" + n.ToString("#,##0.00", Inv);
+    // A USD amount → the display currency, formatted: "$2,263.58", "€1,131.79", "¥339,537".
+    private static string Money(double usd, DisplayCurrency cur) => cur.Exact(cur.Amount(usd));
 
     private static string Tokens(double n) =>
         n >= 1e9 ? (n / 1e9).ToString("0.0", Inv) + "B" :

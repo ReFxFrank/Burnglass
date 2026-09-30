@@ -44,6 +44,8 @@ Example:
 | --- | --- | --- |
 | `updateCheck` | on | `false` turns off the GitHub version check, the community download and star counters, and the strip refresh after a one-click update. Same as `--no-update-check`. |
 | `history` | on | `false` stops archiving past days to `~/.burnglass/history/`. See [How it works](how-it-works.md#history). |
+| `currency` | `USD` | The currency amounts are **shown** in, as an ISO code such as `"EUR"`, `"GBP"` or `"JPY"`. Costs are still computed in US dollars and converted for display. Set it in **System → Appearance → Currency**. See [Display currency](#display-currency). |
+| `currencyRate` | unset | A fixed rate for `currency`: how many units of it one US dollar buys (e.g. `0.92` for EUR). Set, it replaces the ECB's daily rate and Burnglass fetches nothing. Required for a currency the ECB doesn't publish. |
 
 ### Limits, alerts and budgets
 
@@ -58,8 +60,10 @@ See [Limits, alerts and budgets](limits-and-budgets.md) for how each one behaves
 | `anomalyAlerts` | off | `true` turns on the spend-anomaly alert. |
 | `anomalyMultiplier` | `3` | How many times your recent daily average today's spend must reach to count as an anomaly (minimum 1.5). |
 | `budget` | unset | Spend target in USD. Unset or 0 means no budget. |
+| `budgetCurrency` · `budgetAmount` | unset | Written by the dashboard when you enter the budget in another currency: the amount as you typed it and its currency. The budget then follows today's rate, and `budget` keeps the USD value from when you set it (used when no rate is available). |
 | `budgetPeriod` | `month` | `month` (resets on the 1st) or `week` (trailing 7 days). |
 | `planCost` | unset | What your subscription costs per month, in USD. |
+| `planCurrency` · `planAmount` | unset | Same as for the budget: the plan price as entered in another currency. |
 | `planLabel` | unset | A name for the plan, such as `"Max 20x"`. |
 
 ### Sources
@@ -108,6 +112,27 @@ See the [Windows guide](windows.md).
 
 Start with Windows is not a config key: it's a registry value, set with the **System**
 toggle, the installer or `--startup on`.
+
+## Display currency
+
+Every cost Burnglass computes is at the providers' list prices in **US dollars**. Picking
+another currency in **System → Appearance → Currency** converts what you *see* — the
+dashboard and mini view, the status line, `--summary`, Discord presence, the tray tooltip
+and Burnglass Strip:
+
+- **ECB daily rates (default for a listed currency).** The picker lists US dollars plus the
+  29 currencies in the European Central Bank's daily reference rates. While one of them is
+  in use, the server downloads the ECB's public rates file about twice a day and keeps the
+  last good copy in `fx-rates.json`, so a restart or an offline day keeps working. Nothing
+  about you is sent. With US dollars selected, Burnglass never makes this request.
+- **A fixed rate.** Tick *Use a fixed rate* and type how many units one US dollar buys. No
+  download happens. **Other currency** does the same for a currency the ECB doesn't publish.
+- **Budget and plan cost** are entered in the display currency and remembered in it: a
+  €100 budget stays €100, and its dollar value follows the rate.
+- If no rate is available yet (the first download failed and nothing is cached), amounts
+  stay in US dollars and System says why.
+- **Exports stay in US dollars** (their columns say `cost_usd`), and so does every number
+  in the API; `payload.currency` carries the rate. See the [API](api.md).
 
 ## Command-line flags
 
@@ -167,6 +192,7 @@ suites; they are listed in `CLAUDE.md`.
 | `burnglass.log` | The server log, written when Burnglass runs in the background (the Windows exe) or restarts after an update; from a terminal it prints to the console instead. **System** shows the latest lines either way. |
 | `server.json` | The running server's port and pid, so `--statusline` and `--summary` can find it. |
 | `meters-cache.json` | The last good account-meter reading (percentages and reset times, never a token). Deleted when you turn meters off. |
+| `fx-rates.json` | The last ECB exchange rates, written only while a non-USD currency uses them. |
 | `meshy.json` | Meshy task history (credits and task types, never your prompts). |
 | `modes.jsonl` | Effort levels logged by the optional hook. |
 | `discord-presence.json` | The Discord elapsed-timer start, so updates and quick restarts don't reset it. |

@@ -17,7 +17,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Spark } from './ui.jsx';
 import {
-  localDateStr, longDate, money, niceScale, shortDate, srcLabel, tokens,
+  curPrefix, displayCurrency, localDateStr, longDate, money, niceScale, shortDate, srcLabel, tokens,
 } from './lib.js';
 
 // Measure an element's content width (responsive SVG without distortion).
@@ -98,13 +98,16 @@ function chartScale(max) {
 // Axis tick label with exactly the precision the tick needs: $0 · $2.5 · $25 ·
 // $1.25k · $12.5k. (lib.moneyAxis rounds $1,250 to "$1.3k" and $12,500 to
 // "$13k" — fine for a lone label, wrong on an axis whose step is 250/2,500.)
+// `v` is ALREADY in display units (the y scale is built in them, so a euro
+// axis gets round euro ticks rather than converted round dollars).
 function tickMoney(v) {
-  if (!(v > 0)) return '$0';
+  const p = curPrefix();
+  if (!(v > 0)) return p + '0';
   const [div, suf] = v >= 1e6 ? [1e6, 'M'] : v >= 1e3 ? [1e3, 'k'] : [1, ''];
   const x = v / div;
   let d = 0;
   while (d < 3 && Math.abs(Number(x.toFixed(d)) - x) > 1e-9) d++;
-  return '$' + x.toFixed(d) + suf;
+  return p + x.toFixed(d) + suf;
 }
 
 const SEG_GAP = 2; // px of surface between stacked segments
@@ -142,8 +145,12 @@ export function SpendChart({ period, colorMap, meta, avg = null, height = 232, e
   const H = height;
   const yb = H - 1; // baseline (the axis hairline sits in the last pixel row)
   const maxDay = days.reduce((m, d) => Math.max(m, d.total || 0), 0);
-  const scale = useMemo(() => chartScale(Math.max(maxDay, avg || 0)), [maxDay, avg]);
-  const y = (v) => yb - (Math.max(0, v) / scale.max) * yb;
+  // The scale lives in DISPLAY units (nice euro ticks, not converted dollar
+  // ones); y() takes USD values, yt() the scale's own ticks.
+  const rate = displayCurrency().rate;
+  const scale = useMemo(() => chartScale(Math.max(maxDay, avg || 0) * rate), [maxDay, avg, rate]);
+  const y = (v) => yb - (Math.max(0, v) * rate / scale.max) * yb;
+  const yt = (t) => yb - (t / scale.max) * yb;
 
   const slot = n ? W / n : 0;
   const colGap = slot >= 12 ? 3 : slot >= 6 ? 2 : slot >= 3 ? 1 : 0;
@@ -195,7 +202,7 @@ export function SpendChart({ period, colorMap, meta, avg = null, height = 232, e
       });
     });
     return <g className="sc-bars">{out}</g>;
-  }, [days, srcs, W, H, scale.max, colorMap, bw, slot]); // y/barX derive from these
+  }, [days, srcs, W, H, scale.max, rate, colorMap, bw, slot]); // y/barX derive from these
 
   // x labels: thinned by width, clamped inside the plot at the edges, and any
   // that would still touch a higher-priority neighbour (today > last > first
@@ -321,7 +328,7 @@ export function SpendChart({ period, colorMap, meta, avg = null, height = 232, e
     <div className="sc" ref={wrapRef} style={{ '--sc-h': H + 'px' }}>
       <div className="sc-yax" aria-hidden="true">
         {scale.ticks.map((t) => {
-          const ty = y(t);
+          const ty = yt(t);
           const hide = avgY != null && Math.abs(ty - avgY) < 12;
           return <span key={t} style={{ top: ty + 'px', visibility: hide ? 'hidden' : undefined }}>{tickMoney(t)}</span>;
         })}
@@ -344,7 +351,7 @@ export function SpendChart({ period, colorMap, meta, avg = null, height = 232, e
         {W > 0 ? (
           <svg className="sc-svg" width={W} height={H} viewBox={`0 0 ${W} ${H}`} aria-hidden="true">
             {scale.ticks.slice(1).map((t) => {
-              const gy = Math.round(y(t)) + 0.5;
+              const gy = Math.round(yt(t)) + 0.5;
               return <line key={t} className="sc-gl" x1="0" x2={W} y1={gy} y2={gy} />;
             })}
             {active >= 0 ? (

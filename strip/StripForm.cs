@@ -137,6 +137,9 @@ sealed class StripForm : Form
                 providers = pv;
             // The alert thresholds the payload carries (the dashboard's), default 80 / 95.
             var thresholds = MeterScale.Sanitize(wrapped && doc.RootElement.TryGetProperty("thresholds", out var th) ? th : default);
+            // The display currency the payload's amounts are ALREADY in (SummaryTransform converted
+            // them); only its prefix is used here. No echo (a payload an older strip saved) = "$".
+            var currency = DisplayCurrency.FromUi(wrapped && doc.RootElement.TryGetProperty("currency", out var cu) ? cu : default);
             if (providers.ValueKind == JsonValueKind.Array)
             {
                 foreach (var p in providers.EnumerateArray())
@@ -162,7 +165,7 @@ sealed class StripForm : Form
                             else if (type == "text" && l.TryGetProperty("label", out var lab) && lab.GetString() == "Last 30 Days"
                                 && l.TryGetProperty("value", out var val))
                             {
-                                spend30 = ParseDollars(val.GetString());
+                                spend30 = currency.ParseAmount(val.GetString());
                             }
                         }
                     if (id.Length == 0) continue;
@@ -170,7 +173,7 @@ sealed class StripForm : Form
                     string uBot = pcts.Count > 1 ? pcts[1] + "%" : "";
                     int tTop = tones.Count > 0 ? tones[0] : 0;
                     int tBot = tones.Count > 1 ? tones[1] : 0;
-                    string price = spend30 is > 0 ? CompactMoney(spend30.Value) : "";
+                    string price = spend30 is > 0 ? currency.Compact(spend30.Value) : "";
                     // Keep the provider if it has EITHER usage or price; the strip rotates between whatever
                     // it has (a provider with only one just shows that one, no flip).
                     if (uTop.Length > 0 || price.Length > 0)
@@ -194,21 +197,10 @@ sealed class StripForm : Form
         }
     }
 
-    // The server formats money invariantly ("$2,263.58"), so parse it invariantly too.
-    // A culture-sensitive double.TryParse reads '.' as a GROUP separator on comma-decimal
-    // locales (de-DE, pt-BR, …) and turns 2263.58 into 226358 — a 100x-wrong strip.
-    private static double? ParseDollars(string? s)
-    {
-        if (string.IsNullOrEmpty(s)) return null;
-        var m = System.Text.RegularExpressions.Regex.Match(s.Replace(",", ""), @"\$([0-9.]+)");
-        return m.Success && double.TryParse(m.Groups[1].Value, NumberStyles.Float,
-            CultureInfo.InvariantCulture, out var v) ? v : null;
-    }
-
-    private static string CompactMoney(double n)
-        => n >= 1000
-            ? "$" + (n / 1000).ToString(n / 1000 >= 100 ? "0" : "0.0", CultureInfo.InvariantCulture) + "K"
-            : "$" + n.ToString("0", CultureInfo.InvariantCulture);
+    // The 30-day price is parsed out of the "Last 30 Days" line (DisplayCurrency.ParseAmount: after
+    // the currency prefix, invariantly — "$2,263.58" must never read as 226358 on a comma-decimal
+    // locale) and printed compact in the same currency (DisplayCurrency.Compact: "$2.3K", "€1.1K",
+    // "¥340K"). Both live in Program.cs so test/packaging.test.sh can compile them.
 
     private const string CacheName = "strip_cells.json";
 

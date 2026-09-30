@@ -46,6 +46,15 @@
 .sec-system .setting-l { font-size: var(--fs-xs); color: var(--text-2); font-weight: var(--fw-med); }
 .sec-system .setting .seg { width: 100%; }
 .sec-system .setting .seg button { flex: 0 0 auto; }
+.sec-system .cur-set { align-items: stretch; }
+.sec-system .cur-sel { cursor: pointer; }
+.sec-system .cur-fixed { display: flex; align-items: center; gap: 8px; font-size: var(--fs-sm); color: var(--text-2); cursor: pointer; }
+.sec-system .cur-fixed input { accent-color: var(--accent); margin: 0; }
+.sec-system .cur-rate { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sec-system .cur-rate .cur-num { width: 110px; flex: 0 0 auto; }
+.sec-system .cur-rate .cur-code { width: 70px; flex: 0 0 auto; text-transform: uppercase; }
+.sec-system .cur-eq { font-size: var(--fs-sm); color: var(--text-2); white-space: nowrap; }
+.sec-system .cur-bad { color: var(--warn); }
 
 /* ---- integrations: hairline grid of toggle rows ---- */
 .sec-system .toggles {

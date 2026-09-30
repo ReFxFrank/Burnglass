@@ -75,6 +75,9 @@ small executable, needs no configuration, and your usage data never leaves your 
 - **Current list prices** for Anthropic, OpenAI, Google Gemini, Z.ai GLM and DeepSeek,
   including cache reads and writes, fast mode, long context, US-only inference and
   DeepSeek's off-peak discount.
+- **Your currency**: show every amount in euros, pounds, yen or any of 30 currencies at the
+  European Central Bank's daily rates, or at a fixed rate you type
+  ([details](docs/configuration.md#display-currency)).
 
 **See it anywhere**
 - A **mini view** for a narrow docked window, and a layout that works from a phone to a 4K monitor.

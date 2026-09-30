@@ -75,26 +75,59 @@ export function effortBars(level) {
   }
 }
 
-// ---- formatters --------------------------------------------------------------
-const LOCALE = 'en-US'; // "$" + en-US grouping — never "$1.063,72"
+// ---- display currency --------------------------------------------------------
+// Every cost in the payload is US dollars. payload.currency (server-computed:
+// ECB daily reference rates or a typed rate) says how to SHOW them: App sets
+// it on every payload, and money()/moneyAxis()/curPrefix() convert at render.
+// A payload without it (an older server) or a malformed block = USD.
+const USD = { code: 'USD', rate: 1, prefix: '$', digits: 2 };
+let CUR = USD;
+export function setDisplayCurrency(c) {
+  const ok = c && typeof c === 'object' && typeof c.code === 'string' && /^[A-Z]{3}$/.test(c.code)
+    && typeof c.rate === 'number' && isFinite(c.rate) && c.rate > 0 && c.rate <= 1e7
+    && typeof c.prefix === 'string' && c.prefix.length > 0 && c.prefix.length <= 8;
+  CUR = ok ? {
+    code: c.code, rate: c.rate, prefix: c.prefix,
+    digits: Number.isInteger(c.digits) && c.digits >= 0 && c.digits <= 4 ? c.digits : 2,
+  } : USD;
+}
+// The currency amounts are shown in ({code, rate, prefix, digits}).
+export function displayCurrency() { return CUR; }
+// USD → display units (for inputs and scales; money() does this itself).
+export function toDisplay(usd) { return usd * CUR.rate; }
+export function curPrefix() { return CUR.prefix; }
+// Fired to make useSummary refetch now (after a currency change).
+export const REFRESH_EVENT = 'burnglass:refresh';
+export function requestRefresh() {
+  try { window.dispatchEvent(new Event(REFRESH_EVENT)); } catch (_) {}
+}
 
-// $1,063.72 · $7.63 · <$0.01 · −$5.10 · — (null). Always 2 decimals.
+// ---- formatters --------------------------------------------------------------
+const LOCALE = 'en-US'; // en-US grouping in every currency — never "$1.063,72"
+
+// $1,063.72 · €7.63 · <$0.01 · −$5.10 · ¥1,064 · — (null). The currency's own
+// decimals (2, or 0 for JPY / KRW / ISK). `v` is USD.
 export function money(v) {
   if (v == null || !isFinite(v)) return '—';
-  const n = Number(v);
-  if (n > 0 && n < 0.01) return '<$0.01';
-  if (n < 0 && n > -0.01) return '−<$0.01';
-  const s = '$' + Math.abs(n).toLocaleString(LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const n = Number(v) * CUR.rate;
+  const d = CUR.digits;
+  const tiny = d > 0 ? 1 / 10 ** d : 1; // the smallest amount the currency writes
+  const least = d > 0 ? (tiny).toFixed(d) : '1';
+  if (n > 0 && n < tiny) return '<' + CUR.prefix + least;
+  if (n < 0 && n > -tiny) return '−<' + CUR.prefix + least;
+  const s = CUR.prefix + Math.abs(n).toLocaleString(LOCALE, { minimumFractionDigits: d, maximumFractionDigits: d });
   return n < 0 ? '−' + s : s;
 }
 // Compact money for chart axes and tight labels: $0 · $2.5 · $25 · $1.2k · $12k.
+// `v` is USD.
 export function moneyAxis(v) {
   if (v == null || !isFinite(v)) return '—';
-  const a = Math.abs(v), sign = v < 0 ? '−' : '';
-  if (a >= 1e6) return sign + '$' + trimZero((a / 1e6).toFixed(a >= 1e7 ? 0 : 1)) + 'M';
-  if (a >= 1e3) return sign + '$' + trimZero((a / 1e3).toFixed(a >= 1e4 ? 0 : 1)) + 'k';
-  if (a >= 10 || a === 0) return sign + '$' + Math.round(a);
-  return sign + '$' + trimZero(a.toFixed(a >= 1 ? 1 : 2));
+  const x = v * CUR.rate, p = CUR.prefix;
+  const a = Math.abs(x), sign = x < 0 ? '−' : '';
+  if (a >= 1e6) return sign + p + trimZero((a / 1e6).toFixed(a >= 1e7 ? 0 : 1)) + 'M';
+  if (a >= 1e3) return sign + p + trimZero((a / 1e3).toFixed(a >= 1e4 ? 0 : 1)) + 'k';
+  if (a >= 10 || a === 0) return sign + p + Math.round(a);
+  return sign + p + trimZero(a.toFixed(a >= 1 ? 1 : 2));
 }
 function trimZero(s) { return s.indexOf('.') >= 0 ? s.replace(/\.?0+$/, '') : s; }
 
@@ -328,25 +361,36 @@ export function useSummary(intervalMs = 10000, sources = null) {
   useEffect(() => {
     let alive = true;
     const url = '/api/summary' + (sourcesKey ? '?sources=' + encodeURIComponent(sourcesKey) : '');
+    let again = false; // a refresh asked for while one was in flight
     async function refresh() {
-      if (inFlight.current) return;
+      if (inFlight.current) { again = true; return; }
       inFlight.current = true;
       try {
         const r = await fetch(url, { cache: 'no-store' });
         if (!r.ok) throw new Error('HTTP ' + r.status + ' — ' + (await r.text()).slice(0, 200));
         const data = await r.json();
+        // Before the render that uses it: every money() in this payload's
+        // render is in the payload's own display currency.
+        setDisplayCurrency(data && data.currency);
         if (alive) setState({ data, error: null, loading: false });
       } catch (e) {
         if (alive) setState((s) => ({ data: s.data, error: String(e.message || e), loading: false }));
       } finally {
         inFlight.current = false;
       }
+      // A requestRefresh() that landed mid-fetch (a currency change) must not
+      // be answered by the older reply: fetch once more.
+      if (again && alive) { again = false; refresh(); }
     }
     refresh();
     const id = setInterval(refresh, intervalMs);
+    // A setting that changes the whole page (the display currency) asks for
+    // a fresh payload at once instead of waiting for the next poll.
+    window.addEventListener(REFRESH_EVENT, refresh);
     return () => {
       alive = false;
       clearInterval(id);
+      window.removeEventListener(REFRESH_EVENT, refresh);
     };
   }, [intervalMs, sourcesKey]);
 
