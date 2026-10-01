@@ -5,7 +5,7 @@
 // PROPS (SectionProps — built in App.jsx):
 //   id          'kpis' — render on the root <Section id={id}> (no title/label;
 //               the rail's "Overview" item points here)
-//   data        payload; reads today{cost,tokens,messages}, week{…},
+//   data        payload; reads today{cost,tokens,messages}, week{…} (fallback for last7),
 //               burnRate{dollarsPerHour,tokensPerMin,elapsedMin,windowCost}|null,
 //               currentBlock{start,end,cost,tokens,messages,vsPeakCostPct,official}|null,
 //               periods[] (the last30 average is the Today tile's baseline)
@@ -58,7 +58,7 @@ export default function Kpis({ id, data, period }) {
       <div className="kpis">
         {period ? <HeroTile period={period} /> : null}
         <DayTile today={data.today} avg={avg30} />
-        <WeekTile week={data.week} />
+        <WeekTile week={(data.periods || []).find((p) => p.key === 'last7') || data.week} />
         <BurnTile burn={data.burnRate} />
         <BlockTile cb={data.currentBlock} />
       </div>
@@ -120,6 +120,9 @@ function DayTile({ today, avg }) {
   );
 }
 
+// The Last 7 days PERIOD (today + the 6 days before it), so this tile and the
+// period of the same name never disagree; an older server's rolling week
+// otherwise.
 function WeekTile({ week }) {
   const w = week || { cost: 0, tokens: 0, messages: 0 };
   return (

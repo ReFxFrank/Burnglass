@@ -2957,8 +2957,12 @@ function aggregate(entries, sessionMeta, desktopTitles, now, modesBySession, ult
     return { cost: p.cost, tokens: p.tokens, messages: p.messages };
   };
 
-  // Rolling windows (newest first in the dropdown).
+  // Rolling windows, shortest first (the rail lists them in this order). Each
+  // is N CALENDAR days ending today — Last 7 days is today plus the 6 days
+  // before it, not the rolling 168 h of payload.week (the budget's week).
   for (const [key, label, nDays] of [
+    ['last7', 'Last 7 days', 7],
+    ['last14', 'Last 14 days', 14],
     ['last30', 'Last 30 days', 30],
     ['last90', 'Last 90 days', 90],
     ['last180', 'Last 180 days', 180],
@@ -8643,7 +8647,10 @@ function startServer(port, host, opts) {
           return;
         }
         const periodKey = q.get('period') || '';
-        const period = (payload.periods || []).find((p) => p.key === periodKey) || (payload.periods || [])[0];
+        // No / unknown period → Last 30 days (the default since exports began;
+        // the list no longer starts with it).
+        const list = payload.periods || [];
+        const period = list.find((p) => p.key === periodKey) || list.find((p) => p.key === 'last30') || list[0];
         const data = q.get('data') || 'daily';
         if (!period) {
           res.writeHead(404, { 'Content-Type': 'application/json' });
@@ -10031,10 +10038,13 @@ function summaryLines(s) {
   out.push('');
 
   const p30 = (s.periods || []).find((p) => p.key === 'last30');
+  // The same 7 calendar days as the dashboard's Last 7 days (a server older
+  // than 2.2 has no last7 period: its rolling week).
+  const p7 = (s.periods || []).find((p) => p.key === 'last7');
   const cur = s.currency;
   const spend = (label, o) => { if (o) row(label, bold(fmtMoney(o.cost || 0, cur).padStart(9)), fmtTok(o.tokens || 0) + ' tokens'); };
   spend('today', s.today);
-  spend('7 days', s.week);
+  spend('7 days', p7 || s.week);
   spend('30 days', p30);
 
   // Meter percentages, when the (opt-in) account meters are on. Codex's come

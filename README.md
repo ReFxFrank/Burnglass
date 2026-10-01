@@ -49,7 +49,7 @@ small executable, needs no configuration, and your usage data never leaves your 
 **Track your spend**
 - **Live spend**: today, the last 7 days, the burn rate, the current 5-hour block with its
   reset countdown, and a 30-day chart stacked by source. The page refreshes every 10 seconds.
-- **Any period**: rolling 30 / 90 / 180 days or any calendar month, compared with the
+- **Any period**: rolling 7 / 14 / 30 / 90 / 180 days or any calendar month, compared with the
   previous window of the same length (*▲ 18% vs the previous 30 days*).
 - **Breakdowns** by model, source, reasoning effort and project, a *When you work*
   heatmap and your recent sessions. Source checkboxes narrow the spend figures to any
