@@ -65,6 +65,18 @@
 .sec-limits .lim-note .ln-t { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .sec-limits .lim-note.warn .ln-t { color: var(--text-2); }
 .sec-limits .lim-note + .cx { border-top: 1px solid var(--line); }
+.sec-limits .lim-note { flex-wrap: wrap; }
+/* "Why?" — the usage-check journal, under the rate-limit note */
+.sec-limits .lim-why { display: contents; }
+.sec-limits .lw-body { flex: 1 0 100%; order: 10; display: flex; flex-direction: column; gap: 8px; padding: 4px 0 2px; color: var(--text-2); }
+.sec-limits .lw-body p { margin: 0; }
+.sec-limits .lw-hint { display: flex; gap: 8px; align-items: flex-start; }
+.sec-limits .lw-hint > .ic { color: var(--warn); flex: none; margin-top: 1px; }
+.sec-limits .lw-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; font-variant-numeric: tabular-nums; }
+.sec-limits .lw-list li { display: flex; gap: 10px; flex-wrap: wrap; }
+.sec-limits .lw-t { color: var(--text-3); min-width: 64px; }
+.sec-limits .lw-r.warn { color: var(--warn); }
+.sec-limits .lw-x { color: var(--text-3); }
 
 /* ---- Codex account tokens ---- */
 .sec-limits .cx {

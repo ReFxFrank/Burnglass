@@ -38,6 +38,13 @@ or other computers. But your Pro / Max limits are **unified**: everything drains
   tray icon on) when only the status line, Discord or the tray is reading. It backs off on
   HTTP 429 and keeps the last good numbers; the card's *rate-limited* note counts down
   to the next try.
+- **Live from Claude Code's status line:** with Burnglass as Claude Code's
+  [status line](../README.md#claude-code-status-line), every redraw hands it Claude Code's own 5-hour and weekly
+  readings (from Claude Code's API replies, so no extra request), and Burnglass passes
+  them to the dashboard. Those two meters then stay current even while Anthropic
+  rate-limits the usage check, and Burnglass asks the endpoint only every 15 minutes, for
+  the per-model rows. Readings of the same window keep the highest value, so an idle
+  Claude Code window can't pull a meter back down.
 - **Survives restarts:** the last good reading (percentages and reset times, never the
   token) and any active backoff are kept in `~/.burnglass/meters-cache.json`, so after a
   restart or an update the grid shows them at once, with their real age. Readings older
@@ -52,6 +59,22 @@ or other computers. But your Pro / Max limits are **unified**: everything drains
   per-conversation breakdown exists anywhere. The endpoint is internal to Anthropic and
   could change; the card degrades gracefully if it does. If you switch Claude logins
   between runs, the old account's numbers show until the next good reading.
+
+### Rate-limited (HTTP 429)?
+
+Anthropic limits the usage check **per account**, not per app: Claude Code itself, other
+status-line tools, usage widgets and Burnglass all count against the same limit. When it
+answers 429, the card's **Why?** shows:
+
+- how often Burnglass asked in the last hour and the last 24 hours (since it started),
+  with the most recent checks, what triggered each one and how long Anthropic asked it to
+  wait (Burnglass always waits at least that long);
+- **another status-line tool** if Claude Code's status line runs something other than
+  Burnglass (many of them check the same endpoint on every redraw);
+- **OpenUsage** if it's still running (Windows and macOS): it polls the endpoint itself,
+  and Burnglass Strip replaces it;
+- whether Claude Code's status line is keeping the 5-hour and weekly meters current, and
+  how to set that up if it isn't.
 
 ### Codex account tokens
 

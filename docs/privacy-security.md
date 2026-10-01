@@ -67,6 +67,11 @@ completely alone.
    file: nothing about you or your usage is sent. With US dollars (the default) it never
    happens.
 
+The **status line** passes Claude Code's own 5-hour and weekly readings to the local
+Burnglass server (loopback only, never the network). Burnglass keeps a short in-memory log
+of its own usage checks for the dashboard's *Why?*; it reads Claude Code's `settings.json`
+only to name another status-line tool there (the command itself never leaves the server).
+
 **Discord presence** (opt-in) talks to the Discord desktop app over its **local** socket,
 not the network. If you use `https://` image links, Discord's image proxy fetches them,
 not Burnglass.

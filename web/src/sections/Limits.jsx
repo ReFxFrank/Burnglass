@@ -37,7 +37,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Section, Panel, Btn, Seg, InputGroup, Input, Tip, cx } from '../ui.jsx';
 import { AccountLimits } from '../meters.jsx';
-import { BRAND, MONTHS, curPrefix, displayCurrency, dur, money, postJson, toDisplay } from '../lib.js';
+import { BRAND, MONTHS, curPrefix, displayCurrency, dur, launchInfo, money, postJson, toDisplay } from '../lib.js';
 import './Limits.css';
 
 // A user-entered round target reads as "$1,200", not "$1,200.00" (as in the
@@ -475,6 +475,8 @@ export default function Limits({ id, data, period, thresholds, srcFilter, onPeri
         codexUsage={src.codexUsage}
         thresholds={th}
         onRecheck={recheck}
+        statuslineCmd={launchInfo(data).cmd + ' --statusline-setup'}
+        hasStatusline={(data.integrations || []).some((i) => i.kind === 'statusline')}
       />
       <div className="c-4 lg-12 stack lim-side">
         <BudgetPanel budget={src.budget || null} filtered={filtered} onSaved={refresh} />

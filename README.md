@@ -268,7 +268,9 @@ Anthropic's character; all of these GIFs, the pixel Clawd included, are unoffici
 
 The model and context come from Claude Code; today's spend across every tool, the
 current 5-hour block and your limit percentages (`cx` = Codex weekly) come from the
-running Burnglass server, so the status line never calls a provider itself. Run
+running Burnglass server, so the status line never calls a provider itself. In return it
+hands the server the 5-hour and weekly readings Claude Code gives it, which keeps the
+dashboard's account meters current without asking Anthropic. Run
 `burnglass --statusline-setup` and paste the printed snippet into
 `~/.claude/settings.json` (Burnglass never edits it for you):
 

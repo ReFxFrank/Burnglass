@@ -18,7 +18,7 @@ import { useState } from 'react';
 import { Icon } from './icons.jsx';
 import { FamilyMark } from './logos.jsx';
 import { Badge, Btn, InfoTip, MeterBar, Panel, cx } from './ui.jsx';
-import { BRAND, ago, dur, formatReset, localDateStr, meterTone, num, shortDate, staleNote, tokens, useTick } from './lib.js';
+import { BRAND, ago, clockTime, dur, formatReset, localDateStr, meterTone, num, shortDate, staleNote, tokens, useTick } from './lib.js';
 
 const HOUR = 3600e3;
 
@@ -231,7 +231,65 @@ export function CodexTokens({ cxu, hasCodexRows }) {
 // ---- the panel -------------------------------------------------------------------------
 const LIMITS_INFO = 'Official 5-hour and weekly utilisation, not estimates. Claude (opt-in): Anthropic’s own account meter — unified across claude.ai, cloud sessions and every device — read from api.anthropic.com with your existing Claude Code login, read-only. Codex: the rate-limit snapshot your newest local Codex rollout recorded; nothing leaves your machine, but it is only as fresh as your last Codex turn.';
 
-export function AccountLimits({ meters, codexMeters, codexUsage, thresholds, onRecheck, className }) {
+// ---- why rate-limited: the usage-check journal + other pollers --------------------
+// payload.meters.checks (every check Burnglass made: result, the wait Anthropic
+// asked for, what triggered it), .observed (Claude Code status-line readings in
+// use) and .hints (a non-Burnglass status line / an OpenUsage tray, after a 429).
+const CHECK_WORD = { ok: 'OK', limited: 'rate-limited', login: 'login rejected', error: 'failed' };
+const TRIGGER_WORD = { dashboard: 'dashboard open', background: 'background', recheck: 'Recheck', enable: 'turned on' };
+const mins = (ms) => Math.round(ms / 60000);
+export function MeterChecks({ meters, statuslineCmd, hasStatusline }) {
+  const [open, setOpen] = useState(false);
+  const c = meters && meters.checks;
+  if (!c) return null;
+  const obs = meters.observed;
+  const hints = meters.hints;
+  const cad = c.cadenceMs || {};
+  return (
+    <div className="lim-why">
+      <Btn size="sm" variant="ghost" iconRight={open ? 'up' : 'down'} aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+        {open ? 'Hide details' : 'Why?'}
+      </Btn>
+      {open ? (
+        <div className="lw-body">
+          <p>
+            {BRAND} asked <b>{c.lastHour.total}</b> {c.lastHour.total === 1 ? 'time' : 'times'} in the last hour
+            {c.lastHour.limited ? <> ({c.lastHour.limited} rate-limited)</> : null} and <b>{c.day.total}</b> in the last 24 hours
+            {c.trackedSince && Date.now() - c.trackedSince < 24 * 3600 * 1000 ? <> (counted since it started {ago(c.trackedSince)})</> : null}.
+            It checks at most every {mins(cad.dashboard || 120000)} min while this page is open and every {mins(cad.background || 900000)} min
+            otherwise{obs && obs.fresh ? <>, and every {mins(cad.withStatusLine || 900000)} min while Claude Code’s status line keeps the 5-hour and weekly meters current</> : null}.
+            Anthropic counts every app signed in to your Claude account against the same limit, Claude Code itself included.
+          </p>
+          {hints && hints.otherApps && hints.otherApps.includes('OpenUsage') ? (
+            <p className="lw-hint"><Icon name="alert" size={14} /><span><b>OpenUsage is running.</b> It checks the same endpoint on its own. {BRAND} Strip replaces it; quit it and remove it from startup if you no longer use it.</span></p>
+          ) : null}
+          {hints && hints.statusLine ? (
+            <p className="lw-hint"><Icon name="alert" size={14} /><span>Your Claude Code status line runs <b>{hints.statusLine}</b>. Status-line tools often check the same endpoint every time Claude Code redraws.</span></p>
+          ) : null}
+          {obs && obs.fresh ? (
+            <p>The 5-hour and weekly meters stay current anyway: Claude Code hands its status line those numbers with every reply, and {BRAND}’s status line passes them on.</p>
+          ) : !hasStatusline ? (
+            <p>Tip: make {BRAND} Claude Code’s status line and the 5-hour and weekly meters update from Claude Code itself, without asking Anthropic.{statuslineCmd ? <> Run <code>{statuslineCmd}</code> for the snippet.</> : null}</p>
+          ) : null}
+          {c.recent && c.recent.length ? (
+            <ul className="lw-list" aria-label="Recent usage checks">
+              {c.recent.slice(0, 8).map((k) => (
+                <li key={k.at}>
+                  <span className="lw-t">{clockTime(k.at)}</span>
+                  <span className={cx('lw-r', k.result === 'limited' && 'warn')}>{CHECK_WORD[k.result] || k.result}</span>
+                  {k.retryAfterSec ? <span className="lw-x">asked to wait {k.retryAfterSec >= 120 ? mins(k.retryAfterSec * 1000) + ' min' : k.retryAfterSec + ' s'}</span> : null}
+                  <span className="lw-x">{TRIGGER_WORD[k.trigger] || k.trigger}</span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+export function AccountLimits({ meters, codexMeters, codexUsage, thresholds, onRecheck, className, statuslineCmd, hasStatusline }) {
   const [checking, setChecking] = useState(false);
   const [err, setErr] = useState(null);
   async function recheck() {
@@ -272,13 +330,19 @@ export function AccountLimits({ meters, codexMeters, codexUsage, thresholds, onR
           <div className={cx('lim-note', st !== 'rate-limited' && 'warn')}>
             <Icon name="alert" size={14} />
             <span className="ln-t">{text}{age}</span>
+            {st === 'rate-limited' ? <MeterChecks meters={anth} statuslineCmd={statuslineCmd} hasStatusline={hasStatusline} /> : null}
             {st === 'expired' ? (
               <Btn size="sm" variant="ghost" icon="refresh" onClick={recheck} disabled={checking}>{checking ? 'Checking…' : 'Recheck'}</Btn>
             ) : null}
           </div>
         );
       } else {
-        claudeState = <StateLine icon="alert" tone={st === 'rate-limited' ? '' : 'warn'}>{text}</StateLine>;
+        claudeState = (
+          <>
+            <StateLine icon="alert" tone={st === 'rate-limited' ? '' : 'warn'}>{text}</StateLine>
+            {st === 'rate-limited' ? <div className="lim-note"><MeterChecks meters={anth} statuslineCmd={statuslineCmd} hasStatusline={hasStatusline} /></div> : null}
+          </>
+        );
       }
     } else if (!hasBars) {
       claudeState = <StateLine icon="claude">No usage buckets reported for this Claude account.</StateLine>;
@@ -298,6 +362,7 @@ export function AccountLimits({ meters, codexMeters, codexUsage, thresholds, onR
   if (showClaude) {
     const t = anth.status === 'ok' ? anth.fetchedAt : anth.lastGoodAt;
     if (t) ctx.push(`Claude ${anth.status === 'ok' ? 'refreshed' : 'as of'} ${ago(t)}`);
+    if (anth.observed && anth.observed.fresh) ctx.push('5-hour + weekly live from Claude Code');
   }
   if (codexRows.length && codexMeters.asOf) ctx.push(`Codex snapshot ${ago(codexMeters.asOf)}`);
 

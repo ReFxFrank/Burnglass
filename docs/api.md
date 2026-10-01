@@ -48,7 +48,7 @@ Among the top-level fields of `/api/summary`:
 | `today`, `week`, `totals`, `currentBlock`, `burnRate` | Today, the last 7 days, all-time totals, the current 5-hour block and the burn rate. |
 | `recentSessions` | The recent-sessions table. |
 | `heatmap` | The weekday × hour grid. |
-| `meters`, `codexMeters`, `codexUsage` | Claude account meters, the Codex snapshot and Codex account tokens. |
+| `meters`, `codexMeters`, `codexUsage` | Claude account meters, the Codex snapshot and Codex account tokens. `meters` also carries `checks` (Burnglass's own usage checks: counts, recent results, Retry-After, rate-limit headers), `observed` (status-line readings in use) and, after a 429, `hints` (`statusLine`: another status-line tool's name; `otherApps`). A bucket fed by the status line has `source: "statusline"`. |
 | `alerts`, `alertThresholds` | Active limit (and anomaly) alerts and your thresholds. |
 | `budget`, `planValue` | The budget goal and plan value. Their amounts are USD; `currency` and `amount` give the target or price as you entered it. |
 | `currency` | How to **show** money: `code`, `rate` (units per 1 USD), `prefix` (the text before a number, e.g. `€` or `CHF `), `digits`, `source` (`usd`, `ecb` or `manual`), `asOf`, `status` (`ok`, `pending` or `unavailable`) and `requested`. Every other amount in the payload stays **US dollars**; `/api/statusline` carries `{code, rate, prefix, digits}` (null for USD). |
@@ -78,6 +78,7 @@ header (a DNS-rebinding guard).
 | `/api/update/check` · `/api/update/install` | Check for a release now · install it (packaged executables). |
 | `/api/meters/enable` · `/api/meters/disable` | Turn account meters on or off (Anthropic and ChatGPT together). Turning them off deletes the saved reading. |
 | `/api/meters/recheck` | Look for a Claude Code login again and check now. |
+| `/api/meters/observe` | JSON body `{ "five_hour": {"used_percentage", "resets_at"}, "seven_day": {…} }`: Claude Code's own readings, as `--statusline` receives them on stdin. Used only with account meters on; never triggers a request to Anthropic. |
 | `/api/discord/enable` · `/api/discord/disable` | Turn Discord Rich Presence on or off. |
 | `/api/discord/images` | JSON body with any of `claude`, `claudeWorking`, `claudeThinking`, `claudeWaiting`, `codex`, `idle`. Only the slots present change; an empty value restores the built-in art. One invalid value rejects the whole request. |
 | `/api/meshy/enable` · `/api/meshy/disable` | Turn Meshy credits on or off. Enable takes an optional JSON body `{ "key": "…" }`; an empty key clears it. |

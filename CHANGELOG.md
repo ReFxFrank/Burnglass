@@ -1,5 +1,22 @@
 # Changelog
 
+## v2.2.0 — 7- and 14-day periods, and fewer 429s
+
+- **Last 7 days and Last 14 days** join the period list (above Last 30 days), each with
+  its comparison to the previous window. The overview's *Last 7 days* tile and
+  `--summary`'s 7-day row now use the same 7 calendar days, so they always agree with the
+  period. Exports without a period still cover the last 30 days.
+- **Account meters stay live from Claude Code's status line.** Claude Code hands its
+  status line the 5-hour and weekly readings with every reply; Burnglass's status line now
+  passes them on, so those meters update without asking Anthropic, keep moving while
+  Anthropic is rate-limiting the usage check, and Burnglass checks the endpoint only every
+  15 minutes (for the per-model rows) while they're fresh.
+- **Why rate-limited?** Anthropic limits the usage check per account, so Claude Code and
+  every other tool signed in to it count too. The card's new **Why?** shows how often
+  Burnglass itself asked (with Anthropic's answers and the wait it asked for), names
+  another status-line tool if Claude Code runs one, flags a still-running OpenUsage tray,
+  and explains how to let Claude Code's status line feed the meters.
+
 ## v2.1.0 — Your currency
 
 - **Show every amount in your own currency.** Pick it in **System → Appearance →

@@ -51,7 +51,7 @@ const crypto = require('crypto');
 
 // Version — keep in sync with package.json (build/make-exe.mjs enforces this).
 // The constant keeps its v1 NAME: make-exe's drift check greps for it.
-const PULSE_VERSION = '2.1.0';
+const PULSE_VERSION = '2.2.0';
 const BRAND = 'Burnglass';
 
 // BURNGLASS_<NAME> wins; PULSE_<NAME> (the v1 spelling) stays a permanent,
@@ -4291,6 +4291,22 @@ function versionNum(v) {
   return base * 1000 + kind + Math.min(299, n ? parseInt(n[1], 10) : 0);
 }
 
+// The rate-limit headers of a reply (names + short values only; Retry-After,
+// ratelimit-*, x-ratelimit-*, anthropic-ratelimit-*, x-should-retry), for the
+// usage-check journal. Never anything else — no cookies, no auth echoes.
+function rateLimitHeaders(h) {
+  const out = {};
+  if (!h || typeof h !== 'object') return out;
+  let n = 0;
+  for (const k of Object.keys(h)) {
+    if (!/^(retry-after|ratelimit|x-ratelimit-|anthropic-ratelimit-|x-should-retry)/i.test(k)) continue;
+    const v = Array.isArray(h[k]) ? h[k].join(', ') : String(h[k]);
+    out[k.toLowerCase()] = v.replace(CONTROL_CHARS, '').slice(0, 100);
+    if (++n >= 16) break;
+  }
+  return out;
+}
+
 // Minimal GET with redirect-following (release assets 302 to a CDN). http is
 // accepted only for the PULSE_UPDATE_API test override; production URLs are
 // https.
@@ -4325,13 +4341,14 @@ function fetchUrl(u, opts, cb) {
       const e = new Error('HTTP ' + sc);
       e.status = sc;
       if (res.headers && res.headers['retry-after']) e.retryAfter = res.headers['retry-after'];
+      e.limitHeaders = rateLimitHeaders(res.headers);
       return cb(e);
     }
     if (asStream) return cb(null, res);
     let body = '';
     res.setEncoding('utf8');
     res.on('data', (d) => { body += d; if (body.length > 4e6) req.destroy(new Error('response too large')); });
-    res.on('end', () => cb(null, body));
+    res.on('end', () => cb(null, body, res.headers));
     res.on('error', (e) => cb(e));
   });
   } catch (e) { return cb(e); }
@@ -5045,7 +5062,7 @@ function parseMeterBucket(key, v) {
   return { key, label: known || 'Claude · ' + key.replace(/_/g, ' '), pct: Math.max(0, Math.min(100, pct)), resetsAt };
 }
 
-function refreshAccountMeters(done) {
+function refreshAccountMeters(done, trigger) {
   if (!metersEnabled()) { metersState.status = 'off'; return done && done(metersState); }
   if (metersInFlight) return done && done(metersState);
   metersInFlight = true; // guards the credential lookup too (Keychain dialogs)
@@ -5075,8 +5092,9 @@ function refreshAccountMeters(done) {
       'Content-Type': 'application/json',
       'anthropic-beta': 'oauth-2025-04-20',
     },
-  }, (err, body) => {
+  }, (err, body, hdrs) => {
     metersInFlight = false;
+    noteMeterLimitHeaders(err ? err.limitHeaders : rateLimitHeaders(hdrs));
     // Disabled while the request was in flight: don't resurrect cleared state.
     if (!metersEnabled()) { metersState.status = 'off'; return done && done(metersState); }
     metersState.fetchedAt = Date.now();
@@ -5096,6 +5114,7 @@ function refreshAccountMeters(done) {
           waitMs = Math.min(METERS_429_BASE_MS * Math.pow(2, meters429Streak - 1), METERS_429_MAX_MS);
         }
         waitMs = Math.max(5000, Math.min(waitMs, METERS_429_MAX_MS));
+        noteMeterCheck('limited', trigger, ra != null ? Math.round(waitMs / 1000) : null);
         schedule(waitMs);
         metersState.status = 'rate-limited';
         metersState.error = metersRateLimitMessage(waitMs);
@@ -5106,6 +5125,7 @@ function refreshAccountMeters(done) {
       }
       schedule(METERS_ERR_MS);
       metersState.status = /HTTP 401|HTTP 403/.test(err.message) ? 'expired' : 'error';
+      noteMeterCheck(metersState.status === 'expired' ? 'login' : 'error', trigger, null);
       if (metersState.status === 'expired') dropRolledMeterBuckets();
       metersState.error = metersState.status === 'expired'
         ? 'Claude rejected the login (' + err.message + ')' +
@@ -5118,6 +5138,7 @@ function refreshAccountMeters(done) {
       return done && done(metersState);
     }
     meters429Streak = 0;
+    noteMeterCheck('ok', trigger, null);
     schedule(METERS_OK_MS);
     let j = null;
     try { j = JSON.parse(body); } catch (_) {}
@@ -5184,6 +5205,180 @@ function dropRolledMeterBuckets() {
   if (!kept.length) metersState.lastGoodAt = null;
 }
 
+// ---- usage-check journal + status-line observations -------------------------
+// Anthropic rate-limits the usage endpoint PER ACCOUNT, and Claude Code itself,
+// status-line tools and usage widgets all call it with the same login — so a
+// 429 here rarely means Burnglass alone asked too often. Two things help:
+//   1. A journal of every check Burnglass made (time, Anthropic's answer, the
+//      wait it asked for, what triggered it, any rate-limit headers it sent),
+//      so the dashboard can show how often WE asked, plus hints about other
+//      pollers (a non-Burnglass Claude Code status line; an OpenUsage tray,
+//      which polls the same endpoint, still running). In memory only.
+//   2. Claude Code hands its status line the 5-hour and weekly limits on every
+//      redraw (stdin `rate_limits.five_hour` / `.seven_day`: used_percentage +
+//      resets_at, read from its own API response headers — no extra request).
+//      Burnglass's --statusline forwards them (POST /api/meters/observe), so
+//      those two meters stay live without the endpoint, even through a 429
+//      backoff, and while they are fresh the endpoint is asked only every
+//      METERS_OBS_MS (for the per-model rows). Usage within a window never goes
+//      down, so RECENT readings of the same window merge by maximum: an idle
+//      Claude Code session redrawing an hours-old reading (its status line
+//      re-runs every refreshInterval) can't lower a fresh one, and a reading of
+//      an OLDER window is ignored. Only recent ones, though: Anthropic has
+//      reset limits early before (same resets_at, usage back to 0), so a
+//      reading more than METER_OBS_FRESH_MS older than a new one doesn't hold
+//      it up, and a fetch newer than every reading is authoritative.
+const METER_CHECKS_MAX = 300;
+const METER_CHECKS_WINDOW_MS = 24 * 3600 * 1000;
+const meterChecks = []; // { at, result: ok|limited|login|error, retryAfterSec, trigger }
+let meterLimitHeaders = null; // { at, headers } from the latest reply that carried any
+const METER_OBS_FRESH_MS = parseInt(envv('METER_OBS_FRESH_MS'), 10) || 10 * 60 * 1000;
+const METERS_OBS_MS = parseInt(envv('METERS_OBS_MS'), 10) || 15 * 60 * 1000;
+const METER_WINDOW_SLACK_MS = 2 * 60 * 1000; // same window if resets_at agree within this
+const meterObs = Object.create(null); // five_hour | seven_day → { pct, resetsAt, at }
+
+function noteMeterCheck(result, trigger, retryAfterSec) {
+  const now = Date.now();
+  meterChecks.push({ at: now, result, retryAfterSec: retryAfterSec == null ? null : retryAfterSec, trigger: trigger || 'poll' });
+  while (meterChecks.length && (meterChecks.length > METER_CHECKS_MAX || now - meterChecks[0].at > METER_CHECKS_WINDOW_MS)) meterChecks.shift();
+}
+function noteMeterLimitHeaders(h) {
+  if (h && Object.keys(h).length) meterLimitHeaders = { at: Date.now(), headers: h };
+}
+function meterChecksForPayload(now) {
+  const count = (since) => {
+    const c = { total: 0, ok: 0, limited: 0, other: 0 };
+    for (const k of meterChecks) {
+      if (k.at < since) continue;
+      c.total++;
+      if (k.result === 'ok') c.ok++; else if (k.result === 'limited') c.limited++; else c.other++;
+    }
+    return c;
+  };
+  return {
+    lastHour: count(now - 3600 * 1000),
+    day: count(now - METER_CHECKS_WINDOW_MS),
+    since: meterChecks.length ? meterChecks[0].at : null,
+    trackedSince: SERVER_START, // the journal is in memory: it starts with this server
+    recent: meterChecks.slice(-12).reverse(),
+    cadenceMs: { dashboard: METERS_OK_MS, background: BACKGROUND_METERS_MS, withStatusLine: METERS_OBS_MS },
+    limitHeaders: meterLimitHeaders,
+  };
+}
+
+// One reading from a Claude Code status line → meterObs. Returns true if used.
+function sameMeterWindow(a, b) {
+  return a == null || b == null || Math.abs(a - b) <= METER_WINDOW_SLACK_MS;
+}
+function noteMeterObservation(key, raw, now) {
+  if (!raw || typeof raw !== 'object') return false;
+  const pct = Number(raw.used_percentage);
+  if (!isFinite(pct) || pct < 0 || pct > 1000) return false;
+  let resetsAt = null;
+  const r = Number(raw.resets_at);
+  if (isFinite(r) && r > 0) {
+    const ms = r < 1e12 ? r * 1000 : r;
+    // A sane window end: not long past, at most a little over a week ahead.
+    if (ms > now - 3600 * 1000 && ms < now + 8 * 24 * 3600 * 1000) resetsAt = ms;
+  }
+  if (resetsAt != null && resetsAt <= now) return false; // that window already rolled over
+  const cur = meterObs[key];
+  const p = Math.min(100, pct);
+  if (cur && cur.resetsAt != null && resetsAt != null && resetsAt < cur.resetsAt - METER_WINDOW_SLACK_MS) return false; // an older window
+  if (cur && sameMeterWindow(cur.resetsAt, resetsAt) && !(cur.resetsAt != null && cur.resetsAt <= now)
+      && now - cur.at < METER_OBS_FRESH_MS) {
+    meterObs[key] = { pct: Math.max(cur.pct, p), resetsAt: resetsAt != null ? resetsAt : cur.resetsAt, at: now };
+  } else {
+    meterObs[key] = { pct: p, resetsAt, at: now };
+  }
+  return true;
+}
+// Both status-line meters fresh → the endpoint is only needed for the rest.
+function meterObsFresh(now) {
+  const f = meterObs.five_hour, w = meterObs.seven_day;
+  return !!(f && w && now - f.at < METER_OBS_FRESH_MS && now - w.at < METER_OBS_FRESH_MS);
+}
+// Fetched buckets + status-line readings (fresh objects; metersState untouched).
+// fetchedAt = when `buckets` came from the endpoint (a newer fetch wins).
+function mergeMeterObservations(buckets, now, fetchedAt) {
+  const out = buckets.map((b) => ({ ...b }));
+  for (const key of ['five_hour', 'seven_day']) {
+    const o = meterObs[key];
+    if (!o || (o.resetsAt != null && o.resetsAt <= now)) continue;
+    if (fetchedAt && fetchedAt > o.at) continue; // the endpoint answered after this reading
+    const i = out.findIndex((b) => b.key === key || (key === 'seven_day' && b.key === 'seven_day_overall'));
+    if (i < 0) {
+      out.push({ key, label: METER_LABELS[key], pct: o.pct, resetsAt: o.resetsAt, source: 'statusline', observedAt: o.at });
+      continue;
+    }
+    const b = out[i];
+    if (b.resetsAt != null && o.resetsAt != null && o.resetsAt < b.resetsAt - METER_WINDOW_SLACK_MS) continue; // older window
+    const newerWindow = b.resetsAt != null && o.resetsAt != null && o.resetsAt > b.resetsAt + METER_WINDOW_SLACK_MS;
+    const rolled = b.resetsAt != null && b.resetsAt <= now;
+    // A fetch long before this reading doesn't hold it up (an early reset).
+    const outdated = !fetchedAt || o.at - fetchedAt > METER_OBS_FRESH_MS;
+    if (newerWindow || rolled || outdated || o.pct >= b.pct) {
+      out[i] = { ...b, pct: newerWindow || rolled || outdated ? o.pct : Math.max(b.pct, o.pct),
+        resetsAt: o.resetsAt != null ? o.resetsAt : b.resetsAt, source: 'statusline', observedAt: o.at };
+    }
+  }
+  const rank = (k) => (k === 'five_hour' ? 0 : k === 'seven_day' || k === 'seven_day_overall' ? 1 : 2);
+  out.sort((a, b) => rank(a.key) - rank(b.key) || a.key.localeCompare(b.key));
+  return out;
+}
+function meterObservedForPayload(now) {
+  const keys = Object.keys(meterObs).filter((k) => meterObs[k] && !(meterObs[k].resetsAt != null && meterObs[k].resetsAt <= now));
+  if (!keys.length) return null;
+  return { at: Math.max(...keys.map((k) => meterObs[k].at)), keys, fresh: meterObsFresh(now) };
+}
+
+// Other pollers on this machine (hints only, read-only, refreshed at most every
+// 5 minutes and only after Anthropic has rate-limited a check): a Claude Code
+// status line that isn't Burnglass's (many status-line tools call the same
+// endpoint) and a running OpenUsage tray (the companion Burnglass used to
+// launch; it polls the endpoint itself).
+let meterHints = { at: 0, statusLine: null, otherApps: [], checking: false };
+function statusLineToolName(command) {
+  if (typeof command !== 'string' || !command.trim() || command.includes('--statusline')) return null;
+  const toks = command.trim().split(/\s+/).map((t) => t.replace(/^["']+|["']+$/g, ''));
+  let i = 0;
+  while (i < toks.length && (toks[i] === 'env' || /^[A-Za-z_][A-Za-z0-9_]*=/.test(toks[i]))) i++;
+  const runner = /^(npx|bunx|pnpx|pnpm|yarn|bun|x|dlx|exec|node|deno|python3?|py|uv|uvx|run|sh|bash|zsh|cmd|powershell|pwsh|start)$/i;
+  const base = (t) => String(t).split(/[\\/]/).pop().replace(/\.(exe|cmd|bat)$/i, '');
+  while (i < toks.length - 1 && (runner.test(base(toks[i])) || /^[-/][\w-]+$/.test(toks[i]))) i++;
+  const name = base(toks[i] || toks[0]).replace(/\.(ps1|sh|js|mjs|cjs|py|ts)$/i, '').replace(/@[^@]*$/, '')
+    .replace(CONTROL_CHARS, '').slice(0, 40);
+  return name || null;
+}
+function refreshMeterHints() {
+  const now = Date.now();
+  if (meterHints.checking || now - meterHints.at < 5 * 60 * 1000) return;
+  meterHints.checking = true;
+  let statusLine = null;
+  try {
+    const j = JSON.parse(fs.readFileSync(path.join(claudeDir(), 'settings.json'), 'utf8'));
+    if (j && j.statusLine && typeof j.statusLine === 'object') statusLine = statusLineToolName(j.statusLine.command);
+  } catch (_) { /* no settings — nothing to say */ }
+  const done = (apps) => { meterHints = { at: Date.now(), statusLine, otherApps: apps, checking: false }; };
+  if (process.platform === 'win32') {
+    return imagesRunning(['OpenUsageTray.exe', 'OpenUsage.exe'], (on) => done(on ? ['OpenUsage'] : []));
+  }
+  if (process.platform === 'darwin') {
+    try {
+      return require('child_process').execFile('/bin/ps', ['-A', '-o', 'comm='], { maxBuffer: 4 * 1024 * 1024 },
+        (err, out) => done(!err && /(^|\/)OpenUsage(\.app)?(\/|$)/m.test(String(out || '')) ? ['OpenUsage'] : []));
+    } catch (_) { /* fall through */ }
+  }
+  done([]);
+}
+function meterHintsForPayload() {
+  const limited = metersState.status === 'rate-limited' || meterChecks.some((k) => k.result === 'limited');
+  if (!limited) return null;
+  refreshMeterHints(); // async; the next payload carries the result
+  if (!meterHints.at) return null;
+  return { statusLine: meterHints.statusLine, otherApps: meterHints.otherApps, checkedAt: meterHints.at };
+}
+
 // "in ~Nm" / "now" for a 429 retry. The payload builders re-render the
 // rate-limit message from nextAttemptAt on every build, so the dashboard counts
 // down instead of repeating the wait computed when the 429 arrived.
@@ -5191,9 +5386,11 @@ function retryInText(waitMs) {
   return waitMs > 30000 ? 'in ~' + Math.max(1, Math.round(waitMs / 60000)) + 'm' : 'now';
 }
 function metersRateLimitMessage(waitMs) {
+  // The limit is per ACCOUNT: Claude Code itself and every tool signed in to
+  // the same Claude login count against it (the dashboard's "Why?" shows how
+  // often Burnglass asked and what else may be asking).
   return 'Anthropic rate-limited the usage check (HTTP 429) — retrying ' + retryInText(waitMs) +
-    '. If this persists, something else on this machine ' +
-    '(e.g. a statusline script) may be polling the usage endpoint heavily.';
+    '. The limit is per account: Claude Code and other tools signed in to it count too.';
 }
 function codexUsageRateLimitMessage(waitMs) {
   return 'ChatGPT rate-limited the usage check (HTTP 429) — retrying ' + retryInText(waitMs) + '.';
@@ -6884,8 +7081,11 @@ function metersForPayload(background) {
   const trayOn = trayDesired !== null ? trayDesired : readConfig().tray === true;
   const bgWindow = trayOn ? TRAY_METERS_MS : BACKGROUND_METERS_MS;
   const bgOk = !background || (Date.now() - (metersState.fetchedAt || 0) >= bgWindow);
-  if (due && bgOk) {
-    refreshAccountMeters(); // async; next poll picks it up
+  // Claude Code's status line keeps the 5-hour and weekly meters live: while
+  // its readings are fresh, ask the endpoint only every METERS_OBS_MS.
+  const obsOk = !meterObsFresh(Date.now()) || Date.now() - (metersState.fetchedAt || 0) >= METERS_OBS_MS;
+  if (due && bgOk && obsOk) {
+    refreshAccountMeters(null, background ? 'background' : 'dashboard'); // async; next poll picks it up
   }
   const now = Date.now();
   return {
@@ -6900,13 +7100,18 @@ function metersForPayload(background) {
     // all a reading restored from meters-cache.json at start-up — and a stale
     // row is skipped by computeAlerts, flagged to the tray / status line
     // (statuslineMeterPcts), dimmed on the dashboard and dropped by the strip.
-    buckets: (metersState.buckets || []).map((b) => ({
+    buckets: mergeMeterObservations(metersState.buckets || [], now, metersState.lastGoodAt).map((b) => ({
       ...b,
       stale: b.resetsAt != null && b.resetsAt <= now,
       projLeftAtReset: projectedLeftAtReset(b),
     })),
     fetchedAt: metersState.fetchedAt,
     lastGoodAt: metersState.lastGoodAt,
+    // Additive (2.2): the usage-check journal, Claude Code status-line
+    // readings in use, and hints about other pollers after a 429.
+    checks: meterChecksForPayload(now),
+    observed: meterObservedForPayload(now),
+    hints: meterHintsForPayload(),
     error: metersState.status === 'rate-limited'
       ? metersRateLimitMessage((metersState.nextAttemptAt || 0) - now)
       : metersState.error,
@@ -8727,7 +8932,7 @@ function startServer(port, host, opts) {
         refreshAccountMeters(() => {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, meters: metersForPayload() }));
-        });
+        }, 'enable');
         return;
       }
       if (route === '/api/meters/recheck') {
@@ -8752,6 +8957,29 @@ function startServer(port, host, opts) {
         refreshAccountMeters(() => {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, meters: metersForPayload() }));
+        }, 'recheck');
+        return;
+      }
+      if (route === '/api/meters/observe') {
+        // Claude Code's own 5-hour / weekly readings, forwarded by the
+        // Burnglass status line (--statusline) from its stdin. Loopback +
+        // X-Pulse like every mutation; tiny JSON body; never triggers a fetch.
+        if (!allowMutation(req, res)) return;
+        readJsonBody(req, 4096, (err, body) => {
+          let accepted = 0;
+          if (!err && body && typeof body === 'object' && metersEnabled()) {
+            const now = Date.now();
+            for (const key of ['five_hour', 'seven_day']) {
+              if (noteMeterObservation(key, body[key], now)) accepted++;
+            }
+            if (accepted) {
+              const merged = mergeMeterObservations(metersState.buckets || [], now, metersState.lastGoodAt)
+                .filter((b) => b.source === 'statusline');
+              recordMeterSamples(merged);
+            }
+          }
+          res.writeHead(err ? 400 : 200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(err ? { ok: false, error: 'bad body' } : { ok: true, accepted }));
         });
         return;
       }
@@ -9937,6 +10165,36 @@ function slHttpGetJson(url, timeoutMs, cb, maxBytes) {
   } catch (e) { finish(e); }
 }
 
+// Claude Code's stdin `rate_limits` → the body for POST /api/meters/observe
+// (only well-formed 5-hour / weekly entries), or null.
+function statuslineObservations(ctx) {
+  const rl = ctx && ctx.rate_limits;
+  if (!rl || typeof rl !== 'object') return null;
+  const out = {};
+  for (const k of ['five_hour', 'seven_day']) {
+    const v = rl[k];
+    if (v && typeof v.used_percentage === 'number' && isFinite(v.used_percentage)) {
+      out[k] = { used_percentage: v.used_percentage, resets_at: typeof v.resets_at === 'number' ? v.resets_at : null };
+    }
+  }
+  return Object.keys(out).length ? out : null;
+}
+function slHttpPostJson(url, body, timeoutMs, cb) {
+  let done = false;
+  const finish = (e) => { if (!done) { done = true; cb(e || null); } };
+  try {
+    const data = JSON.stringify(body);
+    const req = http.request(url, {
+      method: 'POST',
+      timeout: timeoutMs,
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data), 'X-Pulse': '1' },
+    }, (res) => { res.resume(); res.on('end', () => finish()); res.on('error', finish); });
+    req.on('timeout', () => req.destroy(new Error('timeout')));
+    req.on('error', finish);
+    req.end(data);
+  } catch (e) { finish(e); }
+}
+
 function slDur(ms) {
   const s = Math.max(0, Math.round(ms / 1000));
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
@@ -9995,16 +10253,29 @@ function runStatusline() {
     const rt = readRuntimeFile();
     const host = (rt && rt.host) || '127.0.0.1';
     const port = (rt && rt.port) || (process.env.PORT ? parseInt(process.env.PORT, 10) : 4747);
+    // Hand the server the 5-hour / weekly readings Claude Code just gave us
+    // (from its own API response headers), so the dashboard's meters stay live
+    // without asking Anthropic's usage endpoint. Fire-and-forget, short timeout.
+    const obs = statuslineObservations(ctx);
+    let posting = !!obs, afterPost = null;
+    if (obs) {
+      slHttpPostJson('http://' + host + ':' + port + '/api/meters/observe', obs, 300, () => {
+        posting = false;
+        if (afterPost) afterPost();
+      });
+    }
     slHttpGetJson('http://' + host + ':' + port + '/api/statusline', 700, (err, data) => {
       let line;
       try { line = formatStatusline(ctx, err ? null : data); }
       catch (_) { line = (ctx.model && (ctx.model.display_name || ctx.model.id)) || BRAND; }
       // Exit from the write callback: process.exit() before stdout (a pipe)
       // flushes would truncate the line to nothing. A short backstop timer
-      // guarantees we still exit if the callback never fires.
+      // guarantees we still exit if the callback never fires (or the
+      // observation POST hangs).
       const bail = setTimeout(() => process.exit(0), 400);
       if (bail.unref) bail.unref();
-      try { process.stdout.write(line + '\n', () => process.exit(0)); }
+      const exit = () => process.exit(0);
+      try { process.stdout.write(line + '\n', () => { if (posting) afterPost = exit; else exit(); }); }
       catch (_) { process.exit(0); }
     });
   };
@@ -10477,5 +10748,5 @@ module.exports = {
   computeBlocks, floorToHour, aggregate, parseAll, tokensOf, localDateStr,
   psQuote, trayScript, summarizeTrayOutput, integrationTargetExists, sameEntry, discordClaudeArt, DISCORD_DEFAULT_CLAUDE_ART,
   parseFile, parseEffortArgs, parseEffortStdout, mergeModes, annotateModes, discordIpcCandidates,
-  fmtMoney, parseEcbXml, currencyInfo, usableCurrency,
+  fmtMoney, parseEcbXml, currencyInfo, usableCurrency, statusLineToolName,
 };
