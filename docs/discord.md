@@ -39,7 +39,8 @@ application instead, set `{"discordClientId": "…"}`.
 ## Images that follow what you're doing
 
 The large image shows Claude art while you use Claude Code, Codex art while you use
-Codex, and Burnglass art when you're idle. For Claude it also follows the live state:
+Codex, your Antigravity image (or the Burnglass art) while you use Antigravity, and
+Burnglass art when you're idle. For Claude it also follows the live state:
 
 | State | When | Dashboard slot | Config key |
 | --- | --- | --- | --- |
@@ -48,11 +49,12 @@ Codex, and Burnglass art when you're idle. For Claude it also follows the live s
 | **Waiting on you** | A permission prompt or a question is open | Claude — waiting on you | `discordClaudeWaitingImage` |
 | **Claude Code** | Claude Code is your active tool but not mid-turn; an image you set here also fills any state slot you leave empty | Claude Code | `discordClaudeImage` |
 | **Codex** | Codex is your active tool | Codex | `discordCodexImage` |
-| **Idle** | Neither Claude Code nor Codex has been active for 15 minutes | Idle | `discordLargeImage` |
+| **Antigravity** | Antigravity is your active tool; the hover text reads *Antigravity · working* while a conversation runs | Antigravity | `discordAntigravityImage` |
+| **Idle** | None of Claude Code, Codex or Antigravity has been active for 15 minutes | Idle | `discordLargeImage` |
 
 **Built-in art (since v2.0.1):** with nothing set, the four Claude slots show the
-animated Clawd below (hammering, typing, "!", asleep); Codex shows the OpenAI mark and
-Idle the Burnglass mark. The Clawd GIFs are `https://` links to the 512 px files in this
+animated Clawd below (hammering, typing, "!", asleep); Codex shows the OpenAI mark, and
+Idle and an empty Antigravity slot the Burnglass mark. The Clawd GIFs are `https://` links to the 512 px files in this
 repository, pinned to the `v2.0.0` tag so they never change
 (`https://raw.githubusercontent.com/ReFxFrank/Burnglass/v2.0.0/.github/assets/discord/<state>-512.gif`).
 Discord's media proxy loads them; Burnglass itself makes no request. For a Claude state,
@@ -171,7 +173,7 @@ disappears on Discord's dark themes.
 | `discordRotateSecs` | `45` | Seconds per page, 15 to 300. |
 | `discordShowModel` | on | `false` hides the model · effort · sessions line. |
 | `discordShowState` | on | `false` turns off the state-following images and hover text. |
-| `discordClaudeImage` · `discordClaudeWorkingImage` · `discordClaudeThinkingImage` · `discordClaudeWaitingImage` · `discordCodexImage` · `discordLargeImage` | built-in art (Claude slots: the animated Clawd) | One art-asset key or `https://` link per slot (see the table above). |
+| `discordClaudeImage` · `discordClaudeWorkingImage` · `discordClaudeThinkingImage` · `discordClaudeWaitingImage` · `discordCodexImage` · `discordAntigravityImage` · `discordLargeImage` | built-in art (Claude slots: the animated Clawd) | One art-asset key or `https://` link per slot (see the table above). |
 
 The dashboard's **Save images** button uses `POST /api/discord/images`; see the
 [HTTP API](api.md).

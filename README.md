@@ -13,7 +13,7 @@
 See what you're spending, which models you're spending it on, how close you are to
 your 5-hour and weekly limits, when you work, and which sessions ran at which
 reasoning effort. Burnglass reads the logs already on your machine: Claude Code, Codex,
-Gemini CLI, Continue, Cline, Roo Code, or your own tool's JSONL. It ships as one
+Gemini CLI, Antigravity, Continue, Cline, Roo Code, or your own tool's JSONL. It ships as one
 small executable, needs no configuration, and your usage data never leaves your computer.
 
 [![Release](https://img.shields.io/github/v/release/ReFxFrank/Burnglass?color=1ba6d0&label=release)](https://github.com/ReFxFrank/Burnglass/releases/latest)
@@ -70,7 +70,7 @@ small executable, needs no configuration, and your usage data never leaves your 
 
 **Every agent on the machine**
 - **Claude Code and OpenAI Codex**, read automatically, subagents and advisor calls included.
-- **Gemini CLI, Continue, Cline and Roo Code**, read from their own local logs.
+- **Gemini CLI, Antigravity, Continue, Cline and Roo Code**, read from their own local logs.
 - **Custom sources**: point Burnglass at a JSONL log your own agent writes.
 - **Current list prices** for Anthropic, OpenAI, Google Gemini, Z.ai GLM and DeepSeek,
   including cache reads and writes, fast mode, long context, US-only inference and
@@ -326,11 +326,13 @@ provider. Details: [Limits, alerts and budgets](docs/limits-and-budgets.md#accou
 | **Continue** | `~/.continue/dev_data/*/tokensGenerated.jsonl` | Continue's own **local token estimates**, badged `est` |
 | **Cline** | the extension's task history (`globalStorage/saoudrizwan.claude-dev/tasks/`) | Cline's own recorded cost |
 | **Roo Code** | the same layout under `rooveterinaryinc.roo-cline` / `.roo-code` | Roo's own recorded cost |
+| **Antigravity** | each conversation's database in `~/.gemini/antigravity/conversations/` (read-only, built-in SQLite reader) | API list prices for the model behind each call |
 
 Each appears as its own source only when its logs exist. Cline and Roo are found in
 VS Code, Insiders, VSCodium, Cursor and Windsurf, plus `~/.vscode-server` on Linux.
-Agents that keep usage only in SQLite (Crush, Goose, opencode ≥ 1.16) aren't supported,
-because reading SQLite would break the zero-dependency rule.
+Antigravity keeps its usage in SQLite databases; Burnglass reads them with its own small
+read-only reader (no dependency, never writes or locks them). Other SQLite-only agents
+(Crush, Goose, opencode ≥ 1.16) aren't supported yet.
 
 ### Custom sources
 

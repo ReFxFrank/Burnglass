@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- **Antigravity as a source (zero setup).** Burnglass now reads Google Antigravity's
+  conversations from `~/.gemini/antigravity/conversations/`: every model call with its
+  input, cached input and output tokens, the model Antigravity used (Claude, Gemini or
+  GPT, priced at that provider's list rates) and its reasoning level as the effort.
+  Antigravity keeps them in SQLite, so Burnglass gained a small built-in, read-only
+  SQLite reader (still no dependencies; it never writes, locks or checkpoints the
+  files, and reads the `-wal` file's committed transactions so live conversations are
+  current). Antigravity-only model names without a public price use the logged Google
+  default. Override the folder with `ANTIGRAVITY_DIR`.
+- **Antigravity in Discord and the live status.** A running Antigravity conversation
+  shows as *Antigravity · working*, with the model on the second line. Its image is the
+  new **Antigravity** slot (`discordAntigravityImage`); empty, it shows the idle art.
+
 ## v2.2.0 — 7- and 14-day periods, and fewer 429s
 
 - **Last 7 days and Last 14 days** join the period list (above Last 30 days), each with

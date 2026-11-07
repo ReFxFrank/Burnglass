@@ -16,6 +16,7 @@ import {
   alertThresholds, readGraphicsMode, effectiveLite, applyGraphicsMode, useTheme, motionReduced,
   readSourceFilter, writeSourceFilter, readPeriod, writePeriod,
   fireAlertNotifications, requestAlertPermission, notifyPermission,
+  providerWord,
 } from './lib.js';
 import { Icon, BrandMark, Wordmark } from './icons.jsx';
 import { Btn, IconBtn, Pill, Sheet, StopButton, WarnBar, Empty, Swatch, Est, Seg, Panel, Section, cx } from './ui.jsx';
@@ -622,7 +623,7 @@ function liveStatus(data, error) {
   if (error) return { tone: 'warn', head: 'Offline', parts: ['server unreachable, retrying'], latest: null, stale: false };
   const st = data.agentState;
   const an = data.activeNow;
-  const who = (p) => (p === 'codex' ? 'Codex' : 'Claude');
+  const who = providerWord;
   let head;
   if (st) head = who(st.provider) + ' ' + (st.state === 'waiting' ? 'waiting on you' : st.state);
   else if (an) head = who(an.provider) + ' active';

@@ -69,7 +69,7 @@ let IS_AFTER_UPDATE = false; // set on the relaunch right after a self-update
 // billing). Used to keep the Claude 5-hour block honest — it must count ONLY
 // Claude Code usage, never Codex or the other ingested agents. GLM stays in
 // (it flows through Claude Code itself).
-const AGENT_SOURCES = new Set(['codex', 'gemini', 'cline', 'continue', 'roo']);
+const AGENT_SOURCES = new Set(['codex', 'gemini', 'cline', 'continue', 'roo', 'antigravity']);
 // Sources whose numbers are self-reported estimates (Continue computes token
 // counts locally rather than reading provider billing). Constant so the "est"
 // badge survives after the live logs are pruned and only the archive remains.
@@ -79,6 +79,12 @@ const KNOWN_ESTIMATE_SOURCES = new Set(['continue']);
 // source (provider 'custom'). Gates the 5h block, selfCheck, and Discord art —
 // the roster alone can't know config-defined names, the provider tag can.
 function nonClaudeEntry(e) { return AGENT_SOURCES.has(e.source) || e.provider === 'custom'; }
+// Which live-state provider an entry belongs to: the agents with a live
+// conversation state (Claude Code, Codex, Antigravity), or null for the
+// usage-only sources.
+function agentProvider(e) {
+  return e.source === 'codex' ? 'codex' : e.source === 'antigravity' ? 'antigravity' : nonClaudeEntry(e) ? null : 'claude';
+}
 
 // ---------------------------------------------------------------------------
 // LOGGING
@@ -1373,7 +1379,7 @@ function rooTaskFiles() { return taskFilesUnder(rooExtensionDirs()); }
 const CUSTOM_SOURCE_NAME_RE = /^[a-z][a-z0-9_-]{0,23}$/;
 // Names that would collide with (or spoof) a built-in source — including
 // 'mixed', the sessions table's multi-source label.
-const CUSTOM_SOURCE_RESERVED = new Set(['cli', 'claude', 'codex', 'gemini', 'cline', 'continue', 'roo', 'mixed']);
+const CUSTOM_SOURCE_RESERVED = new Set(['cli', 'claude', 'codex', 'gemini', 'cline', 'continue', 'roo', 'antigravity', 'mixed']);
 const CUSTOM_SOURCES_MAX = 8;
 const customSourceWarned = new Set(); // warn ONCE per dropped row / oversized file
 function customSourcesConfig() {
@@ -2337,6 +2343,374 @@ function parseClineFile(filePath, source = 'cline') {
   return { entries, sessionMeta, ultracodeSessions: [], effortEvents: [] };
 }
 
+// ---- Antigravity (Google's agent IDE) --------------------------------------
+// Antigravity keeps no JSON/JSONL usage log: each conversation is a SQLite
+// database ~/.gemini/antigravity/conversations/<id>.db whose rows hold
+// protobuf blobs. Both formats are hand-read below (Node ≥ 18 builtins only —
+// no node:sqlite, which is 22.5+ and experimental), READ-ONLY: the files are
+// opened with fs.readFileSync and never locked, written or checkpointed.
+//
+// Reverse-engineered layout (Antigravity 2026-11; field numbers are protobuf
+// tags, verified against real data — output = thinking + visible on every call):
+//   steps.metadata          1 = created {1: seconds, 2: nanos}
+//                           9 = usage of the model call that produced the step
+//   usage                   1 = model enum, 2 = uncached input, 3 = output
+//                           (thinking included), 5 = cached input,
+//                           9 = thinking, 10 = visible output, 11 = response id
+//   gen_metadata.data       1.4 = the same usage, 1.19 = model name string
+//   conversation_summaries  (../conversation_summaries.db) status
+//                           CASCADE_RUN_STATUS_RUNNING / _IDLE, workspace_uris
+// Steps carry the timestamp, gen_metadata the model name; they join on the
+// response id (falling back to the model enum). Antigravity encodes the
+// reasoning level as a model suffix (claude-opus-5-5-high, gemini-3.1-pro-low):
+// it is split off into `effort` so the base model prices from its own row.
+// Its own codenames (gemini-3.8-flash-n, gemini-4-argon-trial) have no public
+// price and fall to the logged default, like any unknown model.
+function antigravityDir() {
+  return process.env.ANTIGRAVITY_DIR || path.join(geminiDir(), 'antigravity');
+}
+function antigravityConversationFiles() {
+  const dir = path.join(antigravityDir(), 'conversations');
+  let names;
+  try { names = fs.readdirSync(dir); } catch (_) { return []; }
+  return names.filter((n) => /^[0-9a-f-]{8,64}\.db$/i.test(n)).map((n) => path.join(dir, n));
+}
+// The parse cache keys on mtime; a SQLite WAL database changes its -wal file
+// first, so the newer of the two is the file's real modification time.
+function antigravityMtimeMs(filePath, st) {
+  try { return Math.max(st.mtimeMs, fs.statSync(filePath + '-wal').mtimeMs); } catch (_) { return st.mtimeMs; }
+}
+
+// ---- minimal read-only SQLite reader (file format: sqlite.org/fileformat.html)
+// Supports what Antigravity's databases use: rowid tables, overflow pages and a
+// WAL file (committed frames only, checksums verified). Throws on anything
+// inconsistent; callers treat a throw as "unreadable this cycle" and retry.
+const SQLITE_MAX_BYTES = 512 * 1024 * 1024;
+function sqliteVarint(b, i) {
+  let v = 0;
+  for (let n = 0; n < 8; n++) {
+    const x = b[i + n];
+    if (x === undefined) throw new Error('sqlite: truncated varint');
+    v = v * 128 + (x & 0x7f);
+    if (x < 0x80) return [v, i + n + 1];
+  }
+  const x = b[i + 8];
+  if (x === undefined) throw new Error('sqlite: truncated varint');
+  return [v * 256 + x, i + 9];
+}
+function sqliteWalChecksum(buf, start, end, s1, s2, bigEndian) {
+  for (let i = start; i < end; i += 8) {
+    const a = bigEndian ? buf.readUInt32BE(i) : buf.readUInt32LE(i);
+    const b = bigEndian ? buf.readUInt32BE(i + 4) : buf.readUInt32LE(i + 4);
+    s1 = (s1 + a + s2) >>> 0;
+    s2 = (s2 + b + s1) >>> 0;
+  }
+  return [s1, s2];
+}
+// Page number → Buffer of the newest COMMITTED version in the -wal, or null.
+function sqliteWalPages(walPath, pageSize) {
+  let wal;
+  try { wal = fs.readFileSync(walPath); } catch (_) { return null; }
+  if (wal.length < 32) return null;
+  const magic = wal.readUInt32BE(0);
+  if (magic !== 0x377f0682 && magic !== 0x377f0683) return null;
+  const bigEndian = magic === 0x377f0683;
+  if (wal.readUInt32BE(8) !== pageSize) return null;
+  const salt1 = wal.readUInt32BE(16), salt2 = wal.readUInt32BE(20);
+  let [s1, s2] = sqliteWalChecksum(wal, 0, 24, 0, 0, bigEndian);
+  if (s1 !== wal.readUInt32BE(24) || s2 !== wal.readUInt32BE(28)) return null;
+  const committed = new Map();
+  const pending = new Map();
+  for (let off = 32; off + 24 + pageSize <= wal.length; off += 24 + pageSize) {
+    if (wal.readUInt32BE(off + 8) !== salt1 || wal.readUInt32BE(off + 12) !== salt2) break;
+    [s1, s2] = sqliteWalChecksum(wal, off, off + 8, s1, s2, bigEndian);
+    [s1, s2] = sqliteWalChecksum(wal, off + 24, off + 24 + pageSize, s1, s2, bigEndian);
+    if (s1 !== wal.readUInt32BE(off + 16) || s2 !== wal.readUInt32BE(off + 20)) break;
+    pending.set(wal.readUInt32BE(off), off + 24);
+    if (wal.readUInt32BE(off + 4) !== 0) { // commit frame: everything so far is durable
+      for (const [pg, at] of pending) committed.set(pg, wal.subarray(at, at + pageSize));
+      pending.clear();
+    }
+  }
+  return committed;
+}
+function sqliteOpen(dbPath) {
+  const st = fs.statSync(dbPath);
+  if (st.size > SQLITE_MAX_BYTES) throw new Error('sqlite: file too large');
+  const db = fs.readFileSync(dbPath);
+  if (db.length < 100 || db.toString('latin1', 0, 16) !== 'SQLite format 3\u0000') throw new Error('sqlite: not a database');
+  let pageSize = db.readUInt16BE(16);
+  if (pageSize === 1) pageSize = 65536;
+  if (pageSize < 512 || (pageSize & (pageSize - 1))) throw new Error('sqlite: bad page size');
+  if (db.readUInt32BE(56) !== 1) throw new Error('sqlite: only UTF-8 databases are supported');
+  const usable = pageSize - db[20];
+  const wal = sqliteWalPages(dbPath + '-wal', pageSize) || new Map();
+  const page = (n) => {
+    if (!Number.isInteger(n) || n < 1) throw new Error('sqlite: bad page number');
+    const w = wal.get(n);
+    if (w) return w;
+    const at = (n - 1) * pageSize;
+    if (at + pageSize > db.length) throw new Error('sqlite: page out of range');
+    return db.subarray(at, at + pageSize);
+  };
+  return { page, usable };
+}
+// Reassemble a cell payload, following its overflow chain when it spills.
+function sqlitePayload(sq, pg, at, size) {
+  const X = sq.usable - 35;
+  if (size <= X) return pg.subarray(at, at + size);
+  const M = Math.floor(((sq.usable - 12) * 32) / 255) - 23;
+  const K = M + ((size - M) % (sq.usable - 4));
+  const local = K <= X ? K : M;
+  const parts = [pg.subarray(at, at + local)];
+  let got = local;
+  let next = pg.readUInt32BE(at + local);
+  const seen = new Set();
+  while (got < size) {
+    if (!next || seen.has(next)) throw new Error('sqlite: broken overflow chain');
+    seen.add(next);
+    const ov = sq.page(next);
+    const take = Math.min(size - got, sq.usable - 4);
+    parts.push(ov.subarray(4, 4 + take));
+    got += take;
+    next = ov.readUInt32BE(0);
+  }
+  return Buffer.concat(parts, size);
+}
+function sqliteRecord(buf) {
+  let [hdrLen, i] = sqliteVarint(buf, 0);
+  const types = [];
+  while (i < hdrLen) { let t; [t, i] = sqliteVarint(buf, i); types.push(t); }
+  const out = [];
+  let p = hdrLen;
+  for (const t of types) {
+    if (t === 0) out.push(null);
+    else if (t >= 1 && t <= 6) {
+      const len = [0, 1, 2, 3, 4, 6, 8][t];
+      let v = 0;
+      for (let k = 0; k < len; k++) v = v * 256 + buf[p + k];
+      if (buf[p] & 0x80) v -= 2 ** (8 * len); // two's complement
+      out.push(v); p += len;
+    } else if (t === 7) { out.push(buf.readDoubleBE(p)); p += 8; }
+    else if (t === 8 || t === 9) out.push(t - 8);
+    else if (t >= 12) {
+      const len = t % 2 === 0 ? (t - 12) / 2 : (t - 13) / 2;
+      const v = buf.subarray(p, p + len);
+      out.push(t % 2 === 0 ? v : v.toString('utf8'));
+      p += len;
+    } else throw new Error('sqlite: reserved serial type');
+  }
+  return out;
+}
+// Every row of the rowid table rooted at `root`: [rowid, values[]].
+function sqliteScan(sq, root) {
+  const rows = [];
+  const stack = [root];
+  const seen = new Set();
+  while (stack.length) {
+    const n = stack.pop();
+    if (seen.has(n)) throw new Error('sqlite: page cycle');
+    seen.add(n);
+    const pg = sq.page(n);
+    const base = n === 1 ? 100 : 0;
+    const kind = pg[base];
+    const cells = pg.readUInt16BE(base + 3);
+    const ptrs = base + (kind === 0x05 ? 12 : 8);
+    if (kind === 0x05) {
+      // Pushed right-to-left so rows come out in rowid order.
+      stack.push(pg.readUInt32BE(base + 8)); // right-most child
+      for (let c = cells - 1; c >= 0; c--) stack.push(pg.readUInt32BE(pg.readUInt16BE(ptrs + 2 * c)));
+    } else if (kind === 0x0d) {
+      for (let c = 0; c < cells; c++) {
+        let at = pg.readUInt16BE(ptrs + 2 * c);
+        let size, rowid;
+        [size, at] = sqliteVarint(pg, at);
+        [rowid, at] = sqliteVarint(pg, at);
+        rows.push([rowid, sqliteRecord(sqlitePayload(sq, pg, at, size))]);
+      }
+    } else throw new Error('sqlite: not a table b-tree page');
+  }
+  return rows;
+}
+// Column names of a CREATE TABLE statement, and which one aliases the rowid.
+function sqliteColumns(sql) {
+  const body = String(sql || '').slice(String(sql || '').indexOf('(') + 1, String(sql || '').lastIndexOf(')'));
+  const parts = [];
+  let depth = 0, cur = '';
+  for (const ch of body) {
+    if (ch === '(') depth++;
+    if (ch === ')') depth--;
+    if (ch === ',' && depth === 0) { parts.push(cur); cur = ''; } else cur += ch;
+  }
+  parts.push(cur);
+  const cols = [];
+  let tablePk = null;
+  for (const raw of parts) {
+    const def = raw.trim();
+    const pk = /^(?:CONSTRAINT\s+\S+\s+)?PRIMARY\s+KEY\s*\(\s*[`"[]?(\w+)[`"\]]?\s*\)/i.exec(def);
+    if (pk) { tablePk = pk[1]; continue; }
+    if (/^(?:CONSTRAINT|PRIMARY|UNIQUE|CHECK|FOREIGN)\b/i.test(def)) continue;
+    const m = /^[`"[]?(\w+)[`"\]]?\s*(\w*)/.exec(def);
+    if (m) cols.push({ name: m[1], type: m[2].toUpperCase(), pk: /\bPRIMARY\s+KEY\b/i.test(def) });
+  }
+  const alias = cols.find((c) => c.type === 'INTEGER' && (c.pk || c.name === tablePk));
+  return { names: cols.map((c) => c.name), rowidAlias: alias ? alias.name : null };
+}
+// Rows of one table as objects (null when the table does not exist).
+function sqliteTable(sq, name) {
+  const master = sqliteScan(sq, 1);
+  const hit = master.find(([, v]) => v[0] === 'table' && v[1] === name);
+  if (!hit) return null;
+  const { names, rowidAlias } = sqliteColumns(hit[1][4]);
+  return sqliteScan(sq, hit[1][3]).map(([rowid, values]) => {
+    const row = {};
+    names.forEach((n, k) => { row[n] = k < values.length ? values[k] : null; });
+    if (rowidAlias && row[rowidAlias] == null) row[rowidAlias] = rowid;
+    return row;
+  });
+}
+
+// ---- minimal protobuf wire-format reader ------------------------------------
+// → Map(fieldNumber → [values]); varints as Numbers, length-delimited fields as
+// Buffers (decode nested messages with another pbFields call). Throws on
+// malformed input.
+function pbFields(buf) {
+  const out = new Map();
+  let i = 0;
+  const varint = () => {
+    let v = 0, mul = 1;
+    for (let n = 0; n < 10; n++) {
+      const x = buf[i++];
+      if (x === undefined) throw new Error('pb: truncated varint');
+      v += (x & 0x7f) * mul;
+      mul *= 128;
+      if (x < 0x80) return v;
+    }
+    throw new Error('pb: varint too long');
+  };
+  while (i < buf.length) {
+    const key = varint();
+    const field = Math.floor(key / 8), wire = key % 8;
+    if (!field) throw new Error('pb: field 0');
+    let v;
+    if (wire === 0) v = varint();
+    else if (wire === 2) {
+      const len = varint();
+      if (i + len > buf.length) throw new Error('pb: truncated field');
+      v = buf.subarray(i, i + len); i += len;
+    } else if (wire === 1) { v = buf.subarray(i, i + 8); i += 8; }
+    else if (wire === 5) { v = buf.subarray(i, i + 4); i += 4; }
+    else throw new Error('pb: unsupported wire type');
+    if (i > buf.length) throw new Error('pb: truncated field');
+    if (!out.has(field)) out.set(field, []);
+    out.get(field).push(v);
+  }
+  return out;
+}
+function pbOne(fields, n) { const v = fields && fields.get(n); return v ? v[0] : undefined; }
+function pbMsg(buf) {
+  if (!Buffer.isBuffer(buf)) return null;
+  try { return pbFields(buf); } catch (_) { return null; }
+}
+function pbNum(fields, n) { const v = pbOne(fields, n); return typeof v === 'number' ? v : 0; }
+function pbStr(fields, n) { const v = pbOne(fields, n); return Buffer.isBuffer(v) ? v.toString('utf8') : ''; }
+
+// Antigravity's reasoning-level suffix → [base model, effort].
+const ANTIGRAVITY_EFFORT_SUFFIX = /-(low|medium|high|thinking)$/;
+function antigravityModel(name) {
+  const m = ANTIGRAVITY_EFFORT_SUFFIX.exec(name);
+  if (!m) return [name, null];
+  return [name.slice(0, -m[0].length), m[1] === 'thinking' ? null : m[1]];
+}
+
+// conversation id → { status, ts, project } from conversation_summaries.db,
+// re-read only when that file changes.
+let antigravitySummaryMemo = { key: '', map: new Map() };
+function antigravitySummaries() {
+  const f = path.join(antigravityDir(), 'conversation_summaries.db');
+  let key;
+  try { const st = fs.statSync(f); key = st.size + ':' + antigravityMtimeMs(f, st); } catch (_) { return new Map(); }
+  if (key === antigravitySummaryMemo.key) return antigravitySummaryMemo.map;
+  const map = new Map();
+  try {
+    for (const r of sqliteTable(sqliteOpen(f), 'conversation_summaries') || []) {
+      if (typeof r.conversation_id !== 'string') continue;
+      const ws = String(r.workspace_uris || '').split(/[,\n]/)[0].trim();
+      let project = '';
+      try { project = ws ? decodeURIComponent(path.basename(new URL(ws).pathname)) : ''; } catch (_) { project = path.basename(ws); }
+      map.set(r.conversation_id, {
+        status: String(r.status || ''),
+        ts: Date.parse(String(r.last_modified_time || '').replace(' ', 'T').replace(/(\.\d{3})\d+/, '$1')),
+        project,
+      });
+    }
+  } catch (_) { return antigravitySummaryMemo.map; } // mid-write: keep the last good read
+  antigravitySummaryMemo = { key, map };
+  return map;
+}
+
+function parseAntigravityFile(filePath) {
+  let sq, steps, gens;
+  try {
+    sq = sqliteOpen(filePath);
+    steps = sqliteTable(sq, 'steps') || [];
+    gens = sqliteTable(sq, 'gen_metadata') || [];
+  } catch (_) { return null; } // locked / mid-write / unexpected layout → retry next cycle
+  const sid = path.basename(filePath, '.db');
+  // Model names, by response id and (fallback) by model enum.
+  const nameById = new Map(), nameByEnum = new Map();
+  for (const g of gens) {
+    const top = pbMsg(g.data);
+    const call = top && pbMsg(pbOne(top, 1));
+    const usage = call && pbMsg(pbOne(call, 4));
+    const name = call && pbStr(call, 19);
+    if (!usage || !name) continue;
+    const rid = pbStr(usage, 11);
+    if (rid) nameById.set(rid, name);
+    nameByEnum.set(pbNum(usage, 1), name);
+  }
+  const summary = antigravitySummaries().get(sid);
+  const project = summary ? summary.project : '';
+  const entries = [];
+  let lastTs = 0;
+  for (const s of steps) {
+    const meta = pbMsg(s.metadata);
+    if (!meta) continue;
+    const created = pbMsg(pbOne(meta, 1));
+    const ts = created ? pbNum(created, 1) * 1000 + Math.floor(pbNum(created, 2) / 1e6) : 0;
+    if (ts > lastTs) lastTs = ts;
+    const usage = pbMsg(pbOne(meta, 9));
+    if (!usage || !ts) continue;
+    const inputTokens = pbNum(usage, 2);
+    const cacheRead = pbNum(usage, 5);
+    const outputTokens = pbNum(usage, 3); // already includes thinking (9)
+    if (inputTokens + outputTokens + cacheRead <= 0) continue;
+    const rid = pbStr(usage, 11);
+    const raw = nameById.get(rid) || nameByEnum.get(pbNum(usage, 1)) || 'antigravity-unknown';
+    const [model, effort] = antigravityModel(raw);
+    const provider = model.startsWith('claude') ? 'anthropic'
+      : /^(gpt|o[0-9])/.test(model) ? 'openai' : 'google';
+    const e = agentEntry({
+      ts, provider, model, source: 'antigravity',
+      inputTokens, outputTokens, cacheRead,
+      sessionId: sid, project,
+      key: 'ag:' + (rid || sid + ':' + s.idx),
+    });
+    if (effort) e.effort = effort;
+    e.cost = costForEntry(e);
+    entries.push(e);
+  }
+  const sessionMeta = entries.length ? { [sid]: { firstUserText: '', project } } : {};
+  // Live state for Discord: a RUNNING conversation is mid-turn ("working");
+  // anything else is between turns. Timestamped by its newest step, so a
+  // conversation left RUNNING by a crash still ages out (LIVE_STATE_MAX_AGE_MS).
+  const running = !!summary && summary.status === 'CASCADE_RUN_STATUS_RUNNING';
+  const conv = lastTs ? { provider: 'antigravity', sessionId: sid, kind: running ? 'tool_use' : 'reply',
+    ts: Math.max(lastTs, summary && isFinite(summary.ts) ? summary.ts : 0),
+    open: running ? ['antigravity'] : [], sideTs: 0 } : null;
+  return { entries, sessionMeta, ultracodeSessions: [], effortEvents: [], conv };
+}
+
 // Parse one custom-source JSONL file (config `customSources`). Tolerant by
 // design — the writer is the user's own tooling. Per line: `ts` (ISO string,
 // epoch ms, or epoch seconds) is required; `input`/`output`/`cached` are token
@@ -2472,17 +2846,21 @@ function parseAll() {
   const continueFiles = walkJsonl(continueDevDataRoot()).filter((f) => path.basename(f) === 'tokensGenerated.jsonl');
   const clineFiles = clineTaskFiles();
   const rooFiles = rooTaskFiles();
+  // Antigravity keeps one SQLite database per conversation (read by the
+  // hand-rolled reader above, WAL included).
+  const antigravityFiles = antigravityConversationFiles();
   const codexSet = new Set(codexFiles);
   const geminiSet = new Set(geminiFiles);
   const continueSet = new Set(continueFiles);
   const clineSet = new Set(clineFiles);
   const rooSet = new Set(rooFiles);
+  const antigravitySet = new Set(antigravityFiles);
   // Config-defined custom sources: map each file → its source descriptor. A
   // file already claimed by auto-discovery is NEVER re-claimed by a custom
   // source: the builtin identity is what past days were sealed under, so
   // re-sourcing it would double-count against the archive. Warn once so a
   // custom source that silently stays empty is diagnosable.
-  const builtinClaimed = new Set(claudeFiles.concat(codexFiles, geminiFiles, continueFiles, clineFiles, rooFiles));
+  const builtinClaimed = new Set(claudeFiles.concat(codexFiles, geminiFiles, continueFiles, clineFiles, rooFiles, antigravityFiles));
   const customByFile = new Map();
   for (const src of customSourcesConfig()) {
     for (const f of customSourceFiles(src)) {
@@ -2499,7 +2877,7 @@ function parseAll() {
   }
   const customFiles = Array.from(customByFile.keys());
   const walkMs = Date.now() - walkT0;
-  const files = claudeFiles.concat(codexFiles, geminiFiles, continueFiles, clineFiles, rooFiles, customFiles);
+  const files = claudeFiles.concat(codexFiles, geminiFiles, continueFiles, clineFiles, rooFiles, antigravityFiles, customFiles);
   const liveFiles = new Set(files);
 
   let parsed = 0, skipped = 0, failed = 0;
@@ -2517,9 +2895,13 @@ function parseAll() {
       : continueSet.has(f) ? 'continue'
       : clineSet.has(f) ? 'cline'
       : rooSet.has(f) ? 'roo'
+      : antigravitySet.has(f) ? 'antigravity'
       : 'claude';
+    // An Antigravity database is written through its -wal file, so the
+    // cache key is the newer of the two mtimes.
+    const mtimeMs = route === 'antigravity' ? antigravityMtimeMs(f, st) : st.mtimeMs;
     const cached = fileCache.get(f);
-    if (cached && cached.mtimeMs === st.mtimeMs && cached.route === route) {
+    if (cached && cached.mtimeMs === mtimeMs && cached.route === route) {
       skipped++;
       continue;
     }
@@ -2529,6 +2911,7 @@ function parseAll() {
       : continueSet.has(f) ? parseContinueFile(f)
       : clineSet.has(f) ? parseClineFile(f)
       : rooSet.has(f) ? parseClineFile(f, 'roo')
+      : antigravitySet.has(f) ? parseAntigravityFile(f)
       : parseFile(f);
     if (result === null) {
       // Read failed this cycle (e.g. locked mid-write). Keep any prior cached
@@ -2537,7 +2920,7 @@ function parseAll() {
       continue;
     }
     fileCache.set(f, {
-      mtimeMs: st.mtimeMs,
+      mtimeMs,
       route,
       entries: result.entries,
       sessionMeta: result.sessionMeta,
@@ -2598,11 +2981,29 @@ function parseAll() {
     }
   }
 
+  // Antigravity's run status lives in conversation_summaries.db, which changes
+  // without the conversation's own database changing — so the cached parse's
+  // status is refreshed here on every cycle (the summaries read is memoized
+  // on that file's size + mtime).
+  if (antigravityFiles.length) {
+    const summaries = antigravitySummaries();
+    for (const sid in conv) {
+      const c = conv[sid];
+      const sm = c.provider === 'antigravity' ? summaries.get(sid) : null;
+      if (!sm) continue;
+      const running = sm.status === 'CASCADE_RUN_STATUS_RUNNING';
+      c.kind = running ? 'tool_use' : 'reply';
+      c.open = running ? ['antigravity'] : [];
+      if (Number.isFinite(sm.ts) && sm.ts > c.ts) c.ts = sm.ts;
+    }
+  }
+
   const agentBits = [];
   if (geminiFiles.length) agentBits.push(`${geminiFiles.length} gemini`);
   if (continueFiles.length) agentBits.push(`${continueFiles.length} continue`);
   if (clineFiles.length) agentBits.push(`${clineFiles.length} cline`);
   if (rooFiles.length) agentBits.push(`${rooFiles.length} roo`);
+  if (antigravityFiles.length) agentBits.push(`${antigravityFiles.length} antigravity`);
   if (customFiles.length) agentBits.push(`${customFiles.length} custom`);
   const agentStr = agentBits.length ? ', ' + agentBits.join(', ') : '';
   console.log(`[burnglass] walked ${files.length} file(s) (${claudeFiles.length} claude, ${codexFiles.length} codex${agentStr}) in ${walkMs}ms; parsed ${parsed}, skipped ${skipped} (cached)${failed ? `, ${failed} unreadable (will retry)` : ''}; ${merged.length} unique usage records`);
@@ -3081,11 +3482,11 @@ function aggregate(entries, sessionMeta, desktopTitles, now, modesBySession, ult
   const ACTIVE_MAIN_LOOKBACK_MS = 24 * 60 * 60 * 1000;
   let activeProvider = null;
   if (asc.length && now - asc[asc.length - 1].ts <= ACTIVE_MS) {
-    // Only Claude Code / Codex have dedicated Discord art. The other agents
-    // (custom sources included) map to null (Pulse art) rather than falsely
-    // claiming "Using Claude Code".
+    // Only Claude Code / Codex / Antigravity have a Discord provider. The
+    // other agents (custom sources included) map to null (Pulse art) rather
+    // than falsely claiming "Using Claude Code".
     const last = asc[asc.length - 1];
-    activeProvider = last.source === 'codex' ? 'codex' : nonClaudeEntry(last) ? null : 'claude';
+    activeProvider = agentProvider(last);
   }
   // What you're doing right now, for the Discord line: the model + effort of
   // the newest MAIN-conversation entry of the active provider (never a
@@ -3095,7 +3496,7 @@ function aggregate(entries, sessionMeta, desktopTitles, now, modesBySession, ult
   let activeNow = null;
   if (activeProvider) {
     const cutoff = now - ACTIVE_MS;
-    const provOf = (e) => (e.source === 'codex' ? 'codex' : nonClaudeEntry(e) ? null : 'claude');
+    const provOf = agentProvider;
     // Helper calls are neither "what you're using" nor a session of yours:
     // advisor sub-inferences, Codex's background auto-reviewer (its own
     // rollout — legacy Codex even gave it its own session id), synthetic rows.
@@ -6683,6 +7084,8 @@ function prettyModelName(model) {
   if (m.startsWith('glm-')) return 'GLM-' + m.slice(4);
   // deepseek-v4-pro → "DeepSeek V4 Pro", deepseek-flash → "DeepSeek Flash"
   if (m.startsWith('deepseek-')) return 'DeepSeek ' + m.slice(9).split('-').map((p) => (/^v\d/.test(p) ? p.toUpperCase() : cap(p))).join(' ');
+  // gemini-3.1-pro → "Gemini 3.1 Pro" (Antigravity's Gemini models)
+  if (m.startsWith('gemini-')) return 'Gemini ' + m.slice(7).split('-').map(cap).join(' ');
   return m;
 }
 // Effort level as the presence shows it ("Sonnet 5 · Medium"): xhigh reads as
@@ -6819,7 +7222,8 @@ function buildDiscordActivity() {
   // Codex → the Codex art, idle → Pulse. Asset keys must exist in the Discord
   // application's Rich Presence art (upload images keyed claude / codex / pulse);
   // an unknown key just renders no image, so this degrades cleanly. Each key is
-  // overridable in config (discordClaudeImage / discordCodexImage / discordLargeImage).
+  // overridable in config (discordClaudeImage / discordCodexImage /
+  // discordAntigravityImage / discordLargeImage).
   const cfg = readConfig();
   // Live state (working / thinking / waiting / idle — see computeAgentState).
   // A session that is working or waiting on you keeps its provider's art
@@ -6830,12 +7234,16 @@ function buildDiscordActivity() {
   if (shown.prov && shown.state && shown.state !== 'idle') prov = shown.prov;
   const live = shown.prov === prov ? shown.state : null;
   const claudeArt = discordClaudeArt(cfg, live);
+  // Antigravity has no art key in the shared Discord application, so its
+  // slot falls back to the idle art unless the user sets one.
   const asset = prov === 'codex' ? (cfg.discordCodexImage || 'codex')
     : prov === 'claude' ? claudeArt
+    : prov === 'antigravity' ? (cfg.discordAntigravityImage || cfg.discordLargeImage || 'pulse')
     : (cfg.discordLargeImage || 'pulse');
   const verb = live && DISCORD_STATE_TEXT[live];
   const assetText = prov === 'codex' ? (verb ? 'OpenAI Codex · ' + verb : 'Using OpenAI Codex')
     : prov === 'claude' ? (verb ? 'Claude Code · ' + verb : 'Using Claude Code')
+    : prov === 'antigravity' ? (verb ? 'Antigravity · ' + verb : 'Using Antigravity')
     : 'Burnglass — idle';
   // Second line while active: "Opus 5.5 · Extra High · 3 sessions" — the
   // model + effort you're running and how many sessions are live. Absent when
@@ -6899,12 +7307,13 @@ function startDiscordLoop() {
   if (discordEnabled()) discordTick();
 }
 
-// The three large-image slots and their config keys. A slot holds a
+// The large-image slots and their config keys. A slot holds a
 // Developer-Portal Art Asset key, an https link (the ONLY way Discord
 // animates a GIF / animated WebP), or nothing (= the built-in key).
 const DISCORD_IMAGE_SLOTS = {
   claude: 'discordClaudeImage', claudeWorking: 'discordClaudeWorkingImage', claudeThinking: 'discordClaudeThinkingImage',
-  claudeWaiting: 'discordClaudeWaitingImage', codex: 'discordCodexImage', idle: 'discordLargeImage',
+  claudeWaiting: 'discordClaudeWaitingImage', codex: 'discordCodexImage', antigravity: 'discordAntigravityImage',
+  idle: 'discordLargeImage',
 };
 const DISCORD_IMAGE_MAX = 256; // Discord's external-asset URL limit
 
@@ -6949,7 +7358,7 @@ function discordImagesForPayload() {
 const DISCORD_IMAGE_DEFAULTS = {
   claude: DISCORD_DEFAULT_CLAUDE_ART.idle, claudeWorking: DISCORD_DEFAULT_CLAUDE_ART.working,
   claudeThinking: DISCORD_DEFAULT_CLAUDE_ART.thinking, claudeWaiting: DISCORD_DEFAULT_CLAUDE_ART.waiting,
-  codex: 'codex', idle: 'pulse',
+  codex: 'codex', antigravity: 'pulse', idle: 'pulse',
 };
 function discordForPayload() {
   const images = discordImagesForPayload();
@@ -10749,4 +11158,5 @@ module.exports = {
   psQuote, trayScript, summarizeTrayOutput, integrationTargetExists, sameEntry, discordClaudeArt, DISCORD_DEFAULT_CLAUDE_ART,
   parseFile, parseEffortArgs, parseEffortStdout, mergeModes, annotateModes, discordIpcCandidates,
   fmtMoney, parseEcbXml, currencyInfo, usableCurrency, statusLineToolName,
+  sqliteOpen, sqliteTable, pbFields, parseAntigravityFile, antigravityModel,
 };
