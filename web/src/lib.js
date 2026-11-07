@@ -246,7 +246,12 @@ export const SOURCE_LABELS = {
   continue: 'Continue',
   cline: 'Cline',
   roo: 'Roo Code',
+  antigravity: 'Antigravity',
 };
+// Live-state provider → the word the status line uses.
+export function providerWord(p) {
+  return p === 'codex' ? 'Codex' : p === 'antigravity' ? 'Antigravity' : 'Claude';
+}
 // UI label for a source: custom label (payload.sourceMeta) → builtin → raw key.
 // Keys stay RAW everywhere that matters (filters, React keys, CSV, ?sources=).
 export function srcLabel(key, meta) {
@@ -258,7 +263,7 @@ export function srcLabel(key, meta) {
 // the dashboard and the presence name a model the same way:
 //   claude-opus-5-5 → "Opus 5.5" · claude-haiku-4-5-20251001 → "Haiku 4.5"
 //   gpt-6-astra → "GPT-6 Astra" · gpt-5.6-sol → "GPT-5.6 Sol" · glm-4.6 → "GLM-4.6"
-// One addition over the server: gemini-3.5-flash → "Gemini 3.5 Flash".
+//   gemini-3.5-flash → "Gemini 3.5 Flash"
 export function prettyModel(model) {
   if (!model) return '';
   const cap = (w) => w.charAt(0).toUpperCase() + w.slice(1);

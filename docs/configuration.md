@@ -88,7 +88,8 @@ See [Discord Rich Presence](discord.md).
 | `discordClaudeThinkingImage` | the Claude Code image | Shown while Claude is thinking. |
 | `discordClaudeWaitingImage` | the Claude Code image | Shown while Claude is waiting on you. |
 | `discordCodexImage` | `codex` | The **Codex** image. |
-| `discordLargeImage` | `pulse` | The **Idle** image, shown when neither Claude Code nor Codex is active. |
+| `discordAntigravityImage` | the Idle image | The **Antigravity** image. |
+| `discordLargeImage` | `pulse` | The **Idle** image, shown when none of Claude Code, Codex or Antigravity is active. |
 
 Each image value is an art-asset key of the Discord application or an `https://` link
 (at most 256 characters).
@@ -174,6 +175,7 @@ are set, `BURNGLASS_` wins, and an empty `BURNGLASS_X=` doesn't hide a real `PUL
 | `CONTINUE_DIR` · `CONTINUE_GLOBAL_DIR` | Continue's folder (default `~/.continue`). |
 | `CLINE_DIR` | Cline's extension folder, the `…/globalStorage/saoudrizwan.claude-dev` directory. |
 | `ROO_DIR` | Roo Code's extension folder. |
+| `ANTIGRAVITY_DIR` | Antigravity's data folder (default `~/.gemini/antigravity`, under `GEMINI_DIR` when set). |
 | `NO_COLOR` | Plain output for `--statusline` and `--summary`. |
 
 The VPS installer (`install.sh`) reads `BURNGLASS_PORT`, `BURNGLASS_HOST`,

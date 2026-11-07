@@ -635,7 +635,7 @@ sealed class DisplayCurrency
 /// Never throws — any parse trouble yields an empty wrapper.
 static class SummaryTransform
 {
-    private static readonly string[] AgentSources = { "gemini", "cline", "roo", "continue" };
+    private static readonly string[] AgentSources = { "gemini", "cline", "roo", "continue", "antigravity" };
     private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
 
     /// The dashboard's categorical source series, DARK values (web/src/styles.css --s1…--s6; the
@@ -659,6 +659,7 @@ static class SummaryTransform
         ["continue"] = "Continue",
         ["cline"] = "Cline",
         ["roo"] = "Roo Code",
+        ["antigravity"] = "Antigravity",
     };
 
     public static string ToUi(string summaryJson)

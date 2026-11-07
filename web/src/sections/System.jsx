@@ -32,6 +32,7 @@ import { Icon } from '../icons.jsx';
 import {
   BRAND, FORMER_BRAND, STRIP_EXE_NAME, exeName, launchInfo, homePath, BP, ago, clockTime, dur, hm, postJson, useLogs, useMedia,
   setDisplayCurrency, requestRefresh,
+  providerWord,
 } from '../lib.js';
 import { integrationRows } from '../notices.js';
 import { MeshyKeyForm } from './Meshy.jsx';
@@ -65,7 +66,7 @@ function useOverrides() {
   return { get, set, settle, ov };
 }
 
-const agentWord = (a) => (a ? (a.provider === 'codex' ? 'Codex' : 'Claude') + ' is ' + (a.state === 'waiting' ? 'waiting on you' : a.state) : null);
+const agentWord = (a) => (a ? providerWord(a.provider) + ' is ' + (a.state === 'waiting' ? 'waiting on you' : a.state) : null);
 
 // =============================================================================
 // Currency (Appearance): what money is SHOWN in. Costs stay US dollars in the
@@ -755,6 +756,7 @@ const DISCORD_IMAGE_ROWS = [
   ['claudeThinking', 'Claude — thinking', 'built-in: Clawd typing (animated)'],
   ['claudeWaiting', 'Claude — waiting on you', 'built-in: Clawd with a “!” (animated)'],
   ['codex', 'Codex', 'codex (uploaded art)'],
+  ['antigravity', 'Antigravity', 'empty: the Idle image'],
   ['idle', 'Idle', 'pulse (uploaded art)'],
 ];
 const rowValues = (src) => Object.fromEntries(DISCORD_IMAGE_ROWS.map(([k]) => [k, (src && src[k]) || '']));

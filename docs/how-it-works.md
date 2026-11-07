@@ -17,7 +17,7 @@ Where Burnglass's numbers come from, how they're priced, how accurate they are, 
   every 10 seconds.
 - **Sources.** Claude Code usage is split by where it ran (its `entrypoint`): Claude CLI,
   Claude VS Code, Claude JetBrains, Claude Desktop or the SDK. Codex, Gemini CLI,
-  Continue, Cline, Roo Code and each custom source are sources of their own.
+  Antigravity, Continue, Cline, Roo Code and each custom source are sources of their own.
 
 ### Claude Code
 
@@ -48,6 +48,7 @@ Where Burnglass's numbers come from, how they're priced, how accurate they are, 
 | **Continue** | `~/.continue/dev_data/*/tokensGenerated.jsonl` | Priced from Continue's own **local token estimates**, so the source is badged `est` |
 | **Cline** | the extension's task history (`globalStorage/saoudrizwan.claude-dev/tasks/`) | Cline's own recorded per-request cost |
 | **Roo Code** | the same layout under `rooveterinaryinc.roo-cline` / `.roo-code` | Roo's own recorded cost |
+| **Antigravity** | `~/.gemini/antigravity/conversations/<id>.db`, one SQLite database per conversation | API list prices for the model behind each call |
 
 - Each appears only when its logs are present; there's nothing to set up.
 - Cline and Roo are found in VS Code, Insiders, VSCodium, Cursor and Windsurf, plus
@@ -56,8 +57,16 @@ Where Burnglass's numbers come from, how they're priced, how accurate they are, 
   request when it can; otherwise it comes from the task metadata, or shows as `unknown`
   (Roo keeps its exact model state in a SQLite database Burnglass doesn't read).
 - Gemini's input count already includes its cached tokens; Burnglass splits them.
+- Antigravity stores each model call as protobuf inside SQLite. Burnglass reads both with
+  its own read-only code (Node built-ins only): the database and its `-wal` file, committed
+  transactions only, never writing, locking or checkpointing. Each call keeps the model
+  Antigravity used; a reasoning suffix (`claude-opus-5-5-high`, `gemini-3.1-pro-low`) is
+  shown as the effort. Antigravity-only model names without a public price
+  (`gemini-3.8-flash-n`, …) are priced at the logged Google default. Its account limits
+  are not shown. The project comes from the conversation's workspace, and the live state
+  (running or idle) from `conversation_summaries.db`.
 - None of these agents count toward the Claude 5-hour block, even when they run a Claude model.
-- **Not supported:** agents that keep usage only in SQLite (Crush, Goose, opencode ≥ 1.16).
+- **Not supported yet:** other agents that keep usage only in SQLite (Crush, Goose, opencode ≥ 1.16).
   Reading SQLite would break the zero-dependency rule. Aider's default history has no
   exact per-call token counts.
 
