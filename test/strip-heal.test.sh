@@ -9,7 +9,9 @@
 # (PULSE_STRIP_RELEASE_API) and tasklist/taskkill/spawn at a stub folder
 # (PULSE_STRIP_PROC_STUB: running / kills.log / launches.log / sticky). The
 # after-update condition is the REAL --after-update flag. Strip "exes" are a
-# few MB of random bytes. Every case runs with a fake $HOME.
+# few MB of random bytes. Every case runs with a fake $HOME (and, on Windows,
+# a matching USERPROFILE + APPDATA/LOCALAPPDATA/TEMP; start_srv refuses to
+# start a server whose os.homedir() is not the fake home).
 #  S1  stale (v1 layout: pulse-strip.exe beside the exe + burnglass-strip.exe
 #      in <home>/bin) -> both swapped under their OWN names, ONE download of
 #      the own-name asset (via a 302 like GitHub's CDN), .old kept, bytes =
@@ -44,6 +46,8 @@
 #      pinned to it) or the server exe itself sits in ~/.pulse: skipped, and
 #      the ~/.pulse tree stays byte-identical (hard rule 3b: nothing there is
 #      renamed, replaced, created or cleaned up)
+#  S17d the degraded cases' precondition: a plain FILE at ~/.burnglass fails the
+#      migration and is left as it was (never replaced by the migrated folder)
 #  S7b the "no strip" reason carries no path (payload: basenames only)
 #  S18 the strip is turned off from the dashboard while a refresh restarts it
 #      (after the kill, during the pause before the relaunch) -> not launched
@@ -72,16 +76,93 @@ TMP=$(mktemp -d)
 MOCKS=""
 cleanup() { for p in $MOCKS; do kill "$p" 2>/dev/null; done; if [ -n "${KEEP_TMP:-}" ]; then echo "TMP=$TMP"; else rm -rf "$TMP"; fi; }
 trap cleanup EXIT
+
+# ------------------------------------------------------------------ Windows containment
+# Git Bash / MSYS / Cygwin: Node's os.homedir() reads USERPROFILE there and
+# IGNORES $HOME, so a server given only HOME=<fake> resolves the REAL profile
+# (C:\Users\<you>) — and the unpinned cases (S8, S17a, S17c, S25) would then
+# migrate into, write server.json / strip-refresh.json in, and refresh strip
+# exes inside the user's real ~/.burnglass. Every HOME= therefore travels with
+# a native-form USERPROFILE (homeenv), and start_srv refuses to start a server
+# whose os.homedir() is not the case's fake home (fail closed). POSIX runs are
+# unchanged: homeenv emits HOME= alone there.
+IS_WIN=0
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) IS_WIN=1 ;; esac
+# nativepath <posix path>: the form Node sees on Windows (C:\...), identity on
+# POSIX. On Windows a failed cygpath prints nothing, which the start_srv guard
+# turns into a refusal rather than a fall-through to the real profile.
+nativepath() { if [ "$IS_WIN" = 1 ]; then cygpath -w "$1" 2>/dev/null; else printf '%s' "$1"; fi; }
+# homeenv <fake home>: the env words for a fake home (word-split by callers,
+# like common(); the suite's temp paths carry no spaces).
+homeenv() {
+  if [ "$IS_WIN" = 1 ]; then echo HOME="$1" USERPROFILE="$(nativepath "$1")"; else echo HOME="$1"; fi
+}
+# The server reports paths in ITS form: on win32 path.join turns the
+# MSYS-converted env values / USERPROFILE into C:\...\x, never the suite's
+# POSIX $C/x, so path assertions compare against the native form there.
+# jspath <posix path>: the path as the body of a JS "..." literal (native with
+# doubled backslashes on Windows, identity on POSIX).
+jspath() { nativepath "$1" | sed 's/\\/\\\\/g'; }
+# launch_x <posix exe> [file]: the "launch <exe>" line matches exactly
+# (fixed-string on Windows — a C:\ path is not a regex); reads stdin without a
+# file. POSIX keeps the original grep -qx.
+launch_x() {
+  if [ "$IS_WIN" = 1 ]; then grep -qxF "launch $(nativepath "$1")" ${2:+"$2"}; else grep -qx "launch $1" ${2:+"$2"}; fi
+}
+# noleak_js <js string expr>: extra "carries no path" clauses for Windows,
+# where a leaked path has backslashes and no '/' or POSIX $TMP, so the POSIX
+# checks alone would pass vacuously. Empty on POSIX (checks unchanged there).
+TMPBASE=$(basename "$TMP" | tr 'A-Z' 'a-z')
+noleak_js() {
+  if [ "$IS_WIN" = 1 ]; then printf ' && !%s.includes("\\\\") && !%s.toLowerCase().includes("%s")' "$1" "$1" "$TMPBASE"; fi
+}
+if [ "$IS_WIN" = 1 ]; then
+  # findPulseStrip also probes <server.js dir>/strip/dist-strip for a dev
+  # build, and a Windows checkout routinely HAS one (strip/dist-strip/
+  # pulse-strip.exe). Run a copy of the server from the fixture so that
+  # candidate resolves inside $TMP too — no real strip exe is ever visible.
+  mkdir -p "$TMP/srv" "$TMP/wintmp" || { echo "FAIL  could not create the Windows server copy folder — refusing to run"; exit 1; }
+  if ! cp "$SERVER" "$TMP/srv/server.js"; then echo "FAIL  could not copy $SERVER into the fixture — refusing to run"; exit 1; fi
+  SERVER=$TMP/srv/server.js
+fi
+
 # This suite owns ports 5861-5895; a leftover listener would make results lie.
-for p in $(seq 5861 5895); do
-  curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$p/"; rc=$?
-  if [ $rc -ne 7 ]; then echo "FAIL  port $p is already in use (curl rc=$rc) — stop whatever holds it"; exit 1; fi
-done
+if [ "$IS_WIN" = 1 ]; then
+  # Windows: a connect to a CLOSED loopback port is not refused at once — the
+  # stack re-sends the SYN after each RST and ECONNREFUSED arrives after ~2 s,
+  # so curl --max-time 1 times out (rc 28) on every free port. Probe all the
+  # ports in parallel from Node instead: only a completed connect (a real
+  # listener) or no answer at all within 6 s counts as "in use"; ECONNREFUSED
+  # is the free case.
+  busy=$(node -e '
+const net = require("net");
+const [lo, hi] = process.argv.slice(1).map(Number);
+const out = [];
+let left = hi - lo + 1;
+for (let p = lo; p <= hi; p++) {
+  let done = false;
+  const s = net.connect({ host: "127.0.0.1", port: p });
+  const fin = (why) => { if (done) return; done = true; clearTimeout(t); s.destroy(); if (why) out.push(p + " (" + why + ")"); if (--left === 0) { console.log(out.join(", ")); process.exit(out.length ? 1 : 0); } };
+  const t = setTimeout(() => fin("no answer in 6 s"), 6000);
+  s.on("connect", () => fin("listening"));
+  s.on("error", (e) => fin(e && e.code === "ECONNREFUSED" ? "" : (e && e.code) || "error"));
+}' 5861 5895); rc=$?
+  if [ $rc -ne 0 ]; then echo "FAIL  port(s) already in use: ${busy:-probe failed (node rc=$rc)} — stop whatever holds them"; exit 1; fi
+else
+  for p in $(seq 5861 5895); do
+    curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$p/"; rc=$?
+    if [ $rc -ne 7 ]; then echo "FAIL  port $p is already in use (curl rc=$rc) — stop whatever holds it"; exit 1; fi
+  done
+fi
 FAILS=0
 pass() { echo "PASS  $*"; }
 fail() { echo "FAIL  $*"; FAILS=$((FAILS + 1)); }
 check() { if eval "$2"; then pass "$1"; else fail "$1"; fi; }
-VER=$(node -p "require('$ROOT/package.json').version")
+# Read via a relative require from $ROOT: on Windows $ROOT is an MSYS path
+# (/c/...) that Node's require cannot resolve inside a JS string literal, and
+# node -p output ends in CRLF there.
+VER=$(cd "$ROOT" && node -p "require('./package.json').version" | tr -d '\r')
+if [ -z "$VER" ]; then echo "FAIL  could not read the version from $ROOT/package.json"; exit 1; fi
 MP=5861
 
 # ------------------------------------------------------------------ fixtures
@@ -148,8 +229,9 @@ api_count() { stats 'l.filter((u) => u.startsWith("/repos/")).length'; }
 dl_count() { stats 'l.filter((u) => u.startsWith("/cdn/")).length'; }
 
 SRV=""
-# start_srv <port> <log> [NAME=VALUE ...] [-- server args]: fake HOME always,
-# no home pin unless the case passes PULSE_HOME=...
+# start_srv <port> <log> [NAME=VALUE ...] [-- server args]: fake HOME always
+# (pass it via homeenv, which adds USERPROFILE on Windows), no home pin unless
+# the case passes PULSE_HOME=...
 start_srv() {
   local P=$1 L=$2; shift 2
   local envs=() args=()
@@ -157,14 +239,61 @@ start_srv() {
     if [ "$1" = "--" ]; then shift; args=("$@"); break; fi
     envs+=("$1"); shift
   done
-  env -u PULSE_HOME -u BURNGLASS_HOME -u PULSE_HISTORY_DIR -u PULSE_MODES_FILE \
-    CLAUDE_DIR="$TMP/claude" CODEX_DIR="$TMP/no-codex" GEMINI_DIR="$TMP/none" CONTINUE_DIR="$TMP/none" \
-    CLINE_DIR="$TMP/none" ROO_DIR="$TMP/none" \
-    PULSE_NO_TRAY_SPAWN=1 PULSE_NO_STRIP_SPAWN=1 \
-    PULSE_MESHY_API=http://127.0.0.1:9 PULSE_SUMMARY_MEMO_MS=0 \
-    PULSE_UPDATE_API=http://127.0.0.1:9/update PULSE_REACH_API=http://127.0.0.1:9/reach \
-    PULSE_REACH_REPO_API=http://127.0.0.1:9/repo \
-    PULSE_STRIP_RELEASE_API="http://127.0.0.1:$MP/" \
+  # Containment preconditions (fail closed — abort the suite, never start a
+  # server that could reach the real profile): a fake HOME, and the strip
+  # exe-dir + process stub, without which the server would look beside
+  # node.exe and run the REAL tasklist / taskkill / strip spawn.
+  local fh="" stub="" exedir="" e
+  for e in "${envs[@]}"; do
+    case $e in
+      HOME=*) fh=${e#HOME=} ;;
+      PULSE_STRIP_PROC_STUB=*|BURNGLASS_STRIP_PROC_STUB=*) stub=${e#*=} ;;
+      PULSE_STRIP_EXE_DIR=*|BURNGLASS_STRIP_EXE_DIR=*) exedir=${e#*=} ;;
+    esac
+  done
+  if [ -z "$fh" ] || [ -z "$stub" ] || [ -z "$exedir" ]; then
+    echo "FAIL  start_srv $P: refusing to start without HOME=, PULSE_STRIP_PROC_STUB= and PULSE_STRIP_EXE_DIR= (containment)"; exit 1
+  fi
+  local base=(CLAUDE_DIR="$TMP/claude" CODEX_DIR="$TMP/no-codex" GEMINI_DIR="$TMP/none" CONTINUE_DIR="$TMP/none"
+    CLINE_DIR="$TMP/none" ROO_DIR="$TMP/none"
+    PULSE_NO_TRAY_SPAWN=1 PULSE_NO_STRIP_SPAWN=1
+    PULSE_MESHY_API=http://127.0.0.1:9 PULSE_SUMMARY_MEMO_MS=0
+    PULSE_UPDATE_API=http://127.0.0.1:9/update PULSE_REACH_API=http://127.0.0.1:9/reach
+    PULSE_REACH_REPO_API=http://127.0.0.1:9/repo
+    PULSE_STRIP_RELEASE_API="http://127.0.0.1:$MP/")
+  local winenv=()
+  if [ "$IS_WIN" = 1 ]; then
+    # The rest of the Windows profile the server derives paths from, pointed
+    # into the case: %APPDATA% (Claude desktop session titles, VS Code
+    # globalStorage), %LOCALAPPDATA% (install dirs), %TEMP%/%TMP%, and the
+    # run-at-startup state (a stub file that never exists = "off", so reg.exe
+    # never queries the real HKCU Run key). Placed BEFORE the case's own
+    # words so a case can still override them.
+    winenv=(APPDATA="$(nativepath "$fh/AppData/Roaming")" LOCALAPPDATA="$(nativepath "$fh/AppData/Local")"
+      TEMP="$(nativepath "$TMP/wintmp")" TMP="$(nativepath "$TMP/wintmp")"
+      PULSE_STARTUP_STUB="$(nativepath "$TMP/startup-stub-none.json")")
+  fi
+  # Guard: the server's os.homedir() under EXACTLY this env must be the fake
+  # home (case-insensitive on Windows), or nothing is started.
+  # server.js's envv() reads BURNGLASS_<NAME> BEFORE PULSE_<NAME>, so an
+  # inherited BURNGLASS_* (HISTORY_DIR, STRIP_EXE_DIR, STRIP_PROC_STUB,
+  # STARTUP_STUB, ...) would silently beat every PULSE_* word this suite
+  # passes — and the homedir guard cannot see that. Drop every inherited
+  # BURNGLASS_* from both the guard and the launch; `env -u` runs before the
+  # NAME=VALUE words, so a case's own BURNGLASS_* word still applies.
+  local unsets=(-u PULSE_HOME -u BURNGLASS_HOME -u PULSE_HISTORY_DIR -u PULSE_MODES_FILE) v
+  for v in $(compgen -e); do case $v in BURNGLASS_*) unsets+=(-u "$v") ;; esac; done
+  local want
+  want=$(nativepath "$fh")
+  if ! env "${unsets[@]}" \
+      "${base[@]}" ${winenv[@]+"${winenv[@]}"} "${envs[@]}" node -e '
+const p = require("path"), h = require("os").homedir(), w = process.argv[1];
+const n = (x) => { const r = p.resolve(x); return process.platform === "win32" ? r.toLowerCase() : r; };
+if (!h || !w || n(h) !== n(w)) { console.error("os.homedir() = " + JSON.stringify(h) + ", fake home = " + JSON.stringify(w)); process.exit(1); }' "$want"; then
+    echo "FAIL  start_srv $P: the server would not run on the fake home (see above) — refusing to start it (containment)"; exit 1
+  fi
+  env "${unsets[@]}" \
+    "${base[@]}" ${winenv[@]+"${winenv[@]}"} \
     "${envs[@]}" node "$SERVER" --port "$P" "${args[@]}" >"$L" 2>&1 &
   SRV=$!
 }
@@ -204,7 +333,7 @@ case_dirs() {
   echo '{}' > "$C/home/config.json"
 }
 FORCE=(PULSE_STRIP_REFRESH_FORCE=1)
-common() { echo HOME="$C/fakehome" PULSE_HOME="$C/home" PULSE_STRIP_EXE_DIR="$C/exe" PULSE_STRIP_PROC_STUB="$C/stub"; }
+common() { echo $(homeenv "$C/fakehome") PULSE_HOME="$C/home" PULSE_STRIP_EXE_DIR="$C/exe" PULSE_STRIP_PROC_STUB="$C/stub"; }
 
 # ------------------------------------------------------------------ S1 stale
 case_dirs s1; S1=$C
@@ -227,6 +356,11 @@ check "S1 release looked up once, by tag v$VER" "[ \"\$(stats 'l.filter((u) => u
 check "S1 ONE download, of the own-name asset (pulse-strip.exe), via the 302" \
   "[ \"\$(stats 'l.filter((u) => u.startsWith(\"/cdn/\") || u.startsWith(\"/dl/\")).join(\",\")')\" = '/dl/pulse-strip.exe,/cdn/pulse-strip.exe' ]"
 check "S1 payload carries basenames only (no fixture path)" "! grep -q \"$TMP\" <<< \"\$(node -e 'console.log(JSON.stringify(JSON.parse(require(\"fs\").readFileSync(process.argv[1],\"utf8\")).strip.refresh))' '$TMP/s1.json')\""
+if [ "$IS_WIN" = 1 ]; then
+  # A leaked path is C:\...\tmp.XXXX\... there: the POSIX $TMP grep above
+  # cannot see it, so also look for the temp dir's basename and any backslash.
+  check "S1 (Windows) payload carries no native fixture path" "! grep -qiF -e '$TMPBASE' -e '\\' <<< \"\$(node -e 'console.log(JSON.stringify(JSON.parse(require(\"fs\").readFileSync(process.argv[1],\"utf8\")).strip.refresh))' '$TMP/s1.json')\""
+fi
 check "S1 strip not server-managed: no kill, no launch, still 'running'" "[ ! -e '$C/stub/kills.log' ] && [ ! -e '$C/stub/launches.log' ] && [ -e '$C/stub/running' ]"
 check "S1 log says the strip runs the new version from its next start" "grep -q 'strip runs v$VER from its next start' '$TMP/s1.log'"
 
@@ -276,7 +410,7 @@ wait_up 5866; wait_refresh 5866 "$TMP/s5.json"
 wait_file "$C/stub/launches.log"; sleep 0.5
 stop_srv $SRV
 check "S5 sha mismatch: failed with the reason, basenames only" \
-  "js '$TMP/s5.json' 's.strip.refresh.status === \"failed\" && /sha256 mismatch/.test(s.strip.refresh.error) && !s.strip.refresh.error.includes(\"/\") && s.strip.refresh.files[0].result === \"failed\"'"
+  "js '$TMP/s5.json' 's.strip.refresh.status === \"failed\" && /sha256 mismatch/.test(s.strip.refresh.error) && !s.strip.refresh.error.includes(\"/\")$(noleak_js s.strip.refresh.error) && s.strip.refresh.files[0].result === \"failed\"'"
 check "S5 original intact, no .old, no .download (downloaded once)" \
   "same '$TMP/old.bin' '$C/exe/burnglass-strip.exe' && [ ! -e '$C/exe/burnglass-strip.exe.old' ] && [ ! -e '$C/exe/burnglass-strip.exe.download' ] && [ \"\$(dl_count)\" = 1 ]"
 check "S5 nothing swapped -> the running strip is not killed (launch deduped once)" \
@@ -302,7 +436,7 @@ wait_up 5868; wait_refresh 5868 "$TMP/s7.json"
 stop_srv $SRV
 check "S7 no managed strip: skipped, nothing fetched, nothing created" \
   "js '$TMP/s7.json' 's.strip.refresh.status === \"skipped\" && /no Burnglass Strip/.test(s.strip.refresh.reason)' && [ \"\$(stats 'l.length')\" = 0 ] && [ ! -e '$C/home/bin' ]"
-check "S7b the skip reason carries no path" "js '$TMP/s7.json' '!s.strip.refresh.reason.includes(\"/\") && !s.strip.refresh.reason.includes(\"$TMP\")'"
+check "S7b the skip reason carries no path" "js '$TMP/s7.json' '!s.strip.refresh.reason.includes(\"/\") && !s.strip.refresh.reason.includes(\"$TMP\")$(noleak_js s.strip.refresh.reason)'"
 
 # ------------------------------------------------------------------ S8 legacy ~/.pulse/bin
 C=$TMP/s8; H8=$C/fakehome; mkdir -p "$H8/.pulse/bin" "$C/exe" "$C/stub"
@@ -311,7 +445,7 @@ cp "$TMP/old.bin" "$H8/.pulse/bin/pulse-strip.exe"
 touch "$C/stub/running"
 hash_tree "$H8/.pulse" "$TMP/s8-before.txt"
 reset_mock
-start_srv 5869 "$TMP/s8.log" HOME="$H8" PULSE_STRIP_EXE_DIR="$C/exe" PULSE_STRIP_PROC_STUB="$C/stub" "${FORCE[@]}" -- --after-update
+start_srv 5869 "$TMP/s8.log" $(homeenv "$H8") PULSE_STRIP_EXE_DIR="$C/exe" PULSE_STRIP_PROC_STUB="$C/stub" "${FORCE[@]}" -- --after-update
 wait_up 5869; wait_refresh 5869 "$TMP/s8.json"
 wait_file "$C/stub/launches.log"; sleep 0.8; summary 5869 "$TMP/s8.json"
 stop_srv $SRV
@@ -322,10 +456,10 @@ check "S8 fresh burnglass-strip.exe placed in ~/.burnglass/bin (release bytes, n
 check "S8 ~/.pulse byte-identical (nothing renamed, replaced or added)" "cmp -s '$TMP/s8-before.txt' '$TMP/s8-after.txt'"
 check "S8 payload: updated, the file reported as created in home-bin" \
   "js '$TMP/s8.json' 's.strip.refresh.status === \"updated\" && JSON.stringify(s.strip.refresh.files) === JSON.stringify([{ file: \"burnglass-strip.exe\", where: \"home-bin\", result: \"created\" }])'"
-check "S8 payload.strip.path now the new ~/.burnglass/bin copy" "js '$TMP/s8.json' 's.strip.path === \"$H8/.burnglass/bin/burnglass-strip.exe\"'"
+check "S8 payload.strip.path now the new ~/.burnglass/bin copy" "js '$TMP/s8.json' 's.strip.path === \"$(jspath "$H8/.burnglass/bin/burnglass-strip.exe")\"'"
 check "S8 the running (v1) strip stopped: taskkill argv names both images" \
   "[ \"\$(lines '$C/stub/kills.log')\" = 1 ] && grep -qF '[\"/F\",\"/IM\",\"burnglass-strip.exe\",\"/IM\",\"pulse-strip.exe\"]' '$C/stub/kills.log'"
-check "S8 launched ONCE, from ~/.burnglass/bin" "[ \"\$(lines '$C/stub/launches.log')\" = 1 ] && grep -qx 'launch $H8/.burnglass/bin/burnglass-strip.exe' '$C/stub/launches.log'"
+check "S8 launched ONCE, from ~/.burnglass/bin" "[ \"\$(lines '$C/stub/launches.log')\" = 1 ] && launch_x '$H8/.burnglass/bin/burnglass-strip.exe' '$C/stub/launches.log'"
 
 # ------------------------------------------------------------------ S9 kill + single launch
 case_dirs s9
@@ -341,7 +475,7 @@ check "S9 both beside-exe files updated from ONE download" \
 check "S9 running strip killed once, taskkill argv has both image names" \
   "[ \"\$(lines '$C/stub/kills.log')\" = 1 ] && grep -qF '\"/IM\",\"burnglass-strip.exe\",\"/IM\",\"pulse-strip.exe\"' '$C/stub/kills.log'"
 check "S9 exactly ONE launch (the start-up launch was deferred, not doubled)" \
-  "[ \"\$(lines '$C/stub/launches.log')\" = 1 ] && grep -qx 'launch $C/exe/burnglass-strip.exe' '$C/stub/launches.log'"
+  "[ \"\$(lines '$C/stub/launches.log')\" = 1 ] && launch_x '$C/exe/burnglass-strip.exe' '$C/stub/launches.log'"
 check "S9 the swap is logged BEFORE the restart" \
   "[ \"\$(grep -n 'strip refresh: updated burnglass-strip.exe' '$TMP/s9.log' | cut -d: -f1)\" -lt \"\$(grep -n 'restarting the running strip' '$TMP/s9.log' | cut -d: -f1)\" ]"
 
@@ -382,7 +516,7 @@ stop_srv $SRV
 check "S12 normal start: nothing fetched, refresh null, file untouched" \
   "[ \"\$(stats 'l.length')\" = 0 ] && js '$TMP/s12.json' 's.strip.refresh === null && s.strip.enabled === true' && same '$TMP/old.bin' '$C/exe/burnglass-strip.exe'"
 check "S12 the normal start-up launch happens once, no kill" \
-  "[ \"\$(lines '$C/stub/launches.log')\" = 1 ] && grep -qx 'launch $C/exe/burnglass-strip.exe' '$C/stub/launches.log' && [ ! -e '$C/stub/kills.log' ]"
+  "[ \"\$(lines '$C/stub/launches.log')\" = 1 ] && launch_x '$C/exe/burnglass-strip.exe' '$C/stub/launches.log' && [ ! -e '$C/stub/kills.log' ]"
 
 # ------------------------------------------------------------------ S13 update checks off
 case_dirs s13
@@ -441,6 +575,11 @@ check "S16 only the pulse-strip.exe alias published: burnglass-strip.exe refresh
 # home — server.json, burnglass.log — so there only bin/, the strip's folder,
 # is compared; case c (home = ~/.burnglass) compares the whole tree.
 hash_strip_tree() { hash_tree "$1/bin" "$2"; }
+# The degraded cases (S17a, S25) force the migration to fail with a plain FILE
+# at ~/.burnglass. migrateHome refuses to publish over anything that is not a
+# folder on EVERY platform: POSIX would fail with ENOTDIR anyway, but Windows'
+# fs.renameSync(dir, file) silently REPLACES an existing file (MoveFileEx +
+# REPLACE_EXISTING) — that was a real data-loss bug, now asserted by S17d.
 # a) degraded: ~/.burnglass is a FILE, so the migration fails and the server
 #    runs on ~/.pulse, whose bin/ holds a stale strip + an aside copy that the
 #    start-up cleanup must not delete either
@@ -450,20 +589,33 @@ echo 'not a folder' > "$H17/.burnglass"
 cp "$TMP/old.bin" "$H17/.pulse/bin/pulse-strip.exe"; cp "$TMP/old2.bin" "$H17/.pulse/bin/pulse-strip.exe.old"
 hash_strip_tree "$H17/.pulse" "$TMP/s17a-before.txt"
 mkrel ok; reset_mock
-start_srv 5880 "$TMP/s17a.log" HOME="$H17" PULSE_STRIP_EXE_DIR="$C/exe" PULSE_STRIP_PROC_STUB="$C/stub" "${FORCE[@]}" -- --after-update
+start_srv 5880 "$TMP/s17a.log" $(homeenv "$H17") PULSE_STRIP_EXE_DIR="$C/exe" PULSE_STRIP_PROC_STUB="$C/stub" "${FORCE[@]}" -- --after-update
 wait_up 5880; wait_refresh 5880 "$TMP/s17a.json"
 stop_srv $SRV
 hash_strip_tree "$H17/.pulse" "$TMP/s17a-after.txt"
 check "S17a degraded run on ~/.pulse: skipped (old Pulse folder), nothing fetched" \
   "js '$TMP/s17a.json' 's.homeMigration && s.homeMigration.status === \"failed\" && s.strip.refresh.status === \"skipped\" && /old Pulse folder/.test(s.strip.refresh.reason)' && [ \"\$(stats 'l.length')\" = 0 ]"
 check "S17a ~/.pulse byte-identical (strip, its .old kept, nothing added to bin/)" "cmp -s '$TMP/s17a-before.txt' '$TMP/s17a-after.txt'"
+# d) the precondition S17a/S25 rely on, asserted on its own: a plain file at
+#    ~/.burnglass fails the migration (degraded run on ~/.pulse) and is left
+#    exactly as it was — never replaced by the migrated folder (on Windows a
+#    bare rename would replace it; migrateHome must refuse first).
+C=$TMP/s17d; H17=$C/fakehome; mkdir -p "$H17/.pulse" "$C/exe" "$C/stub"
+echo '{"budget": 7}' > "$H17/.pulse/config.json"
+echo 'not a folder' > "$H17/.burnglass"
+reset_mock
+start_srv 5894 "$TMP/s17d.log" $(homeenv "$H17") PULSE_STRIP_EXE_DIR="$C/exe" PULSE_STRIP_PROC_STUB="$C/stub"
+wait_up 5894; summary 5894 "$TMP/s17d.json"
+stop_srv $SRV
+check "S17d a plain FILE at ~/.burnglass fails the migration and survives it (still that file, same bytes)" \
+  "[ -f '$H17/.burnglass' ] && grep -qx 'not a folder' '$H17/.burnglass' && js '$TMP/s17d.json' 's.homeMigration && s.homeMigration.status === \"failed\"'"
 # b) PULSE_HOME pinned to ~/.pulse (a pinned home is used verbatim)
 C=$TMP/s17b; H17=$C/fakehome; mkdir -p "$H17/.pulse/bin" "$C/exe" "$C/stub"
 echo '{}' > "$H17/.pulse/config.json"
 cp "$TMP/old.bin" "$H17/.pulse/bin/burnglass-strip.exe"
 hash_strip_tree "$H17/.pulse" "$TMP/s17b-before.txt"
 reset_mock
-start_srv 5881 "$TMP/s17b.log" HOME="$H17" PULSE_HOME="$H17/.pulse" PULSE_STRIP_EXE_DIR="$C/exe" PULSE_STRIP_PROC_STUB="$C/stub" "${FORCE[@]}" -- --after-update
+start_srv 5881 "$TMP/s17b.log" $(homeenv "$H17") PULSE_HOME="$H17/.pulse" PULSE_STRIP_EXE_DIR="$C/exe" PULSE_STRIP_PROC_STUB="$C/stub" "${FORCE[@]}" -- --after-update
 wait_up 5881; wait_refresh 5881 "$TMP/s17b.json"
 stop_srv $SRV
 hash_strip_tree "$H17/.pulse" "$TMP/s17b-after.txt"
@@ -475,7 +627,7 @@ echo '{}' > "$H17/.burnglass/config.json"; echo '{}' > "$H17/.pulse/config.json"
 cp "$TMP/old.bin" "$H17/.pulse/bin/pulse-strip.exe"; cp "$TMP/old2.bin" "$H17/.pulse/bin/pulse-strip.exe.old"
 hash_tree "$H17/.pulse" "$TMP/s17c-before.txt"
 reset_mock
-start_srv 5882 "$TMP/s17c.log" HOME="$H17" PULSE_STRIP_EXE_DIR="$H17/.pulse/bin" PULSE_STRIP_PROC_STUB="$C/stub" "${FORCE[@]}" -- --after-update
+start_srv 5882 "$TMP/s17c.log" $(homeenv "$H17") PULSE_STRIP_EXE_DIR="$H17/.pulse/bin" PULSE_STRIP_PROC_STUB="$C/stub" "${FORCE[@]}" -- --after-update
 wait_up 5882; wait_refresh 5882 "$TMP/s17c.json"
 stop_srv $SRV
 hash_tree "$H17/.pulse" "$TMP/s17c-after.txt"
@@ -563,7 +715,7 @@ check "S21 first attempt failed with a retry scheduled ~2.5 s out" \
 check "S21 the timer retried in-process: updated (attempt 2), file swapped, marker gone" \
   "js '$TMP/s21b.json' 's.strip.refresh.attempts === 2' && same '$TMP/new.bin' '$C/exe/burnglass-strip.exe' && [ ! -e '$C/home/strip-refresh.json' ]"
 check "S21 the running managed strip was restarted on the new file (killed once, launched once more)" \
-  "[ \"\$(lines '$C/stub/kills.log')\" = 1 ] && [ \"\$(lines '$C/stub/launches.log')\" = 2 ] && head -1 '$C/stub/launches.log' | grep -q '^already-running ' && tail -1 '$C/stub/launches.log' | grep -qx 'launch $C/exe/burnglass-strip.exe'"
+  "[ \"\$(lines '$C/stub/kills.log')\" = 1 ] && [ \"\$(lines '$C/stub/launches.log')\" = 2 ] && head -1 '$C/stub/launches.log' | grep -q '^already-running ' && tail -1 '$C/stub/launches.log' | launch_x '$C/exe/burnglass-strip.exe'"
 
 # ------------------------------------------------------------------ S22 gave up
 case_dirs s22
@@ -591,6 +743,12 @@ check "S23 an attempt interrupted mid-way (pending, its process gone) is retried
 case_dirs s23b
 cp "$TMP/old.bin" "$C/exe/burnglass-strip.exe"
 LIVEPID=${MOCKS##* }
+# Git Bash: $! is an MSYS pid, which the (native) server's process.kill(pid, 0)
+# reports as gone (ESRCH) — use the mock's real Windows pid.
+if [ "$IS_WIN" = 1 ]; then
+  LIVEPID=$(cat "/proc/$LIVEPID/winpid" 2>/dev/null | tr -d '\r')
+  [ -n "$LIVEPID" ] || { echo "FAIL  could not map the mock's MSYS pid to a Windows pid"; exit 1; }
+fi
 node -e 'require("fs").writeFileSync(process.argv[1], JSON.stringify({ v: 1, version: process.argv[2], status: "pending", at: Date.now(), attempts: 1, pid: +process.argv[3] }))' "$C/home/strip-refresh.json" "$VER" "$LIVEPID"
 reset_mock
 start_srv 5891 "$TMP/s23b.log" $(common) "${FORCE[@]}"
@@ -616,7 +774,7 @@ echo '{}' > "$H25/.pulse/config.json"; echo 'not a folder' > "$H25/.burnglass"
 cp "$TMP/old.bin" "$C/exe/burnglass-strip.exe"
 hash_tree "$H25/.pulse" "$TMP/s25-before.txt"
 mkrel error500; reset_mock
-start_srv 5893 "$TMP/s25.log" HOME="$H25" PULSE_STRIP_EXE_DIR="$C/exe" PULSE_STRIP_PROC_STUB="$C/stub" "${FORCE[@]}" -- --after-update
+start_srv 5893 "$TMP/s25.log" $(homeenv "$H25") PULSE_STRIP_EXE_DIR="$C/exe" PULSE_STRIP_PROC_STUB="$C/stub" "${FORCE[@]}" -- --after-update
 wait_up 5893; wait_refresh 5893 "$TMP/s25.json"
 stop_srv $SRV
 check "S25 degraded run on ~/.pulse, the strip beside the exe failed to refresh: no marker written into ~/.pulse" \

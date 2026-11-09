@@ -2,17 +2,49 @@
 # Live agent state (working / thinking / waiting / idle) + the Discord state art.
 # Part 1 asserts payload.agentState against fixture transcripts, rollouts and a
 # fixture Claude Code live-session registry (CLAUDE_DIR/sessions/<pid>.json —
-# the live pid is this shell's own $$, a dead one is a pid that can't exist).
+# the live pid is this shell's own $$ — a node keeper on Windows — and a dead
+# one is a pid that can't exist).
 # Part 2 drives the Discord activity through the mock IPC socket: per-state
 # images, the working<->thinking hold, waiting beating the 15-min idle window,
 # discordShowState:false.
+# Windows (Git Bash / MSYS / Cygwin): $$ and $! are MSYS pids, which native
+# node.exe (pidAlive = process.kill(pid, 0)) and tasklist (the default win32
+# image check) never see — so there the fixture pids come from keeper
+# processes whose REAL Windows pid is read back (see "fixture pids" below).
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+SRV=""; MOCK=""; OTHER=""; NODEP=""; LIVEK=""
+cleanup() {
+  for p in $SRV $MOCK $OTHER $NODEP $LIVEK; do kill "$p" 2>/dev/null; done
+  rm -rf "$TMP"
+}
+trap cleanup EXIT
 CL=$TMP/claude; CX=$TMP/codex; PH=$TMP/pulse
 mkdir -p "$CL/projects/demo/s1/subagents" "$CL/sessions" "$CX/sessions/2026/09/25" "$PH"
 PORT=4919
+# Unset, a standalone run would read this machine's real Gemini / Antigravity /
+# Continue / Cline / Roo logs (never written, but not this suite's data).
+export GEMINI_DIR=$TMP/noagent/gemini ANTIGRAVITY_DIR=$TMP/noagent/antigravity CONTINUE_DIR=$TMP/noagent/continue
+export CLINE_DIR=$TMP/noagent/cline ROO_DIR=$TMP/noagent/roo
+WIN=0
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) WIN=1 ;; esac
+# Containment: BURNGLASS_HOME outranks PULSE_HOME in the server's envv(), so an
+# inherited one would point all three servers (history seal, server.json, the
+# Part 2 POST that rewrites config.json) at a real home — pin both to $PH. An
+# inherited HISTORY_DIR / MODES_FILE would do the same for those two paths;
+# unset, they default to inside $PH. Windows: the Claude desktop session-title
+# store is read from %APPDATA% on every summary — point that at an empty dir.
+unset BURNGLASS_HISTORY_DIR PULSE_HISTORY_DIR BURNGLASS_MODES_FILE PULSE_MODES_FILE
+export BURNGLASS_HOME=$PH PULSE_HOME=$PH
+[ "$WIN" = 1 ] && { mkdir -p "$TMP/noappdata"; export APPDATA=$TMP/noappdata; }
+# Another process on the port would get every curl below — Part 2's mutating
+# POST included — while this suite's server dies on EADDRINUSE. Refuse instead.
+port_free() {
+  if curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$PORT/"; then
+    echo "FAIL  port $PORT is busy — refusing to run against a server this suite did not start"; echo "---- exit 1"; exit 1
+  fi
+}
 FX=$TMP/fx.js
 cat > "$FX" <<'EOF'
 // node fx.js <scenario> — rewrites the fixture files for one scenario.
@@ -131,13 +163,45 @@ switch (scen) {
 }
 EOF
 sleep 300 & OTHER=$!   # an unrelated live process, started AFTER the stale files' timestamps
-fx() { node "$FX" "$CL" "$CX" "$1" "$$" "$OTHER"; sleep 0.05; }
+# ---- fixture pids ----
+#   LIVE   a live process that passes the image check (Claude Code / node)
+#   OTHERP the unrelated live process above (image sleep: NOT Claude Code)
+#   SHELLP this shell (image bash: NOT Claude Code) — Part 3's negative case
+# POSIX: the shell's own pids, as always (Linux runs no image check; macOS's ps
+# reads them fine). Windows: a node keeper that prints its own process.pid, and
+# /proc/<msys pid>/winpid for the MSYS processes. Fail CLOSED: if a real pid
+# can't be read, or its image isn't what the case needs, refuse to run rather
+# than assert against pids the server can't see.
+# winimg PID — the image name tasklist reports for a Windows pid ("" if none)
+winimg() { node -e 'try { const o = require("child_process").execFileSync("tasklist", ["/FI", "PID eq " + process.argv[1], "/FO", "CSV", "/NH"], { windowsHide: true }).toString(); const m = o.trim().match(/^"([^"]+)","(\d+)"/); console.log(m && Number(m[2]) === Number(process.argv[1]) ? m[1] : ""); } catch (_) { console.log(""); }' "$1"; }
+# node_keeper FILE — start a node process that writes its real pid to FILE (caller reads $!)
+node_keeper() { node -e 'console.log(process.pid); setInterval(() => {}, 1e9)' > "$1" 2>/dev/null & }
+wait_pidfile() { for _ in $(seq 1 100); do [ -s "$1" ] && return 0; sleep 0.1; done; return 1; }
+refuse() { echo "FAIL  Windows fixture pids: $1 — refusing to run the pid-dependent cases against pids the server cannot see"; echo "---- exit 1"; exit 1; }
+if [ "$WIN" = 1 ]; then
+  node_keeper "$TMP/live.pid"; LIVEK=$!
+  wait_pidfile "$TMP/live.pid" || refuse "the node keeper never reported its pid"
+  LIVE=$(tr -d '\r\n' < "$TMP/live.pid")
+  OTHERP=$(tr -d '\r\n' < "/proc/$OTHER/winpid" 2>/dev/null)
+  SHELLP=$(tr -d '\r\n' < "/proc/$$/winpid" 2>/dev/null)
+  for v in "LIVE=$LIVE" "OTHERP=$OTHERP" "SHELLP=$SHELLP"; do
+    case "${v#*=}" in ''|*[!0-9]*) refuse "${v%%=*} is not a pid (${v#*=})" ;; esac
+  done
+  # the server matches /^(claude|node|bun)\b/i on the tasklist image name
+  case "$(winimg "$LIVE")" in node.exe|Node.exe|NODE.EXE) ;; *) refuse "LIVE $LIVE is not a live node.exe ($(winimg "$LIVE"))" ;; esac
+  case "$(winimg "$OTHERP")" in ''|claude*|node*|bun*|Claude*|Node*|Bun*) refuse "OTHERP $OTHERP must be a live non-Claude process ($(winimg "$OTHERP"))" ;; esac
+  case "$(winimg "$SHELLP")" in ''|claude*|node*|bun*|Claude*|Node*|Bun*) refuse "SHELLP $SHELLP must be a live non-Claude process ($(winimg "$SHELLP"))" ;; esac
+else
+  LIVE=$$; OTHERP=$OTHER; SHELLP=$$
+fi
+fx() { node "$FX" "$CL" "$CX" "$1" "$LIVE" "$OTHERP"; sleep 0.05; }
 q() { curl -s "http://127.0.0.1:$PORT/api/summary" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const a=JSON.parse(s).agentState;console.log(a?a.provider+":"+a.state:"null")})'; }
 RES=$TMP/results.txt; : > "$RES"
 chk() { echo "$1 $2" >> "$RES"; }
 
 # ---------------- Part 1: payload.agentState ----------------
 echo '{}' > "$PH/config.json"
+port_free
 CLAUDE_DIR=$CL CODEX_DIR=$CX PULSE_HOME=$PH PULSE_SUMMARY_MEMO_MS=0 PULSE_LIVE_STATE_MEMO_MS=0 PULSE_REG_BUSY_MAX_MS=600000 \
   node "$ROOT/server.js" --port $PORT --no-update-check >"$TMP/srv1.log" 2>&1 &
 SRV=$!
@@ -166,7 +230,7 @@ fx stale-reg;              chk stale-reg "$(q)"
 fx stale-reg-busy;         chk stale-reg-busy "$(q)"
 fx reused-pid;             chk reused-pid "$(q)"
 fx many-dead;              chk many-dead "$(q)"
-kill $SRV 2>/dev/null; wait $SRV 2>/dev/null
+kill $SRV 2>/dev/null; wait $SRV 2>/dev/null; SRV=""
 
 # ---------------- Part 2: Discord state art ----------------
 case "$(uname -s)" in
@@ -181,15 +245,23 @@ cat > "$PH/config.json" <<'EOF'
  "discordClaudeImage": "https://x.test/claude.gif", "discordClaudeWorkingImage": "https://x.test/working.gif",
  "discordClaudeThinkingImage": "https://x.test/thinking.gif", "discordClaudeWaitingImage": "https://x.test/waiting.gif"}
 EOF
+# The hold has to outlast the hop loop below (3 x two fx calls + 2 s of sleep)
+# and expire before the "thinking" mark. Every fx is a fresh node start, which
+# on Windows is slow enough to push the loop past 5 s (Claude then legitimately
+# takes over after the hold, and the cross check inherits that) — so there the
+# hold is 10 s and the post-hold wait grows with it. Same checks, more headroom.
+HOLD_MS=5000; HOLD_WAIT=4.5
+[ "$WIN" = 1 ] && { HOLD_MS=10000; HOLD_WAIT=10.5; }
 fx busy-tool
+port_free
 CLAUDE_DIR=$CL CODEX_DIR=$CX PULSE_HOME=$PH PULSE_SUMMARY_MEMO_MS=0 PULSE_LIVE_STATE_MEMO_MS=0 \
-  PULSE_DISCORD_IPC="$IPC" PULSE_DISCORD_TICK_MS=300 PULSE_DISCORD_ROTATE_MS=600000 PULSE_DISCORD_STATE_HOLD_MS=5000 \
+  PULSE_DISCORD_IPC="$IPC" PULSE_DISCORD_TICK_MS=300 PULSE_DISCORD_ROTATE_MS=600000 PULSE_DISCORD_STATE_HOLD_MS=$HOLD_MS \
   node "$ROOT/server.js" --port $PORT --no-update-check >"$TMP/srv2.log" 2>&1 &
 SRV=$!
 mark() { echo "MARK $1 $(wc -l < "$DLOG")" >> "$RES"; }
 sleep 2.5; mark working            # busy + open Bash
-fx busy-result; sleep 1; mark held     # thinking, but inside the 5 s hold (counted from when working appeared)
-sleep 4.5; mark thinking           # hold elapsed
+fx busy-result; sleep 1; mark held     # thinking, but inside the hold (counted from when working appeared)
+sleep $HOLD_WAIT; mark thinking    # hold elapsed
 fx waiting; sleep 1; mark waiting  # waiting switches at once
 fx d-quiet-waiting; sleep 1; mark quiet-waiting
 fx d-recent; sleep 1; mark recent-idle
@@ -204,21 +276,37 @@ IMG=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H 'X-Pulse: 1' -H 'Content
   --data '{"claudeWaiting":"https://x.test/waiting2.gif"}' "http://127.0.0.1:$PORT/api/discord/images")
 echo "POSTSLOT $IMG" >> "$RES"
 cp "$PH/config.json" "$TMP/cfg-after.json"
-kill $SRV 2>/dev/null; wait $SRV 2>/dev/null
-kill $MOCK $OTHER 2>/dev/null
+kill $SRV 2>/dev/null; wait $SRV 2>/dev/null; SRV=""
+kill $MOCK $OTHER 2>/dev/null; MOCK=""; OTHER=""
 
 # ---------------- Part 3: process-image check (Windows/macOS path, forced via ps) ----------------
+# Windows forces tasklist instead (its default anyway): Git Bash's ps has no
+# `-o comm= -p`, so the ps path would never learn a name there and trust
+# every record. tasklist is also slower than ps, so the wait for the async
+# image lookup to land before the asserted read is longer there.
+IMG_CHECK=ps; IMG_SETTLE=0.8
+[ "$WIN" = 1 ] && { IMG_CHECK=tasklist; IMG_SETTLE=3; }
 echo '{}' > "$PH/config.json"
-node -e 'setTimeout(()=>{},300000)' & NODEP=$!   # a live process whose image IS node
-fx3() { node "$FX" "$CL" "$CX" "$1" "$$" "$NODEP"; sleep 0.05; }
-CLAUDE_DIR=$CL CODEX_DIR=$CX PULSE_HOME=$PH PULSE_SUMMARY_MEMO_MS=0 PULSE_LIVE_STATE_MEMO_MS=0 PULSE_IMAGE_CHECK=ps \
+if [ "$WIN" = 1 ]; then
+  node_keeper "$TMP/nodep.pid"; NODEP=$!   # a live process whose image IS node
+  wait_pidfile "$TMP/nodep.pid" || refuse "the Part 3 node keeper never reported its pid"
+  NODEPP=$(tr -d '\r\n' < "$TMP/nodep.pid")
+  case "$NODEPP" in ''|*[!0-9]*) refuse "NODEPP is not a pid ($NODEPP)" ;; esac
+  case "$(winimg "$NODEPP")" in node.exe|Node.exe|NODE.EXE) ;; *) refuse "NODEPP $NODEPP is not a live node.exe" ;; esac
+else
+  node -e 'setTimeout(()=>{},300000)' & NODEP=$!   # a live process whose image IS node
+  NODEPP=$NODEP
+fi
+fx3() { node "$FX" "$CL" "$CX" "$1" "$SHELLP" "$NODEPP"; sleep 0.05; }
+port_free
+CLAUDE_DIR=$CL CODEX_DIR=$CX PULSE_HOME=$PH PULSE_SUMMARY_MEMO_MS=0 PULSE_LIVE_STATE_MEMO_MS=0 PULSE_IMAGE_CHECK=$IMG_CHECK \
   node "$ROOT/server.js" --port $PORT --no-update-check >"$TMP/srv3.log" 2>&1 &
 SRV=$!
-fx3 img-node; sleep 2; q > /dev/null; sleep 0.8
+fx3 img-node; sleep 2; q > /dev/null; sleep $IMG_SETTLE
 chk img-node "$(q)"
-fx3 img-other; q > /dev/null; sleep 0.8
+fx3 img-other; q > /dev/null; sleep $IMG_SETTLE
 chk img-other "$(q)"
-kill $SRV $NODEP 2>/dev/null; wait $SRV 2>/dev/null
+kill $SRV $NODEP 2>/dev/null; wait $SRV 2>/dev/null; SRV=""; NODEP=""
 
 node -e '
 const fs = require("fs");

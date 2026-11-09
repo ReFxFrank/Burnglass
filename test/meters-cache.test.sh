@@ -26,6 +26,21 @@ TMP=$(mktemp -d)
 MOCKP=4871
 PORT=4873
 CADENCE=10000 # PULSE_METERS_CACHE_MS: the normal meters cadence (METERS_OK_MS)
+WIN=0
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) WIN=1 ;; esac
+# Windows: B has to fit a server stop + start + a few node/curl round trips
+# between the saved fetch and the end of its polls, and process start there
+# (node.exe, more so from a OneDrive folder) is slow enough to blow a 10 s
+# window — the polls then legitimately trigger the due fetch and B fails for
+# timing, not scheduling. A longer cadence keeps B proving the same thing
+# (no request before fetchedAt + cadence, then exactly one) with headroom.
+# 20 s, not more: E's "expired backoff does not block" case saves a reading
+# 30 s old, which has to stay older than one cadence.
+[ "$WIN" = 1 ] && CADENCE=20000
+# E: the 429 backoff that follows a saved streak of 3 = base (5 x cadence,
+# capped at 10m) x 2^3, capped at 1h — derived, so it tracks CADENCE.
+BASE429=$((5 * CADENCE)); [ $BASE429 -gt 600000 ] && BASE429=600000
+BACKOFF4=$((BASE429 * 8)); [ $BACKOFF4 -gt 3600000 ] && BACKOFF4=3600000
 SRV=""; MOCK=""
 cleanup() {
   [ -n "$SRV" ] && kill "$SRV" 2>/dev/null
@@ -36,6 +51,16 @@ trap cleanup EXIT
 CL=$TMP/claude; PH=$TMP/home
 CACHE=$PH/meters-cache.json
 mkdir -p "$CL/projects/demo" "$PH"
+# Containment: BURNGLASS_HOME outranks PULSE_HOME in the server's envv(), so an
+# inherited one would make every server below read, overwrite and (meters off)
+# delete THAT home's meters-cache.json and rewrite its config.json — start()
+# pins both to $PH. An inherited HISTORY_DIR / MODES_FILE would do the same for
+# those two paths; unset, they default to inside $PH.
+unset BURNGLASS_HISTORY_DIR PULSE_HISTORY_DIR BURNGLASS_MODES_FILE PULSE_MODES_FILE
+# Windows: the Claude desktop session-title store is read from %APPDATA% on
+# every (unmemoized) summary — an empty dir keeps that off the real profile and
+# out of B's timing.
+[ "$WIN" = 1 ] && { mkdir -p "$TMP/noappdata"; export APPDATA=$TMP/noappdata; }
 echo '{"accountMeters": true}' > "$PH/config.json"
 # fake login (the mock validates this exact token; NEVER a real one)
 echo '{"claudeAiOauth":{"accessToken":"sk-test-oauth-token","expiresAt":9999999999999}}' > "$CL/.credentials.json"
@@ -69,7 +94,12 @@ sleep_until() { node -e 'setTimeout(() => {}, Math.max(0, +process.argv[1] - Dat
 N=0
 start() {
   N=$((N + 1))
-  PULSE_HOME=$PH CLAUDE_DIR=$CL CODEX_DIR=$TMP/nocodex \
+  # The other agents' folders point at empty temp dirs too: unset, a standalone
+  # run reads this machine's real Gemini / Continue / Cline / Roo logs on every
+  # (unmemoized) summary — never written, but slow and not this suite's data.
+  PULSE_HOME=$PH BURNGLASS_HOME=$PH CLAUDE_DIR=$CL CODEX_DIR=$TMP/nocodex \
+  GEMINI_DIR=$TMP/noagent/gemini ANTIGRAVITY_DIR=$TMP/noagent/antigravity CONTINUE_DIR=$TMP/noagent/continue \
+  CLINE_DIR=$TMP/noagent/cline ROO_DIR=$TMP/noagent/roo \
   PULSE_METERS_API=http://127.0.0.1:$MOCKP/usage PULSE_METERS_CACHE_MS=$CADENCE \
   PULSE_SUMMARY_MEMO_MS=0 PULSE_METER_PROJ_MIN_MS=1 \
   node "$ROOT/server.js" --port $PORT --no-update-check >"$TMP/srv-$N.log" 2>&1 &
@@ -96,7 +126,14 @@ ok "$(jv "$TMP/a.json" 's.meters.status === "ok" && s.meters.buckets.length >= 5
 ok "$(has_cache)" "A: the good reading was persisted to meters-cache.json"
 cp "$CACHE" "$TMP/snap-a.json" 2>/dev/null
 MODE=$(node -e 'try { console.log((require("fs").statSync(process.argv[1]).mode & 0o777).toString(8)); } catch (_) { console.log("none"); }' "$CACHE")
-ok "$([ "$MODE" = "600" ] && echo 1 || echo 0)" "A: cache file mode 0600 (got $MODE)"
+if [ "$WIN" = 1 ]; then
+  # persistMetersCache deliberately skips chmod on win32: NTFS has no POSIX
+  # modes (Node maps them to the read-only bit, so stat always says 666), and
+  # the file's privacy there comes from the per-user profile ACL instead.
+  echo "SKIP  A: cache file mode 0600 (Windows: no POSIX modes on NTFS, the server skips chmod; got $MODE)"
+else
+  ok "$([ "$MODE" = "600" ] && echo 1 || echo 0)" "A: cache file mode 0600 (got $MODE)"
+fi
 ok "$(jv "$CACHE" 'Object.keys(s).sort().join() === "buckets,fetchedAt,v" && s.v === 1 && typeof s.fetchedAt === "number" && s.buckets.every((b) => Object.keys(b).sort().join() === "key,label,pct,resetsAt") && s.buckets.some((b) => b.key === "five_hour") ? 1 : 0')" \
   "A: file = {v:1, fetchedAt, buckets[{key,label,pct,resetsAt}]} and no backoff while none is active"
 C1=$(count)
@@ -116,7 +153,7 @@ for _ in 1 2 3 4 5; do summary "$TMP/b2.json"; statusline; sleep 0.25; done
 T_B2=$(node -e 'console.log(Date.now())')
 C2=$(count)
 ok "$([ "$C2" = "$C1" ] && echo 1 || echo 0)" "B: no request to the usage endpoint before fetchedAt + cadence (hits $C1 -> $C2)"
-ok "$([ "$T_B2" -lt $((FA + CADENCE)) ] && echo 1 || echo 0)" "B: (timing sanity: those polls ran inside the cadence window)"
+ok "$([ "$T_B2" -lt $((FA + CADENCE)) ] && echo 1 || echo 0)" "B: (timing sanity: those polls ran inside the cadence window — done $((T_B2 - FA)) ms after the fetch, cadence $CADENCE)"
 grep -q "account meters: restored" "$TMP/srv-$N.log"; ok "$([ $? -eq 0 ] && echo 1 || echo 0)" "B: the restore is logged"
 sleep_until $((FA + CADENCE + 400))
 summary "$TMP/b3.json"; sleep 0.7; summary "$TMP/b4.json"
@@ -198,6 +235,7 @@ ok "$([ "$(count)" = "$((C8 + 1))" ] && echo 1 || echo 0)" "E: ...then the next 
 ok "$(jv "$TMP/e5.json" 's.meters.status === "ok" && s.meters.buckets.length >= 5 ? 1 : 0')" "E: ...and the live reading takes over"
 # a streak whose backoff ended minutes ago carries on: the next 429 doubles
 # from it (base 5 x cadence = 50s; streak 3 -> 4 = 50s x 8 = 400s), not from 1
+# (BACKOFF4: 400s at the 10 s cadence; 800s at Windows' 20 s)
 stop
 mode "m=429"
 wcache '{ v: 1, fetchedAt: now - 30e3, nextAttemptAt: now - 10 * 60e3, streak: 3, buckets: [
@@ -207,7 +245,7 @@ start
 summary "$TMP/e6.json"; sleep 0.7; summary "$TMP/e7.json"
 ok "$([ "$(count)" = "$((C8B + 1))" ] && echo 1 || echo 0)" "E: an expired saved backoff does not block the check"
 ok "$(jv "$TMP/e7.json" 's.meters.status === "rate-limited" && s.meters.buckets.length === 1 ? 1 : 0')" "E: (that check got a 429)"
-ok "$(jv "$CACHE" 's.streak === 4 && s.nextAttemptAt - now > 380e3 && s.nextAttemptAt - now <= 400e3 ? 1 : 0')" \
+ok "$(jv "$CACHE" "s.streak === 4 && s.nextAttemptAt - now > $BACKOFF4 - 20e3 && s.nextAttemptAt - now <= $BACKOFF4 ? 1 : 0")" \
   "E: ...and the backoff doubled on from the saved streak (streak $(jv "$CACHE" 's.streak'), wait ~$(jv "$CACHE" 'Math.round((s.nextAttemptAt - now) / 1000)')s)"
 
 # ---- F: a window that rolled since the save is dropped --------------------------------------

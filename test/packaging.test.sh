@@ -51,6 +51,24 @@ FAILS=0
 pass() { echo "PASS: $*"; }
 fail() { echo "FAIL: $*"; FAILS=$((FAILS + 1)); }
 
+# Windows (Git Bash / MSYS / Cygwin). The strip harness below is a NATIVE .NET
+# program: it sees Windows paths, and it finds the user profile through the
+# shell API, which ignores HOME and USERPROFILE - so the fake homes only hold if
+# the harness is told them explicitly, in Windows form (see the cut step and
+# run()). A run of this suite once rewrote a real ~/.burnglass/strip-web that way.
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) WIN=1 ;; *) WIN=0 ;; esac
+# One spelling of $T both ways (cygpath -u of what the harness prints must equal
+# the $S paths the checks compare it against).
+# Only a non-empty result replaces T: an empty one would turn the EXIT trap into
+# rm -rf "" and leak the mktemp dir. An unconverted T then fails the containment
+# check below, which refuses to run the harness.
+if [ "$WIN" = 1 ] && command -v cygpath >/dev/null 2>&1; then
+  t2=$(cygpath -u "$(cygpath -w "$T" 2>/dev/null)" 2>/dev/null) && [ -n "$t2" ] && T=$t2
+fi
+# A path as the native harness must be given it / a path it printed, as the checks compare it.
+native() { if [ "$WIN" = 1 ]; then cygpath -w "$1"; else printf '%s\n' "$1"; fi; }
+posix() { if [ "$WIN" = 1 ] && [ -n "$1" ]; then cygpath -u "$1"; else printf '%s\n' "$1"; fi; }
+
 # ---------------------------------------------------------------------------
 echo "--- release workflow"
 if python3 -c 'import yaml' 2>/dev/null; then
@@ -99,6 +117,17 @@ if [ -z "$DOTNET" ] || [ ! -x "$DOTNET" ]; then
   [ $FAILS -eq 0 ] && echo "packaging: all passed" || echo "packaging: $FAILS failure(s)"
   exit $((FAILS > 0))
 fi
+# Fail CLOSED on Windows: without cygpath the fixture homes cannot be handed to
+# the native harness in a form it resolves to the fixture, and every case would
+# be one mistake away from the real profile - so none of them runs.
+if [ "$WIN" = 1 ]; then
+  case "$(cygpath -w "$T" 2>/dev/null)" in
+    [A-Za-z]:\\*) ;;
+    *) fail "strip harness: cannot contain the fake homes on Windows (cygpath missing or $T has no Windows path) - refusing to run it"
+       echo "packaging: $FAILS failure(s)"
+       exit 1 ;;
+  esac
+fi
 
 H=$T/harness
 mkdir -p "$H/web/icons"
@@ -126,10 +155,58 @@ XML
 # `DisplayCurrency` and `SummaryTransform` (the popover payload; optional, so
 # STRIP_DIR can still point at an older tree for the home checks) out of the
 # real Program.cs (brace matching that skips comments, strings and char literals).
+# Containment, in the CUT copy only (Program.cs is never edited): AppPaths' user
+# profile lookup becomes BURNGLASS_TEST_PROFILE, which THROWS when unset, so the
+# harness can never fall back to the real profile. On Windows that lookup is the
+# shell's known-folder API, which no environment variable redirects; on
+# Linux/macOS it is $HOME, which run() already sets to the same fixture home, so
+# the cases resolve exactly as before there. It is done on every OS so that the
+# tripwire below fires in Linux CI too: if the substitution matches nothing (a
+# Program.cs refactor) or any other profile lookup appears in the cut code, the
+# cut FAILS instead of silently compiling a harness that writes the real home.
 if ! node - "$STRIP_DIR/Program.cs" "$H" <<'JS'
 const fs = require('fs'), path = require('path');
+process.on('uncaughtException', (e) => { console.error('FAIL: ' + e.message); process.exit(1); });
 const src = fs.readFileSync(process.argv[2], 'utf8');
-function cut(name, optional) {
+const PROFILE_CALL = /(?:System\s*\.\s*)?Environment\s*\.\s*GetFolderPath\s*\(\s*(?:System\s*\.\s*)?Environment\s*\.\s*SpecialFolder\s*\.\s*UserProfile\s*\)/g;
+const TEST_PROFILE = '(Environment.GetEnvironmentVariable("BURNGLASS_TEST_PROFILE") is { Length: > 0 } burnglassTestProfile'
+  + ' ? burnglassTestProfile'
+  + ' : throw new InvalidOperationException("BURNGLASS_TEST_PROFILE unset: the packaging harness never uses the real user profile"))';
+function contain(name, code) {
+  let n = 0;
+  const out = code.replace(PROFILE_CALL, () => { n++; return TEST_PROFILE; });
+  if (name === 'AppPaths' && n === 0)
+    throw new Error('AppPaths no longer calls Environment.GetFolderPath(SpecialFolder.UserProfile): '
+      + 'update the BURNGLASS_TEST_PROFILE substitution in test/packaging.test.sh before running the harness');
+  // Any OTHER way to the real profile (or a Windows-only per-user folder) in code the harness runs.
+  // Comments are dropped string-aware: a line regex would also drop the rest of a line after a
+  // "https://..." literal and hide a lookup there. Also caught: %VAR% expansion, enumerating the
+  // whole environment, and a GetEnvironmentVariable whose name is not a literal (it could be any).
+  const bare = stripComments(out);
+  const left = bare.match(/GetFolderPath|SpecialFolder|GetHomeDirectory|ExpandEnvironmentVariables|GetEnvironmentVariables\b|GetEnvironmentVariable\s*\(\s*(?![\s"])|"(?:HOME|USERPROFILE|HOMEDRIVE|HOMEPATH|APPDATA|LOCALAPPDATA)"/)
+    || bare.match(/%(?:HOME|USERPROFILE|HOMEDRIVE|HOMEPATH|APPDATA|LOCALAPPDATA|TEMP|TMP)%/i);
+  if (left) throw new Error(name + ' reaches the user profile through ' + left[0] + ': contain it in test/packaging.test.sh before running the harness');
+  return out;
+}
+// The code minus its comments; strings and char literals are kept verbatim (same lexing as
+// cutRaw - interpolated strings never get here, cutRaw rejects them).
+function stripComments(code) {
+  let o = '';
+  for (let i = 0; i < code.length; i++) {
+    const c = code[i], n = code[i + 1];
+    if (c === '/' && n === '/') { const e = code.indexOf('\n', i); if (e < 0) break; i = e - 1; continue; }
+    if (c === '/' && n === '*') { const e = code.indexOf('*/', i + 2); if (e < 0) break; o += ' '; i = e + 1; continue; }
+    let j;
+    if (c === '@' && n === '"') { j = i + 2; while (j < code.length && !(code[j] === '"' && code[j + 1] !== '"')) j += code[j] === '"' ? 2 : 1; }
+    else if (c === '"' || c === "'") { j = i + 1; while (j < code.length && code[j] !== c) j += code[j] === '\\' ? 2 : 1; }
+    else { o += c; continue; }
+    o += code.slice(i, j + 1); i = j;
+  }
+  return o;
+}
+// Every class the harness compiles goes through contain().
+function cut(name, optional) { const c = cutRaw(name, optional); return c === null ? null : contain(name, c); }
+function cutRaw(name, optional) {
   const m = new RegExp('^(?:static |sealed )?class ' + name + '\\b', 'm').exec(src);
   if (!m) { if (optional) return null; throw new Error('no static class ' + name); }
   let i = src.indexOf('{', m.index), depth = 0;
@@ -161,7 +238,7 @@ const pd = cut('PopoverDismiss', true);
 if (pd) fs.writeFileSync(path.join(process.argv[3], 'ExtractedDismiss.cs'), head + pd + '\n');
 JS
 then
-  fail "could not extract AppPaths/WebAssets from $STRIP_DIR/Program.cs"
+  fail "could not extract (and contain) AppPaths/WebAssets from $STRIP_DIR/Program.cs - the harness is not built or run"
   exit 1
 fi
 cat > "$H/Harness.cs" <<'CS'
@@ -176,6 +253,26 @@ static class Harness
 {
     static int Main(string[] args)
     {
+        // stdout as the checks read it, on every OS: UTF-8 without a BOM and "\n" line ends. On
+        // Windows a redirected Console.Out otherwise writes the OEM code page (€ -> "?", ¥ ₩ · ->
+        // bytes that are not UTF-8) and ends lines with "\r\n", which `tr '\n' ' '` keeps - so the
+        // tones / money / currency outputs were right but never compared equal. (Linux/macOS already
+        // write exactly this.)
+        Console.SetOut(new StreamWriter(Console.OpenStandardOutput(), new System.Text.UTF8Encoding(false))
+        {
+            AutoFlush = true,
+            NewLine = "\n",
+        });
+        // Belt and braces for the BURNGLASS_TEST_PROFILE substitution in the cut AppPaths: before
+        // anything resolves WebAssets.Dir (which extracts, rewrites a manifest and deletes listed
+        // files) or creates a WebView2 folder, the homes AppPaths picked and the temp folder
+        // ScratchPathOf falls back to must all be inside this run's fixture. Otherwise refuse.
+        string? refused = Uncontained();
+        if (refused != null)
+        {
+            Console.Error.WriteLine("CONTAINMENT-REFUSED: " + refused);
+            return 4;
+        }
         if (args.Length > 0)
         {
             var ui = Type.GetType("BurnglassStrip.UiHarness");
@@ -191,6 +288,43 @@ static class Harness
         Directory.CreateDirectory(webview);
         Console.WriteLine("WEBVIEW=" + webview);
         return 0;
+    }
+
+    // null when contained, else why not. BURNGLASS_TEST_PROFILE = the fake home (what AppPaths
+    // now uses as the profile), BURNGLASS_TEST_ROOT = the suite's own temp folder holding every
+    // fake home and its temp dir. Lexical checks on full paths: a pinned home reached through a
+    // link (S4) still names a folder inside the profile, which is what matters here.
+    static string? Uncontained()
+    {
+        string? profile = Environment.GetEnvironmentVariable("BURNGLASS_TEST_PROFILE");
+        string? root = Environment.GetEnvironmentVariable("BURNGLASS_TEST_ROOT");
+        if (string.IsNullOrEmpty(profile) || string.IsNullOrEmpty(root))
+            return "BURNGLASS_TEST_PROFILE / BURNGLASS_TEST_ROOT unset";
+        if (!Path.IsPathFullyQualified(profile) || !Path.IsPathFullyQualified(root))
+            return "BURNGLASS_TEST_PROFILE (" + profile + ") / BURNGLASS_TEST_ROOT (" + root + ") not absolute native paths";
+        if (!Under(profile, root)) return "the test profile " + profile + " is outside " + root;
+        try
+        {
+            foreach (var (name, p) in new[] { ("AppPaths.Home", AppPaths.Home),
+                         ("AppPaths.LegacyHome", AppPaths.LegacyHome), ("AppPaths.NewHome", AppPaths.NewHome) })
+                if (!Under(p, profile)) return name + " = " + p + " is outside the test profile " + profile;
+        }
+        catch (Exception e) { return "AppPaths did not resolve: " + (e.InnerException ?? e).Message; }
+        string tmp = Path.GetTempPath();
+        if (!Under(tmp, root)) return "the temp folder " + tmp + " is outside " + root + " (TMP/TEMP/TMPDIR not set)";
+        return null;
+    }
+
+    static bool Under(string path, string root)
+    {
+        try
+        {
+            var cmp = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            string p = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+            string r = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
+            return p.Equals(r, cmp) || p.StartsWith(r + Path.DirectorySeparatorChar, cmp);
+        }
+        catch { return false; }
     }
 }
 CS
@@ -379,20 +513,54 @@ static class DismissHarness
 }
 CS
 fi
-if ! DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 "$DOTNET" build "$H/harness.csproj" -c Release -o "$H/out" > "$H/build.log" 2>&1; then
+# On Windows the build's own scratch (MSBuildTemp, NuGetScratch: %TEMP%) and the
+# CLI's first-run files (%USERPROFILE%\.dotnet - USERPROFILE does not move them,
+# DOTNET_CLI_HOME does) go inside the fixture too, and no MSBuild node or
+# compiler server outlives the suite. (The harness references no package, so the
+# NuGet package folder is never written.) Elsewhere the build runs as before.
+BENV=() BFLAGS=()
+if [ "$WIN" = 1 ]; then
+  mkdir -p "$T/build.tmp" "$T/dotnet-home"
+  BENV=("TMP=$(native "$T/build.tmp")" "TEMP=$(native "$T/build.tmp")" "DOTNET_CLI_HOME=$(native "$T/dotnet-home")")
+  BFLAGS=(-nodeReuse:false -p:UseSharedCompilation=false)
+fi
+if ! env DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 ${BENV[@]+"${BENV[@]}"} \
+    "$DOTNET" build "$H/harness.csproj" -c Release -o "$H/out" ${BFLAGS[@]+"${BFLAGS[@]}"} > "$H/build.log" 2>&1; then
   grep -E "error" "$H/build.log" | sed 's|^.*/harness/||' | sort -u | head -20
   fail "strip harness does not compile (see errors above)"
   exit 1
 fi
 
+# The profile + temp folder the harness gets, in its own (native) path form.
+# BURNGLASS_TEST_PROFILE replaces the real profile lookup in the cut AppPaths,
+# BURNGLASS_TEST_ROOT bounds every path the harness's guard accepts. On Windows
+# .NET's Path.GetTempPath() reads TMP / TEMP (never TMPDIR): left alone they are
+# the real %TEMP%, where ScratchPathOf puts the UI whenever the home is ~/.pulse -
+# so they go next to the fake home too. Elsewhere TMPDIR alone, as before.
+ROOT_NATIVE=$(native "$T")
+harness_env() { # harness_env <fake home> <its temp dir>: sets HENV, the VAR=value words for env
+  HENV=("BURNGLASS_TEST_PROFILE=$(native "$1")" "BURNGLASS_TEST_ROOT=$ROOT_NATIVE" "TMPDIR=$2")
+  if [ "$WIN" = 1 ]; then HENV+=("TMP=$(native "$2")" "TEMP=$(native "$2")"); fi
+}
+# A harness refusal (CONTAINMENT-REFUSED: its guard found a home or the temp
+# folder outside the fixture) is its own FAIL, never mistaken for a case result.
+refused() { grep -q '^CONTAINMENT-REFUSED' "$1" && fail "strip harness refused to run ($(sed -n 's/^CONTAINMENT-REFUSED: //p' "$1" | head -1))"; }
 # run <fake home> [VAR=value ...]: the harness with only these home variables.
+# (On Windows the POSIX BURNGLASS_HOME / PULSE_HOME values the cases pass are
+# turned into drive paths by the MSYS runtime when it starts the native dotnet;
+# if they ever were not, the pinned home would land outside the fake profile and
+# the harness's guard refuses the case instead of running it.)
 run() {
   local home=$1; shift
   mkdir -p "$home.tmp"
-  env -u BURNGLASS_HOME -u PULSE_HOME HOME="$home" USERPROFILE="$home" TMPDIR="$home.tmp" "$@" \
+  harness_env "$home" "$home.tmp"
+  env -u BURNGLASS_HOME -u PULSE_HOME HOME="$home" USERPROFILE="$home" "${HENV[@]}" "$@" \
     "$DOTNET" "$H/out/harness.dll" > "$home.out" 2>&1
+  refused "$home.out"
+  return 0
 }
-val() { sed -n "s/^$2=//p" "$1.out"; }
+# The harness prints native paths; the checks compare POSIX ones.
+val() { posix "$(sed -n "s/^$2=//p" "$1.out")"; }
 # A tree's full state: every entry's type + path, every file's bytes.
 snap() { (cd "$1" && find . -printf '%y %p %l\n' | sort && find . -type f -print0 | sort -z | xargs -0 -r sha256sum); }
 pulse_fixture() { # a Pulse 1.x home with a v1 strip's leftovers + something the user put there
@@ -439,13 +607,19 @@ S=$T/s3; pulse_fixture "$S"
 legacy_case "pre-migration, no home variable" "$S"
 [ -e "$S/.burnglass" ] && fail "pre-migration: the strip created ~/.burnglass (would block the migration)" \
   || pass "pre-migration: ~/.burnglass not created"
+# Git Bash's `ln -s` COPIES the folder unless native symlinks are enabled
+# (MSYS=winsymlinks:nativestrict + the symlink right): a copy is just another
+# folder, so a link case would pass without testing any link. SKIP it there.
+nolink() { [ "$WIN" = 1 ] && [ ! -L "$1" ] && echo "SKIP: $2 (ln -s made a copy, not a symbolic link, on this Windows shell)"; }
 # S4 - the pinned home is a LINK to ~/.pulse.
 S=$T/s4; pulse_fixture "$S"; ln -s "$S/.pulse" "$S/pulse-link"
-legacy_case "BURNGLASS_HOME = a link to ~/.pulse" "$S" BURNGLASS_HOME="$S/pulse-link"
+nolink "$S/pulse-link" "BURNGLASS_HOME = a link to ~/.pulse" \
+  || legacy_case "BURNGLASS_HOME = a link to ~/.pulse" "$S" BURNGLASS_HOME="$S/pulse-link"
 # S5 - ~/.burnglass is a link to ~/.pulse (one folder under two names).
 S=$T/s5; pulse_fixture "$S"; ln -s "$S/.pulse" "$S/.burnglass"
 # shellcheck disable=SC2088 # a test label, not a path
-legacy_case "~/.burnglass is a link to ~/.pulse" "$S"
+nolink "$S/.burnglass" "~/.burnglass is a link to ~/.pulse" \
+  || legacy_case "~/.burnglass is a link to ~/.pulse" "$S"
 
 # S6 - the normal v2 home, whose strip-web the strip did NOT create (no
 # manifest): written into, never cleaned.
@@ -474,6 +648,7 @@ else fail "v2 home: manifest missing or wrong: $(tr '\n' '|' 2>/dev/null < "$M")
 W=$S/.burnglass/strip-web
 printf 'stale' > "$W/old-asset.js"; printf '<svg/>' > "$W/icons/gone.svg"
 mkdir -p "$S/elsewhere"; printf 'x' > "$S/elsewhere/x.txt"; ln -s "$S/elsewhere" "$W/linked"
+nolink "$W/linked" "update: a manifest entry through a link (the outside/absolute entries are still checked)"
 printf 'outside' > "$S/.burnglass/outside.txt"; printf 'victim' > "$S/victim.txt"
 if [ -f "$M" ]; then
   printf '%s\n' old-asset.js icons/gone.svg ../outside.txt "$S/victim.txt" 'icons/../../victim.txt' linked/x.txt >> "$M"
@@ -481,6 +656,8 @@ else
   printf '%s\n' 'BURNGLASS-STRIP-WEB 1' index.html icons/claude.svg old-asset.js icons/gone.svg ../outside.txt \
     "$S/victim.txt" 'icons/../../victim.txt' linked/x.txt > "$M"
 fi
+# On Windows the POSIX "$S/victim.txt" is not the victim's path to .NET: list its real (drive) path too.
+[ "$WIN" = 1 ] && native "$S/victim.txt" >> "$M"
 run "$S"
 [ ! -e "$W/old-asset.js" ] && [ ! -e "$W/icons/gone.svg" ] \
   && pass "update: files an older build shipped (listed) are removed" \
@@ -503,7 +680,10 @@ run "$S"
 
 # ---------------------------------------------------------------------------
 echo "--- strip popover payload (SummaryTransform + MeterScale from $STRIP_DIR/Program.cs)"
-ui() { "$DOTNET" "$H/out/harness.dll" "$@"; }
+# The UI commands never touch AppPaths, but they run the same binary - whose
+# guard refuses without a contained profile - so they get a fake home of their own.
+UIH=$T/ui-home; mkdir -p "$UIH" "$UIH.tmp"; harness_env "$UIH" "$UIH.tmp"; UIENV=("${HENV[@]}")
+ui() { env -u BURNGLASS_HOME -u PULSE_HOME "${UIENV[@]}" "$DOTNET" "$H/out/harness.dll" "$@"; }
 if [ ! -f "$H/ExtractedUi.cs" ]; then
   fail "no MeterScale + SummaryTransform in $STRIP_DIR/Program.cs (popover payload unchecked)"
 else

@@ -42,7 +42,8 @@
 #  H1 legacy history + custom-source rename: a legacy c-cell under a retired
 #     name is not added beside its renamed new-home cell (no double count),
 #     a removed source's legacy cells survive, a rename re-reads the cache
-#  U1 updater: asset matching its own filename first, then new, then legacy;
+#  U1 updater (this platform's asset pair): asset matching its own filename
+#     first, then new, then legacy;
 #     follows a repo-rename 301; versionNum ranks 2.0.0-rc.1 BELOW 2.0.0
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -51,11 +52,103 @@ MOCKS=""
 # KEEP_TMP=1 keeps the fixture homes for debugging (mocks are always killed).
 cleanup() { for p in $MOCKS; do kill "$p" 2>/dev/null; done; if [ -n "${KEEP_TMP:-}" ]; then echo "TMP=$TMP"; else rm -rf "$TMP"; fi; }
 trap cleanup EXIT
+
+# ---------------------------------------------------------------- containment
+# This suite pins no *_HOME on purpose, so every server/CLI run resolves its
+# home from os.homedir(). On Linux/macOS that is $HOME, and the fake HOME per
+# case is the whole story. On Windows Node reads USERPROFILE and IGNORES HOME:
+# a fake HOME alone would run every case against the REAL profile (overwrite
+# the live server's ~/.burnglass/server.json, save the Meshy test key into the
+# real config, scrub the real ~/.pulse/config.json, sweep stage dirs in the
+# real profile...). So on Windows every invocation also gets USERPROFILE = the
+# same fixture home in native form (home_env), and assert_home refuses to run
+# anything whose os.homedir() is not that fixture. APPDATA/LOCALAPPDATA are
+# pinned under the fixture too: the server prefers %APPDATA% over the home
+# (desktopStoreDir reads the Claude desktop session-title store on EVERY
+# summary build; the --install paths use %LOCALAPPDATA%), so a fake
+# USERPROFILE alone would leave those reads on the real profile. Fail CLOSED:
+# if containment can't be shown, nothing runs against that home.
+IS_WIN=0
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) IS_WIN=1 ;; esac
+if [ "$IS_WIN" = 1 ] && ! command -v cygpath >/dev/null 2>&1; then
+  echo "FAIL  Windows shell without cygpath: cannot pin USERPROFILE to the fixture homes — refusing to run"; exit 1
+fi
+nat() { if [ "$IS_WIN" = 1 ]; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
+# HENV = the home assignments for one invocation: HOME, plus on Windows
+# USERPROFILE and the per-user AppData roots, laid out exactly like the
+# server's own fallback (<home>\AppData\Roaming, <home>\AppData\Local).
+home_env() {
+  HENV=(HOME="$1")
+  if [ "$IS_WIN" = 1 ]; then
+    local w; w=$(nat "$1")
+    HENV+=(USERPROFILE="$w" APPDATA="$w\\AppData\\Roaming" LOCALAPPDATA="$w\\AppData\\Local")
+  fi
+}
+# Each home is verified once (a cached re-check keeps M7's two racing starts
+# back to back, exactly as before). Sets HENV for the caller. On a mismatch it
+# prints FAIL, drops a sentinel (a start inside a ( subshell ) can only exit
+# that subshell — the final tally checks the sentinel) and exits.
+VERIFIED_HOMES=$'\n'
+assert_home() { # home
+  home_env "$1"
+  case "$VERIFIED_HOMES" in *$'\n'"$1"$'\n'*) return 0 ;; esac
+  local got
+  got=$(env -u PULSE_HOME -u BURNGLASS_HOME "${HENV[@]}" node -e '
+const path = require("path"), os = require("os");
+const norm = (p) => { const r = path.resolve(p); return process.platform === "win32" ? r.toLowerCase() : r; };
+const want = process.argv[1], got = os.homedir();
+// On Windows the AppData roots must sit under the fixture too (the server
+// prefers them over the home), so an unpinned one fails closed like the home.
+const under = (p) => !!p && (norm(p) + path.sep).startsWith(norm(want) + path.sep);
+const bad = process.platform === "win32" ? ["APPDATA", "LOCALAPPDATA"].filter((k) => !under(process.env[k])) : [];
+process.stdout.write(!(want && got && norm(got) === norm(want))
+  ? "os.homedir() is " + JSON.stringify(got) + ", want " + JSON.stringify(want)
+  : bad.length ? bad.map((k) => "%" + k + "% is " + JSON.stringify(process.env[k] || "")).join(", ") + ", not under " + JSON.stringify(want)
+  : "ok");
+' "$(nat "$1")" 2>&1)
+  if [ "$got" != ok ]; then
+    echo "FAIL  containment: $got — refusing to run anything against this home"
+    : > "$TMP/CONTAINMENT-FAILED"; exit 1
+  fi
+  VERIFIED_HOMES="$VERIFIED_HOMES$1"$'\n'
+}
+# Windows-only server env: route run-at-startup through a stub file so a
+# payload build never even queries the real HKCU Run key with reg.exe. Not set
+# on POSIX, where a stub would flip payload.startup.supported on.
+WIN_SRV_ENV=()
+if [ "$IS_WIN" = 1 ]; then WIN_SRV_ENV=(BURNGLASS_STARTUP_STUB="$TMP/startup-stub.json"); fi
+# The other agents' folders, like run-all.sh does (a no-op under run-all), so a
+# standalone run never reads this machine's own Gemini/Antigravity/Continue/
+# Cline/Roo usage. On Windows Cline/Roo default under %APPDATA% — pinned to the
+# fixture by home_env; these explicit dirs are belt and braces on top.
+export GEMINI_DIR="${GEMINI_DIR:-$TMP/no-agents/gemini}" ANTIGRAVITY_DIR="${ANTIGRAVITY_DIR:-$TMP/no-agents/antigravity}"
+export CONTINUE_DIR="${CONTINUE_DIR:-$TMP/no-agents/continue}" CLINE_DIR="${CLINE_DIR:-$TMP/no-agents/cline}" ROO_DIR="${ROO_DIR:-$TMP/no-agents/roo}"
+
 # This suite owns ports 5831-5856; a leftover listener would make results lie.
-for p in $(seq 5831 5856); do
-  curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$p/"; rc=$?
-  if [ $rc -ne 7 ]; then echo "FAIL  port $p is already in use (curl rc=$rc) — stop whatever holds it"; exit 1; fi
-done
+# Only "connection refused" means free (curl rc 7). On Windows a refused
+# loopback connect is NOT immediate — the stack retries the SYN and reports
+# ECONNREFUSED after ~2s — so a 1s curl times out (rc 28) on every FREE port.
+# There one node probe connects to all the ports at once with a long timeout,
+# and only a real ECONNREFUSED counts as free: a listener, a timeout or any
+# other error still fails (unknown is not free).
+if [ "$IS_WIN" = 1 ]; then
+  busy=$(node -e '
+const net = require("net"); const [a, b] = process.argv.slice(1).map(Number);
+const ports = []; for (let p = a; p <= b; p++) ports.push(p);
+Promise.all(ports.map((p) => new Promise((res) => {
+  const s = net.connect({ host: "127.0.0.1", port: p });
+  const t = setTimeout(() => { s.destroy(); res(p + " timeout"); }, 8000);
+  s.once("connect", () => { clearTimeout(t); s.destroy(); res(p + " in use"); });
+  s.once("error", (e) => { clearTimeout(t); res(e.code === "ECONNREFUSED" ? null : p + " " + e.code); });
+}))).then((r) => { const bad = r.filter(Boolean); process.stdout.write(bad.join(", ")); process.exit(bad.length ? 1 : 0); });
+' 5831 5856 2>&1); rc=$?
+  if [ $rc -ne 0 ]; then echo "FAIL  suite ports 5831-5856 are not all free (${busy:-probe rc=$rc}) — stop whatever holds them"; exit 1; fi
+else
+  for p in $(seq 5831 5856); do
+    curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$p/"; rc=$?
+    if [ $rc -ne 7 ]; then echo "FAIL  port $p is already in use (curl rc=$rc) — stop whatever holds it"; exit 1; fi
+  done
+fi
 CL=$TMP/claude
 mkdir -p "$CL/projects/demo"
 SECRET="msy-SECRET-KEY-do-not-leak-4711"
@@ -63,6 +156,12 @@ SECRET="msy-SECRET-KEY-do-not-leak-4711"
 # Transcripts: two sessions today (s1 100k tokens, s2 200k) so effort chips
 # from the modes sidecar(s) are measurable per session. settings.json points
 # the status line at an exe that no longer exists (read-only check).
+# DEAD_SL: on Windows a drive-less rooted path like /nonexistent/... is a Git
+# Bash mount the server deliberately cannot verify (exists: null — I1 pins
+# that), so the dead target there is a native drive path under the fixture,
+# which is what --statusline-setup prints on Windows anyway.
+DEAD_SL=/nonexistent/gone/pulse-linux
+if [ "$IS_WIN" = 1 ]; then DEAD_SL="$(nat "$TMP")\\gone\\pulse-linux"; fi
 node -e '
 const fs = require("fs"); const now = Date.now();
 // Never before local midnight: an hour ago is YESTERDAY just after 00:00, and a
@@ -73,18 +172,20 @@ const A = (ms, sid, id, out) => ({ type: "assistant", timestamp: new Date(Math.m
 fs.writeFileSync(process.argv[1] + "/projects/demo/s.jsonl",
   [A(now - 3600e3, "s1", 1, 100000), A(now - 3500e3, "s2", 2, 200000)].map(JSON.stringify).join("\n") + "\n");
 fs.writeFileSync(process.argv[1] + "/settings.json", JSON.stringify({
-  statusLine: { type: "command", command: "\"/nonexistent/gone/pulse-linux\" --statusline" },
+  statusLine: { type: "command", command: "\"" + process.argv[2] + "\" --statusline" },
   hooks: { SessionStart: [{ hooks: [{ type: "command", command: "\"" + process.execPath + "\" --mode-hook" }] }] },
 }));
-' "$CL"
+' "$CL" "$DEAD_SL"
 
 SRV=""
 start_srv() { # home port log [NAME=VALUE ...]
   local H=$1 P=$2 L=$3; shift 3
+  assert_home "$H" # sets HENV (HOME, + USERPROFILE on Windows) or exits
   env -u PULSE_HOME -u BURNGLASS_HOME -u PULSE_HISTORY_DIR -u PULSE_MODES_FILE \
-    HOME="$H" CLAUDE_DIR="$CL" CODEX_DIR="$TMP/no-codex" \
+    -u BURNGLASS_HISTORY_DIR -u BURNGLASS_MODES_FILE \
+    "${HENV[@]}" CLAUDE_DIR="$CL" CODEX_DIR="$TMP/no-codex" \
     BURNGLASS_NO_TRAY_SPAWN=1 BURNGLASS_NO_STRIP_SPAWN=1 \
-    BURNGLASS_MESHY_API=http://127.0.0.1:9 BURNGLASS_SUMMARY_MEMO_MS=0 "$@" \
+    BURNGLASS_MESHY_API=http://127.0.0.1:9 BURNGLASS_SUMMARY_MEMO_MS=0 ${WIN_SRV_ENV[@]+"${WIN_SRV_ENV[@]}"} "$@" \
     node "$ROOT/server.js" --port "$P" --no-update-check >"$L" 2>&1 &
   SRV=$!
 }
@@ -98,11 +199,20 @@ H1=$TMP/h1; mkdir -p "$H1"
 start_srv "$H1" 5831 "$TMP/m1.log"; wait_up 5831
 summary 5831 "$TMP/m1.json"
 stop_srv $SRV
-env -u PULSE_HOME -u BURNGLASS_HOME HOME="$H1" CLAUDE_DIR="$CL" node "$ROOT/server.js" --statusline-setup > "$TMP/m1-setup.txt" 2>&1
-echo '{"session_id":"sX","effort":"high"}' | env -u PULSE_HOME -u BURNGLASS_HOME HOME="$H1" CLAUDE_DIR="$CL" node "$ROOT/server.js" --mode-hook
+# Direct CLI runs bypass start_srv, so each re-asserts its home (sets HENV).
+assert_home "$H1"
+env -u PULSE_HOME -u BURNGLASS_HOME "${HENV[@]}" CLAUDE_DIR="$CL" node "$ROOT/server.js" --statusline-setup > "$TMP/m1-setup.txt" 2>&1
+# (no exported *_MODES_FILE may redirect the hook's write out of the fixture)
+echo '{"session_id":"sX","effort":"high"}' | env -u PULSE_HOME -u BURNGLASS_HOME -u PULSE_MODES_FILE -u BURNGLASS_MODES_FILE \
+  "${HENV[@]}" CLAUDE_DIR="$CL" node "$ROOT/server.js" --mode-hook
 H1B=$TMP/h1b; mkdir -p "$H1B" # short-lived commands only, never a server
-echo '{}' | env -u PULSE_HOME -u BURNGLASS_HOME HOME="$H1B" PORT=4999 node "$ROOT/server.js" --statusline >/dev/null 2>&1
-node "$ROOT/server.js" --version > "$TMP/version.txt"
+assert_home "$H1B"
+echo '{}' | env -u PULSE_HOME -u BURNGLASS_HOME "${HENV[@]}" PORT=4999 node "$ROOT/server.js" --statusline >/dev/null 2>&1
+# --version and the I1 harness need no particular home; a scratch one keeps
+# even their module load off the real profile.
+HX=$TMP/hx; mkdir -p "$HX"
+assert_home "$HX"
+env -u PULSE_HOME -u BURNGLASS_HOME "${HENV[@]}" node "$ROOT/server.js" --version > "$TMP/version.txt"
 
 # ---------------------------------------------------------------- M2 migrate
 H2=$TMP/h2; LP=$H2/.pulse
@@ -145,7 +255,8 @@ start_srv "$H2" 5832 "$TMP/m2.log"; wait_up 5832
 summary 5832 "$TMP/m2.json"
 stop_srv $SRV
 cp "$H2/.burnglass/migrated-from-pulse.json" "$TMP/marker-1.json" 2>/dev/null
-grep -rl -- "$SECRET" "$H2" > "$TMP/secret-files.txt" 2>/dev/null
+# (Git Bash's grep prints /tmp/... paths: native form, to compare with the payload's)
+grep -rl -- "$SECRET" "$H2" 2>/dev/null | while IFS= read -r f; do nat "$f"; echo; done > "$TMP/secret-files.txt"
 # snapshot BOTH homes as M2 left them (M3 below changes the legacy one on purpose)
 cp -a "$LP" "$TMP/pulse-after-m2"; cp -a "$H2/.burnglass" "$TMP/burnglass-after-m2"
 
@@ -190,7 +301,9 @@ summary 5835 "$TMP/m5b.json"; stop_srv $SRV
 start_srv "$H5" 5835 "$TMP/m5c.log" BURNGLASS_HOME= PULSE_HOME="$TMP/ph"; wait_up 5835
 summary 5835 "$TMP/m5c.json"; stop_srv $SRV
 # env alias precedence on a CLI path: BURNGLASS_STARTUP_STUB beats PULSE_STARTUP_STUB
-env -u PULSE_HOME HOME="$H5" BURNGLASS_HOME="$TMP/bh" BURNGLASS_STARTUP_STUB="$TMP/stub-new.json" PULSE_STARTUP_STUB="$TMP/stub-old.json" \
+# (both stubs are fixture files: this --startup on never reaches the registry)
+assert_home "$H5"
+env -u PULSE_HOME "${HENV[@]}" BURNGLASS_HOME="$TMP/bh" BURNGLASS_STARTUP_STUB="$TMP/stub-new.json" PULSE_STARTUP_STUB="$TMP/stub-old.json" \
   node "$ROOT/server.js" --startup on > "$TMP/m5-startup.txt" 2>&1
 
 # ---------------------------------------------------------------- M6 failure
@@ -232,21 +345,32 @@ summary 5839 "$TMP/m8b.json"; stop_srv $SRV
 
 # ---------------------------------------------------------------- M9 freshest server.json
 H9=$TMP/h9; mkdir -p "$H9/.pulse" "$H9/.burnglass"
-mock_sl() { # port cost
-  node -e 'const [p, c] = process.argv.slice(1); require("http").createServer((q, s) => { s.writeHead(200, { "Content-Type": "application/json" });
-    s.end(JSON.stringify({ today: { cost: +c, tokens: 1 }, meters: {}, version: "1.34.0" })); }).listen(+p, "127.0.0.1")' "$1" "$2" &
+# Each mock writes its OWN process.pid once listening: that is the pid the
+# server's liveness probe (process.kill(pid, 0)) sees. On Linux/macOS it equals
+# $!; under Git Bash $! is an MSYS pid that Windows does not know, so a record
+# carrying it would read as dead. $! stays the handle for kill.
+mock_sl() { # port cost pidfile
+  node -e 'const [p, c, f] = process.argv.slice(1); require("http").createServer((q, s) => { s.writeHead(200, { "Content-Type": "application/json" });
+    s.end(JSON.stringify({ today: { cost: +c, tokens: 1 }, meters: {}, version: "1.34.0" })); }).listen(+p, "127.0.0.1",
+    () => require("fs").writeFileSync(f, String(process.pid)))' "$1" "$2" "$3" &
 }
-mock_sl 5840 12.34; ML=$!; mock_sl 5841 56.78; MN=$!; MOCKS="$MOCKS $ML $MN"
+mock_sl 5840 12.34 "$TMP/ml.pid"; ML=$!; mock_sl 5841 56.78 "$TMP/mn.pid"; MN=$!; MOCKS="$MOCKS $ML $MN"
 DEAD=999999999
 sleep 0.6
+for _ in $(seq 1 40); do [ -s "$TMP/ml.pid" ] && [ -s "$TMP/mn.pid" ] && break; sleep 0.15; done
+ML_PID=$(cat "$TMP/ml.pid" 2>/dev/null); MN_PID=$(cat "$TMP/mn.pid" 2>/dev/null)
 NOW=$(node -e 'console.log(Date.now())')
 # (a) the NEW home's file is newer but its pid is dead -> the live legacy one wins
 echo "{\"port\":5842,\"host\":\"127.0.0.1\",\"pid\":$DEAD,\"startedAt\":$((NOW+5000))}" > "$H9/.burnglass/server.json"
-echo "{\"port\":5840,\"host\":\"127.0.0.1\",\"pid\":$ML,\"startedAt\":$NOW}" > "$H9/.pulse/server.json"
-echo '{}' | env -u PULSE_HOME -u BURNGLASS_HOME HOME="$H9" NO_COLOR=1 node "$ROOT/server.js" --statusline > "$TMP/m9a.txt" 2>/dev/null
+echo "{\"port\":5840,\"host\":\"127.0.0.1\",\"pid\":${ML_PID:-0},\"startedAt\":$NOW}" > "$H9/.pulse/server.json"
+# PORT: with no usable server.json --statusline falls back to $PORT, else the
+# DEFAULT 4747 — a real server on a dev machine. 5856 is suite-owned and was
+# checked free above, so a miss can only ever reach a dead suite port.
+assert_home "$H9"
+echo '{}' | env -u PULSE_HOME -u BURNGLASS_HOME "${HENV[@]}" PORT=5856 NO_COLOR=1 node "$ROOT/server.js" --statusline > "$TMP/m9a.txt" 2>/dev/null
 # (b) both alive -> the newer one wins
-echo "{\"port\":5841,\"host\":\"127.0.0.1\",\"pid\":$MN,\"startedAt\":$((NOW+5000))}" > "$H9/.burnglass/server.json"
-echo '{}' | env -u PULSE_HOME -u BURNGLASS_HOME HOME="$H9" NO_COLOR=1 node "$ROOT/server.js" --statusline > "$TMP/m9b.txt" 2>/dev/null
+echo "{\"port\":5841,\"host\":\"127.0.0.1\",\"pid\":${MN_PID:-0},\"startedAt\":$((NOW+5000))}" > "$H9/.burnglass/server.json"
+echo '{}' | env -u PULSE_HOME -u BURNGLASS_HOME "${HENV[@]}" PORT=5856 NO_COLOR=1 node "$ROOT/server.js" --statusline > "$TMP/m9b.txt" 2>/dev/null
 kill $ML $MN 2>/dev/null
 
 # ---------------------------------------------------------------- L1-L3 same-folder homes
@@ -263,27 +387,47 @@ link_case() { # tag port home — start, summary, save KEY2 from the dashboard, 
   stop_srv $SRV
 }
 cfg_key() { printf '{"meshy":true,"meshyApiKey":"%s","budget":%s}\n' "$1" "$2"; }
+# make_link tag dir|file target link — `ln -s target link`, exactly as before
+# on Linux/macOS. On Windows Git Bash's plain `ln -s` silently COPIES (a copy
+# is just a second home, and the case would test no link at all), so: a
+# native symlink when this account may make one (nativestrict fails instead
+# of copying), else for a FOLDER an NTFS junction (no privilege needed; the
+# server's identity check is written for junctions too). If no real link
+# exists afterwards, the case is SKIPPED with the reason ($TMP/<tag>.skip).
+make_link() {
+  local tag=$1 kind=$2 target=$3 link=$4
+  if [ "$IS_WIN" != 1 ]; then ln -s "$target" "$link"; return 0; fi
+  MSYS=winsymlinks:nativestrict ln -s "$target" "$link" 2>/dev/null
+  if [ ! -L "$link" ] && [ ! -e "$link" ] && [ "$kind" = dir ]; then
+    local abs; abs=$(cd "$(dirname "$link")" && cd "$target" && pwd)
+    [ -n "$abs" ] && cmd //c mklink //J "$(nat "$link")" "$(nat "$abs")" >/dev/null 2>&1
+  fi
+  [ -L "$link" ] && return 0
+  if [ "$kind" = dir ]; then echo "neither a symbolic link nor a junction could be made on this Windows shell" > "$TMP/$tag.skip"
+  else echo "a FILE link needs a native symlink (Developer Mode or the symlink right) and ln -s made a copy on this Windows shell" > "$TMP/$tag.skip"; fi
+  return 1
+}
 # L1: data moved, a link left for old companions
 HL1=$TMP/hl1; mkdir -p "$HL1/.burnglass/history"
 cfg_key "$KEY1" 51 > "$HL1/.burnglass/config.json"
-ln -s .burnglass "$HL1/.pulse"
-link_case l1 5846 "$HL1"
+make_link l1 dir .burnglass "$HL1/.pulse" && link_case l1 5846 "$HL1"
 # L2: "just point Burnglass at my old folder"
 HL2=$TMP/hl2; mkdir -p "$HL2/.pulse/history"
 cfg_key "$KEY1" 52 > "$HL2/.pulse/config.json"
-ln -s .pulse "$HL2/.burnglass"
-link_case l2 5847 "$HL2"
+make_link l2 dir .pulse "$HL2/.burnglass" && link_case l2 5847 "$HL2"
 # L3: two real folders, only config.json shared (new -> old, then old -> new)
 HL3=$TMP/hl3; mkdir -p "$HL3/.pulse/history" "$HL3/.burnglass"
 cfg_key "$KEY1" 53 > "$HL3/.pulse/config.json"
-ln -s ../.pulse/config.json "$HL3/.burnglass/config.json"
-link_case l3 5848 "$HL3"
+make_link l3 file ../.pulse/config.json "$HL3/.burnglass/config.json" && link_case l3 5848 "$HL3"
 HL4=$TMP/hl4; mkdir -p "$HL4/.pulse/history" "$HL4/.burnglass"
 cfg_key "$KEY1" 54 > "$HL4/.burnglass/config.json"
-ln -s ../.burnglass/config.json "$HL4/.pulse/config.json"
-link_case l4 5849 "$HL4"
+make_link l4 file ../.burnglass/config.json "$HL4/.pulse/config.json" && link_case l4 5849 "$HL4"
 
 # ---------------------------------------------------------------- P1/P2 permissions
+# POSIX permission bits do not exist on NTFS (Git Bash's stat reports a
+# synthesized 755/644 whatever chmod did, and the server's copyModeBits is a
+# deliberate no-op on win32), so on Windows P1/P2 are SKIPPED, not run.
+if [ "$IS_WIN" != 1 ]; then
 HP1=$TMP/hp1; mkdir -p "$HP1/.pulse/history"
 cfg_key "$KEY1" 61 > "$HP1/.pulse/config.json"
 echo '{}' > "$HP1/.pulse/history/2025-01.json"
@@ -305,6 +449,7 @@ chmod 755 "$HP2/.pulse" "$HP2/.pulse/history"; chmod 644 "$HP2/.pulse/config.jso
   meshy_set 5851 "$KEY2" "$TMP/p2b-set.json"
   stat -c '%n %a' "$TMP/hp2b/.burnglass/config.json" > "$TMP/p2b-modes.txt"
   stop_srv $SRV )
+fi
 
 # ---------------------------------------------------------------- A1/A2 not-a-Pulse-home
 HA1=$TMP/ha1; mkdir -p "$HA1/.pulse"
@@ -332,7 +477,8 @@ cp "$HQ/.pulse/tray.ps1" "$TMP/q1-tray.ps1" 2>/dev/null
 # unit harness: the SAME rule PowerShell's tokenizer applies (CharTraits
 # IsSingleQuote = ' U+2018 U+2019 U+201A U+201B; a quote followed by any
 # quote is one escaped literal of the second kind; else it ends the string)
-env -u PULSE_HOME -u BURNGLASS_HOME HOME="$HQ" node -e '
+assert_home "$HQ"
+env -u PULSE_HOME -u BURNGLASS_HOME "${HENV[@]}" node -e '
 const fs = require("fs"), path = require("path");
 const [ROOT, T, HQ] = process.argv.slice(1);
 const SQ = new Set(["\x27", "\u2018", "\u2019", "\u201A", "\u201B"]);
@@ -364,10 +510,11 @@ try {
 } catch (e) { res.err = String(e && e.message || e); }
 try { const l = logLine(fs.readFileSync(T + "/q1-tray.ps1", "utf8")); res.file = { value: l.lit && l.lit.value, rest: l.rest }; } catch (e) { res.fileErr = String(e.message); }
 fs.writeFileSync(T + "/q1-unit.json", JSON.stringify(res));
-' "$ROOT" "$TMP" "$HQ" >/dev/null 2>&1
+' "$ROOT" "$TMP" "$(nat "$HQ")" >/dev/null 2>&1 # native form: the home the server sees
 
 # ---------------------------------------------------------------- I1 integrations (Windows paths)
-node -e '
+assert_home "$HX"
+env -u PULSE_HOME -u BURNGLASS_HOME "${HENV[@]}" node -e '
 const fs = require("fs"); const [ROOT, T] = process.argv.slice(1);
 const res = {};
 try {
@@ -439,36 +586,53 @@ http.createServer((q, s) => {
 ' "$REL" &
 MU=$!; MOCKS="$MOCKS $MU"
 asset() { printf '{"name":"%s","browser_download_url":"http://127.0.0.1:9/%s","digest":"sha256:%064d","size":6000000}' "$1" "$1" 0; }
+# The updater only ever looks for ITS platform's pair (platformAssetNames):
+# burnglass.exe/pulse.exe on win32, burnglass-macos/pulse-macos on darwin,
+# burnglass-linux/pulse-linux elsewhere. The mock releases carry that pair.
+case "$(node -p process.platform)" in
+  win32) A_NEW=burnglass.exe; A_OLD=pulse.exe ;;
+  darwin) A_NEW=burnglass-macos; A_OLD=pulse-macos ;;
+  *) A_NEW=burnglass-linux; A_OLD=pulse-linux ;;
+esac
 rel() { echo "{\"tag_name\":\"$1\",\"assets\":[$2]}" > "$REL"; }
 check() { curl -s -X POST -H 'X-Pulse: 1' "http://127.0.0.1:$1/api/update/check" > "$2"; }
 H10=$TMP/h10; mkdir -p "$H10"
 sleep 0.3
 start_upd() { # port [NAME=VALUE]
   local P=$1; shift
-  env -u PULSE_HOME HOME="$H10" CLAUDE_DIR="$CL" CODEX_DIR="$TMP/no-codex" BURNGLASS_NO_TRAY_SPAWN=1 \
+  assert_home "$H10" # sets HENV (HOME, + USERPROFILE on Windows) or exits
+  # BURNGLASS_HOME unset too: an exported one would otherwise be honoured.
+  env -u PULSE_HOME -u BURNGLASS_HOME "${HENV[@]}" CLAUDE_DIR="$CL" CODEX_DIR="$TMP/no-codex" \
+    BURNGLASS_NO_TRAY_SPAWN=1 BURNGLASS_NO_STRIP_SPAWN=1 ${WIN_SRV_ENV[@]+"${WIN_SRV_ENV[@]}"} \
     PULSE_UPDATE_API="http://127.0.0.1:5843/repos/ReFxFrank/Pulse-Usage-Monitor/releases/latest" "$@" \
     node "$ROOT/server.js" --port "$P" --no-update-check >"$TMP/u-$P.log" 2>&1 &
   SRV=$!
 }
 start_upd 5844; wait_up 5844
 # mock "newer" releases use 99.x so they stay newer than whatever version is running
-rel v99.0.1 "$(asset pulse-linux),$(asset burnglass-linux)"; check 5844 "$TMP/u1.json"
-rel v99.0.1 "$(asset pulse-linux)";                          check 5844 "$TMP/u2.json"
-rel v2.0.0-rc.1 "$(asset burnglass-linux)";                  check 5844 "$TMP/u3.json"
-rel v99.0.1-rc.2 "$(asset burnglass-linux)";                 check 5844 "$TMP/u4.json"
-rel v1.34.0 "$(asset pulse-linux)";                          check 5844 "$TMP/u5.json"
+rel v99.0.1 "$(asset $A_OLD),$(asset $A_NEW)"; check 5844 "$TMP/u1.json"
+rel v99.0.1 "$(asset $A_OLD)";                 check 5844 "$TMP/u2.json"
+rel v2.0.0-rc.1 "$(asset $A_NEW)";             check 5844 "$TMP/u3.json"
+rel v99.0.1-rc.2 "$(asset $A_NEW)";            check 5844 "$TMP/u4.json"
+rel v1.34.0 "$(asset $A_OLD)";                 check 5844 "$TMP/u5.json"
 stop_srv $SRV
-start_upd 5845 BURNGLASS_SELF_EXE_NAME=pulse-linux; wait_up 5845
-rel v99.0.1 "$(asset burnglass-linux),$(asset pulse-linux)"; check 5845 "$TMP/u6.json"
+start_upd 5845 BURNGLASS_SELF_EXE_NAME=$A_OLD; wait_up 5845
+rel v99.0.1 "$(asset $A_NEW),$(asset $A_OLD)"; check 5845 "$TMP/u6.json"
 stop_srv $SRV
 
 # ---------------------------------------------------------------- assertions
 node -e '
 const fs = require("fs"), path = require("path");
-const [T, SECRET, ROOT] = process.argv.slice(1);
+const [T, SECRET, ROOT, DEAD_SL, A_NEW, A_OLD, IS_WIN] = process.argv.slice(1);
+const WIN = IS_WIN === "1";
 const V = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version;
 let fail = 0;
 const ok = (c, m) => { console.log((c ? "PASS" : "FAIL") + "  " + m); if (!c) fail = 1; };
+const skip = (m, why) => console.log("SKIP  " + m + " — " + why);
+// A pinned *_HOME is used VERBATIM, and on Windows Git Bash hands it over as
+// C:/Users/... (forward slashes) while path.join builds C:\Users\...: the same
+// path, so compare resolved there. Linux/macOS keep the exact-string check.
+const samePath = (a, b) => WIN ? (typeof a === "string" && path.resolve(a) === path.resolve(b)) : a === b;
 const J = (f) => { try { return JSON.parse(fs.readFileSync(path.join(T, f), "utf8")); } catch (_) { return null; } };
 const R = (f) => { try { return fs.readFileSync(path.join(T, f), "utf8"); } catch (_) { return ""; } };
 const exists = (p) => fs.existsSync(path.join(T, p));
@@ -486,10 +650,10 @@ ok(!exists("h1b/.pulse") && !exists("h1b/.burnglass"), "M1: a short-lived --stat
 ok(R("version.txt").split(/\r?\n/).includes("burnglass v" + V), "M1: --version says burnglass v" + V);
 const integ = m1.integrations || [];
 const sl = integ.find((i) => i.kind === "statusline"), hk = integ.find((i) => i.kind === "effort-hook");
-ok(sl && sl.exists === false && sl.target === "/nonexistent/gone/pulse-linux" && sl.legacyName === true,
+ok(sl && sl.exists === false && sl.target === DEAD_SL && sl.legacyName === true,
    "M1: integrations flags the status line pointing at a deleted exe (" + JSON.stringify(sl) + ")");
 ok(hk && hk.exists === true && hk.event === "SessionStart", "M1: an effort hook whose exe exists reads exists:true");
-ok(/points at a file that no longer exists: \/nonexistent\/gone\/pulse-linux/.test(R("m1.log")), "M1: server log warns about the dead status-line target (read-only)");
+ok(R("m1.log").includes("points at a file that no longer exists: " + DEAD_SL), "M1: server log warns about the dead status-line target (read-only)");
 ok(/no longer exists/.test(R("m1-setup.txt")), "M1: --statusline-setup tells the user to replace the dead command");
 ok(!/\[pulse\]/.test(R("m1.log")) && /\[burnglass\]/.test(R("m1.log")), "M1: log lines carry the [burnglass] tag");
 
@@ -571,9 +735,9 @@ ok(!exists("h4/.burnglass/migrated-from-pulse.json") && m4.homeMigration === nul
 
 // ---- M5
 const a5 = J("m5a.json") || {}, b5 = J("m5b.json") || {}, c5 = J("m5c.json") || {};
-ok(a5.home === path.join(T, "bh") && a5.budget && a5.budget.target === 1, "M5: BURNGLASS_HOME beats PULSE_HOME (" + a5.home + ")");
-ok(b5.home === path.join(T, "ph") && b5.budget && b5.budget.target === 2, "M5: PULSE_HOME alone is honoured verbatim");
-ok(c5.home === path.join(T, "ph"), "M5: an EMPTY BURNGLASS_HOME does not mask PULSE_HOME");
+ok(samePath(a5.home, path.join(T, "bh")) && a5.budget && a5.budget.target === 1, "M5: BURNGLASS_HOME beats PULSE_HOME (" + a5.home + ")");
+ok(samePath(b5.home, path.join(T, "ph")) && b5.budget && b5.budget.target === 2, "M5: PULSE_HOME alone is honoured verbatim (" + b5.home + ")");
+ok(samePath(c5.home, path.join(T, "ph")), "M5: an EMPTY BURNGLASS_HOME does not mask PULSE_HOME (" + c5.home + ")");
 ok(!exists("h5/.burnglass"), "M5: an explicit home never migrates (no ~/.burnglass)");
 ok(fs.readFileSync(path.join(T, "h5/.pulse/server.json"), "utf8") === fs.readFileSync(path.join(T, "h5-pulse-before/server.json"), "utf8"),
    "M5: an explicit home never mirrors into ~/.pulse");
@@ -617,6 +781,7 @@ for (const [tag, home, real, desc] of [
   ["l3", "hl3", "hl3/.pulse/config.json", "~/.burnglass/config.json -> ~/.pulse/config.json"],
   ["l4", "hl4", "hl4/.burnglass/config.json", "~/.pulse/config.json -> ~/.burnglass/config.json"],
 ]) {
+  if (exists(tag + ".skip")) { skip("L: " + desc + " (all 5 checks)", R(tag + ".skip").trim()); continue; }
   const a = J(tag + "-a.json") || {}, set = J(tag + "-set.json") || {}, b = J(tag + "-b.json") || {};
   ok(a.meshy && a.meshy.hasKey === true, "L: " + desc + ": the Meshy key survives the start (hasKey " + (a.meshy && a.meshy.hasKey) + ")");
   ok(set.ok === true && set.meshy && set.meshy.hasKey === true && b.meshy && b.meshy.hasKey === true,
@@ -628,7 +793,13 @@ for (const [tag, home, real, desc] of [
 }
 
 // ---- P1/P2 permissions
-const modes = (f) => Object.fromEntries(R(f).trim().split("\n").filter(Boolean).map((l) => { const i = l.lastIndexOf(" "); return [path.relative(T, l.slice(0, i)), l.slice(i + 1)]; }));
+if (WIN) {
+  for (const m of ["P1: a 0700 ~/.pulse becomes a 0700 ~/.burnglass", "P1: history/ keeps its 0700", "P1: file modes are copied",
+    "P1: the legacy key scrub keeps the old config user-only", "P1: a dashboard key save keeps config.json 0600",
+    "P2: the default 755/644 layout is unchanged", "P2: a NEW config.json holding a Meshy key is created 0600"])
+    skip(m, "POSIX permission bits do not exist on NTFS (copyModeBits is a no-op on win32)");
+} else {
+const modes =(f) => Object.fromEntries(R(f).trim().split("\n").filter(Boolean).map((l) => { const i = l.lastIndexOf(" "); return [path.relative(T, l.slice(0, i)), l.slice(i + 1)]; }));
 const pa = modes("p1-modes-a.txt"), pb = modes("p1-modes-b.txt");
 ok(pa["hp1/.burnglass"] === "700", "P1: a 0700 ~/.pulse becomes a 0700 ~/.burnglass (got " + pa["hp1/.burnglass"] + ")");
 ok(pa["hp1/.burnglass/history"] === "700", "P1: history/ keeps its 0700 (got " + pa["hp1/.burnglass/history"] + ")");
@@ -640,6 +811,7 @@ const p2 = modes("p2-modes.txt"), p2b = modes("p2b-modes.txt");
 ok(p2["hp2/.burnglass"] === "755" && p2["hp2/.burnglass/history"] === "755" && p2["hp2/.burnglass/config.json"] === "644" && p2["hp2/.burnglass/history/2025-01.json"] === "644",
    "P2: the default 755/644 layout is unchanged (" + JSON.stringify(p2) + ")");
 ok(p2b["hp2b/.burnglass/config.json"] === "600", "P2: a NEW config.json holding a Meshy key is created 0600 (got " + p2b["hp2b/.burnglass/config.json"] + ")");
+}
 
 // ---- A1/A2 not-a-Pulse-home
 const a1 = J("a1.json") || {};
@@ -685,14 +857,17 @@ ok(hd2 && Math.abs(hd2.total - 24) < 1e-9, "H1: configuring the old name again i
 
 // ---- U1
 const U = (f) => J(f) || {};
-ok(U("u1.json").status === "available" && U("u1.json").assetName === "burnglass-linux", "U1: new asset name preferred (" + U("u1.json").assetName + ", via the repo-rename 301)");
-ok(U("u2.json").assetName === "pulse-linux", "U1: falls back to the legacy asset name");
-ok(U("u6.json").assetName === "pulse-linux", "U1: an exe named pulse-linux pulls pulse-linux first");
+ok(U("u1.json").status === "available" && U("u1.json").assetName === A_NEW, "U1: new asset name preferred (" + U("u1.json").assetName + ", via the repo-rename 301)");
+ok(U("u2.json").assetName === A_OLD, "U1: falls back to the legacy asset name (" + U("u2.json").assetName + ")");
+ok(U("u6.json").assetName === A_OLD, "U1: an exe named " + A_OLD + " pulls " + A_OLD + " first (" + U("u6.json").assetName + ")");
 ok(U("u3.json").status === "uptodate", "U1: 2.0.0-rc.1 is not offered over the running " + V + " (" + U("u3.json").status + ")");
 ok(U("u4.json").status === "available" && U("u4.json").latest === "99.0.1-rc.2", "U1: a prerelease of a NEWER version (99.0.1-rc.2) ranks above the running " + V);
 ok(U("u5.json").status === "uptodate", "U1: v1.34.0 is not an update");
 process.exit(fail);
-' "$TMP" "$SECRET" "$ROOT"
+' "$TMP" "$SECRET" "$ROOT" "$DEAD_SL" "$A_NEW" "$A_OLD" "$IS_WIN"
 RES=$?
+# A containment refusal inside a ( subshell ) case (P1/P2) only ended that
+# subshell; it must still fail the suite.
+if [ -e "$TMP/CONTAINMENT-FAILED" ]; then echo "FAIL  containment: a case was refused (see the FAIL above)"; RES=1; fi
 echo "---- exit $RES"
 exit $RES

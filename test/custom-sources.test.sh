@@ -28,8 +28,19 @@ fs.writeFileSync(process.argv[1], JSON.stringify({ customSources: [
   { name: "mixed",   path: process.argv[3] },                     // reserved (sessions-table alias) -> dropped
   { name: "Bad Name!", path: process.argv[3] },                   // bad slug -> dropped
   { name: "shadow", path: process.argv[5] },                      // builtin-claimed file -> refused at dispatch
-] }));
-' "$PH/config.json" "$FM" "$LT" "$1" "$CL/projects/demo/s.jsonl"
+  // The overlap guard compares FILES, not strings: other spellings of the
+  // same builtin file must be refused too (a raw compare let them through).
+  { name: "shadowdot", path: process.argv[6] },                   // ".." spelling -> refused
+  // Second spelling of foreman'"'"'s own file -> first row wins, never parsed twice
+  // (would double-count and leave two fileCache entries for one file).
+  { name: "fmdup", path: process.argv[2] + "/./usage.jsonl" },
+].concat(process.platform === "win32" ? [
+  // Windows paths are case-insensitive and take / or \: Git Bash hands node
+  // the forward-slash form, auto-discovery holds the backslash form, so an
+  // upper-cased forward-slash spelling exercises both differences at once.
+  { name: "shadowcase", path: process.argv[5].replace(/\\/g, "/").toUpperCase() },
+] : []) }));
+' "$PH/config.json" "$FM" "$LT" "$1" "$CL/projects/demo/s.jsonl" "$CL/projects/demo/../demo/s.jsonl"
 }
 writeConfig foreman
 
@@ -82,7 +93,23 @@ PORT=4916
 if curl -s -m 1 "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then
   echo "FAIL  port $PORT already in use"; echo "---- exit 1"; exit 1
 fi
-PULSE_HOME=$PH CLAUDE_DIR=$CL CODEX_DIR=$TMP/no-codex PULSE_SUMMARY_MEMO_MS=0 \
+# Containment: BURNGLASS_HOME too, since it outranks PULSE_HOME in envv and an
+# inherited one would otherwise point the server at a real home. Every other
+# discovery root is pinned to an empty dir so the user's own Gemini/Continue/
+# Cline/Roo/Antigravity logs can't leak into the exact allSources check, and
+# the startup stub keeps the payload build off the real HKCU Run key.
+# On Windows, os.homedir() reads USERPROFILE (HOME is ignored), so that is the
+# variable that keeps any homedir-derived path (legacy ~/.pulse probes, the
+# Claude desktop session-title store under APPDATA) inside $TMP. Exported
+# rather than routed through `env`: under Git Bash an MSYS `env` would own $!,
+# and killing it can orphan node.exe on the port.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) mkdir -p "$TMP/profile/AppData/Roaming"
+    export USERPROFILE="$TMP/profile" APPDATA="$TMP/profile/AppData/Roaming" ;;
+esac
+PULSE_HOME=$PH BURNGLASS_HOME=$PH CLAUDE_DIR=$CL CODEX_DIR=$TMP/no-codex PULSE_SUMMARY_MEMO_MS=0 \
+GEMINI_DIR=$TMP/none CONTINUE_DIR=$TMP/none CLINE_DIR=$TMP/none ROO_DIR=$TMP/none \
+ANTIGRAVITY_DIR=$TMP/none PULSE_STARTUP_STUB=$TMP/startup.json \
 node "$ROOT/server.js" --port $PORT --no-update-check >"$TMP/srv.log" 2>&1 &
 SRV=$!
 sleep 2.5
@@ -166,7 +193,21 @@ const log=fs.readFileSync(T+"/srv.log","utf8");
 ok(/dropped "mixed" — reserved name/.test(log), "reserved name (mixed) dropped with a warning");
 ok(/dropped "Bad Name!"/.test(log), "bad slug dropped with a warning");
 ok(/"shadow" points at .* another source already ingests/.test(log), "builtin-overlap path refused with a warning");
+ok(/"shadowdot" points at .* another source already ingests/.test(log), "builtin-overlap via a .. spelling refused with a warning");
+if (process.platform === "win32") {
+  ok(/"shadowcase" points at .* another source already ingests/.test(log),
+    "builtin-overlap via an upper-cased forward-slash spelling refused (Windows)");
+} else {
+  // Say so out loud: a silent omission would make the POSIX PASS count look
+  // like a full run. The case is not configured here at all (see writeConfig).
+  console.log("SKIP  case/separator overlap spelling (win32-only: POSIX paths are case-sensitive)");
+}
 ok(/\d+ custom/.test(log), "parseAll log reports custom file count");
+// foreman (1 file) + labtool (4) = 5 — fmdup'"'"'s second spelling of foreman'"'"'s
+// file must not add a 6th (one file, one dispatch, one fileCache entry).
+const counts=(log.match(/\d+ custom/g)||[]).map(x=>parseInt(x,10));
+ok(counts.length>0 && counts.every(n=>n===5), "same file under two spellings dispatched once (custom counts "+JSON.stringify(counts)+", want all 5)");
+ok(!(s.allSources||[]).includes("fmdup"), "duplicate-spelling row (fmdup) never surfaces as a source");
 process.exit(fail);
 ' "$TMP" "$PH"
 RES=$?

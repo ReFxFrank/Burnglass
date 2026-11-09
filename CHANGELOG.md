@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- **A file named `.burnglass` is never deleted (Windows).** If something that isn't a folder
+  already sits at `~/.burnglass`, the move from `~/.pulse` now stops and Burnglass keeps
+  running from `~/.pulse`, as designed. On Windows the move used to replace that file
+  with the new folder.
+- **Custom sources on Windows.** A custom source that points at a folder Burnglass already
+  reads (for example `~/.claude/projects` spelled with different capitals or slashes) is now
+  recognised and refused with a warning instead of being counted twice. The same file named
+  two ways by two custom sources is read once.
+- **The test suite is safe to run on Windows.** Every suite keeps to its own temporary folder
+  there (the Windows profile folder comes from `USERPROFILE`, which the suites now set), and
+  checks that don't apply to Windows (file permission bits, links that Git Bash can't make)
+  are skipped with a reason.
+
 ## v2.3.0 — New Claude models, Claude Duet, and Antigravity
 
 - **New Claude models priced.** **Fable 5.2** and **Mythos 5.2** ($8/$40, cache reads

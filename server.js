@@ -488,6 +488,17 @@ function migrateHome() {
     fs.writeFileSync(path.join(stage, MIGRATION_MARKER), JSON.stringify(
       { from: legacy, at, by: PULSE_VERSION, copied, skipped }, null, 2) + '\n');
     copyModeBits(legacy, stage);
+    // Anything already at the target that is not a folder (a stray FILE named
+    // .burnglass, a dangling link) must stop the publish. On POSIX
+    // rename(dir, file) fails with ENOTDIR by itself, but on Windows Node's
+    // rename silently REPLACES an existing file with the folder — the user's
+    // file would be deleted and the "never a half-switch" contract broken.
+    // Throwing here takes the degraded path below: stage removed, ~/.pulse used.
+    let blocker = null;
+    try { blocker = fs.lstatSync(next); } catch (e) { if (!e || e.code !== 'ENOENT') throw e; }
+    if (blocker && !blocker.isDirectory()) {
+      throw Object.assign(new Error(next + ' already exists and is not a folder'), { code: 'EEXIST' });
+    }
     renameWithRetry(stage, next);
     try { fs.unlinkSync(path.join(next, STAGE_SENTINEL)); } catch (_) {}
     adoptHome(next);
@@ -1463,13 +1474,41 @@ function customSourceNames() { return new Set(customSourcesConfig().map((s) => s
 // One source's files: the configured path itself when it's a file (any
 // extension — the config names it explicitly), else every *.jsonl under the
 // directory. A missing path yields [] — the harness just hasn't logged yet.
+// Paths come back path.resolve'd — the same absolute, native-separator form
+// walkJsonl builds for the builtin roots — so one file is never cached (or
+// dispatched) under two spellings of its name.
 function customSourceFiles(src) {
+  const p = path.resolve(src.path);
   try {
-    const st = fs.statSync(src.path);
-    if (st.isDirectory()) return walkJsonl(src.path);
-    if (st.isFile()) return [src.path];
+    const st = fs.statSync(p);
+    if (st.isDirectory()) return walkJsonl(p);
+    if (st.isFile()) return [p];
   } catch (_) { /* not created yet */ }
   return [];
+}
+// "Is this the same file?" key for the builtin-overlap guard and custom-vs-
+// custom dedup in parseAll. A raw string compare is not enough on Windows:
+// paths there are case-insensitive and accept / or \, so a config path like
+// C:/Users/x/.CLAUDE/projects/a.jsonl names the very file auto-discovery holds
+// as C:\Users\x\.claude\projects\a.jsonl. Case is folded ONLY on win32 —
+// Linux filesystems are case-sensitive, so folding there could refuse a
+// genuinely different file.
+function customPathKey(f) {
+  const r = path.resolve(f);
+  return process.platform === 'win32' ? r.toLowerCase() : r;
+}
+// Every key a custom file is known by: its resolved spelling plus, when it
+// differs, its real path (a symlink / junction / 8.3 short name pointing at a
+// builtin file). Only custom files pay the realpath — the builtin side is the
+// form walkJsonl built from the discovery roots, which is what those files
+// are cached and sealed under.
+function customFileKeys(f) {
+  const keys = [customPathKey(f)];
+  try {
+    const real = customPathKey((fs.realpathSync.native || fs.realpathSync)(f));
+    if (real !== keys[0]) keys.push(real);
+  } catch (_) { /* vanished between walk and here — the resolved key stands */ }
+  return keys;
 }
 // Display metadata for custom sources: { key: { label } }, only where the
 // label differs from the raw key (the UI falls back to the key otherwise).
@@ -2896,19 +2935,31 @@ function parseAll() {
   // source: the builtin identity is what past days were sealed under, so
   // re-sourcing it would double-count against the archive. Warn once so a
   // custom source that silently stays empty is diagnosable.
-  const builtinClaimed = new Set(claudeFiles.concat(codexFiles, geminiFiles, continueFiles, clineFiles, rooFiles, antigravityFiles));
-  const customByFile = new Map();
-  for (const src of customSourcesConfig()) {
+  // Compared by customPathKey, not raw string (see there: on Windows the same
+  // file has many spellings). The key set is only built when custom sources
+  // exist, so the common no-custom build pays nothing extra.
+  const customSrcs = customSourcesConfig();
+  const builtinClaimed = customSrcs.length
+    ? new Set(claudeFiles.concat(codexFiles, geminiFiles, continueFiles, clineFiles, rooFiles, antigravityFiles).map(customPathKey))
+    : new Set();
+  const customByFile = new Map(); // resolved path → src (first source wins)
+  const customClaimed = new Set(); // customPathKeys already taken by a custom source
+  for (const src of customSrcs) {
     for (const f of customSourceFiles(src)) {
-      if (builtinClaimed.has(f)) {
-        const k = 'overlap:' + f;
+      const keys = customFileKeys(f);
+      if (keys.some((k) => builtinClaimed.has(k))) {
+        const k = 'overlap:' + src.name + ':' + keys[0]; // per row: each offender is diagnosable
         if (!customSourceWarned.has(k)) {
           customSourceWarned.add(k);
           console.warn(`[burnglass] customSources: "${src.name}" points at ${f}, which another source already ingests — ignored (custom sources must have their own log files)`);
         }
         continue;
       }
-      if (!customByFile.has(f)) customByFile.set(f, src);
+      // Two custom rows naming one file in different spellings must not parse
+      // it twice (double count + two fileCache entries) — first row wins.
+      if (keys.some((k) => customClaimed.has(k))) continue;
+      for (const k of keys) customClaimed.add(k);
+      customByFile.set(f, src);
     }
   }
   const customFiles = Array.from(customByFile.keys());

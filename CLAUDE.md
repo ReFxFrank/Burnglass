@@ -534,6 +534,29 @@ only: `BURNGLASS_EXE_ICON=0` (make-exe skips the Windows icon stamping).
   after the rise — watch for that). rc.3 OpenUsage removal: a start with
   `"openusage": true` + a real OpenUsageTray.exe launches and logs nothing;
   the System grid shows 7 Windows rows with Desktop alerts spanning the row.
+- **Windows (Git Bash) rules — every suite must keep to its temp dir there.**
+  Node's `os.homedir()` on Windows reads `USERPROFILE` and IGNORES `HOME`, and
+  .NET's `Environment.GetFolderPath(UserProfile)` ignores both — so a suite that
+  only fakes `HOME` silently runs against the developer's REAL `~/.burnglass`
+  (a 2026-11 run overwrote a real `strip-web` this way). Wherever a suite sets
+  `HOME=`, also set `USERPROFILE` (native form via `cygpath -w`) and, if the
+  code reads them, `APPDATA`/`LOCALAPPDATA`/`TMP`/`TEMP`; unset inherited
+  `BURNGLASS_*` overrides (envv reads them before `PULSE_*`); and guard with
+  `node -p "require('os').homedir()"` before starting a server, failing
+  closed. The packaging harness swaps AppPaths' profile lookup for
+  `BURNGLASS_TEST_PROFILE` in the cut step and refuses to run outside it.
+  Other Windows facts the suites now handle: a refused loopback connect takes
+  ~2 s (`curl --max-time 1` → rc 28 is NOT "port in use"); `$`/`$!` are MSYS
+  pids, not Windows pids (use a node keeper's `process.pid`); NTFS has no POSIX
+  modes; `ln -s` copies unless `MSYS=winsymlinks:nativestrict` (folders can use
+  `mklink /J`); captured .NET stdout needs UTF-8 + `
+` (`Console.SetOut`).
+  Compare paths in ONE form (`cygpath`/`path.resolve`) — Git Bash rewrites
+  POSIX paths in env vars and args to `C:/…`. Windows-only behaviour must be
+  gated (`uname -s` MINGW*/MSYS*/CYGWIN*, or `process.platform`), never by
+  weakening a POSIX assertion. Verify containment on a dev box by snapshotting
+  `~/.burnglass`, `~/.pulse`, `%TEMP%urnglass-strip`, the install dir,
+  shortcuts and `HKCU…Run` before/after a run.
 - For risky/major features: adversarial review (independent finder lenses →
   verify each finding against the real code) has repeatedly found real bugs —
   fix confirmed findings before release.
