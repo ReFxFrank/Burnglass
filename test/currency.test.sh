@@ -148,7 +148,10 @@ curl -s "http://127.0.0.1:$MOCK/mode?m=ok" >/dev/null
 H4=$TMP/h4; mkdir -p "$H4"
 echo '{"currency":"EUR","budget":125,"budgetCurrency":"EUR","budgetAmount":100}' > "$H4/config.json"
 N=$(count)
-SUMOUT=$(CLAUDE_DIR=$CL PULSE_HOME=$H4 PULSE_FX_API=$FX NO_COLOR=1 node "$ROOT/server.js" --summary)
+# PORT=1: with no server.json in $H4, --summary falls back to the default port
+# (4747) — a real Burnglass running on this machine would answer with its own
+# data. Nothing listens on port 1, so the command computes in-process.
+SUMOUT=$(CLAUDE_DIR=$CL PULSE_HOME=$H4 PULSE_FX_API=$FX NO_COLOR=1 PORT=1 node "$ROOT/server.js" --summary)
 ok "$([ "$(count)" = "$N" ] && echo 1)" "I: --summary without a server makes no rate request"
 ok "$(echo "$SUMOUT" | grep -q '30 days *\$3.00' && echo 1)" "I: ...and shows USD when it has no rates"
 node -e '

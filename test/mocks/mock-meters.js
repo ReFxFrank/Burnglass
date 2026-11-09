@@ -28,6 +28,7 @@ function okBody() {
     tangelo: { utilization: 42, resets_at: new Date(Date.now() + 3 * 86400e3).toISOString() },
     // A documented newer key gets a proper label
     seven_day_cowork: { utilization: 10, resets_at: new Date(Date.now() + 3 * 86400e3).toISOString() },
+    seven_day_oauth_apps: { utilization: 12, resets_at: new Date(Date.now() + 3 * 86400e3).toISOString() },
     limits: [
       // the real thing: per-model weekly window
       { kind: 'weekly_scoped', group: 'g', percent: 76, resets_at: new Date(Date.now() + 3 * 86400e3).toISOString(),
@@ -37,8 +38,13 @@ function okBody() {
         scope: { model: { display_name: 'Opus' } } },
       // wrong kind — ignore
       { kind: 'five_hour', group: 'g', percent: 34, resets_at: null, scope: { model: { display_name: 'Nope' } } },
-      // surface-scoped, no model — ignore
+      // surface-scoped duplicate of the legacy seven_day_oauth_apps key — deduped
       { kind: 'weekly_scoped', group: 'g', percent: 12, resets_at: null, scope: { surface: { display_name: 'apps' } } },
+      // surface-scoped window with no legacy key (e.g. a Claude Duet allowance) — rendered
+      { kind: 'weekly_scoped', group: 'g', percent: 41, resets_at: new Date(Date.now() + 3 * 86400e3).toISOString(),
+        scope: { surface: { display_name: 'Duet' } } },
+      // surface-scoped window at 0% with no reset — an unused allowance, hidden
+      { kind: 'weekly_scoped', group: 'g', percent: 0, resets_at: null, scope: { surface: { display_name: 'Idlesurface' } } },
       // malformed — ignore
       { kind: 'weekly_scoped', percent: 'NaN', scope: { model: { display_name: 'Broken' } } },
       null,

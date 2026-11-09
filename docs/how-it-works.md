@@ -82,9 +82,13 @@ entry's own date. The rates live in three commented tables near the top of `serv
 **Claude:**
 
 - cache writes cost ×1.25 (5-minute) or ×2.0 (1-hour) of the input rate;
-- cache reads cost ×0.1, or ×0.05 for Opus 5.5 and ×0.025 for Fable / Mythos 5.1;
-- fast mode has its own rates on the models that offer it (Opus 5.5, Opus 5 and Opus 4.8),
-  applied only when the entry records `speed: "fast"`;
+- cache reads cost ×0.1, or ×0.05 for Opus 5.5 and Sonnet 5.5 (Sonnet 5.5 from 2026-10-07;
+  ×0.1 before) and ×0.025 for Fable / Mythos 5.1 and 5.2;
+- Haiku 5.5 is priced by prompt length: a request whose prompt (input plus cache reads and
+  writes) is over 100,000 tokens costs $0.50 / $2.50 instead of $0.10 / $0.50, for every
+  token type;
+- fast mode has its own rates on the models that offer it (Fable / Mythos 5.2, Opus 5.5,
+  Opus 5 and Opus 4.8), applied only when the entry records `speed: "fast"`;
 - US-only inference (`inference_geo: "us"`) costs ×1.1;
 - web searches are $10 per 1,000.
 

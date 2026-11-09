@@ -1,7 +1,30 @@
 # Changelog
 
-## Unreleased
+## v2.3.0 — New Claude models, Claude Duet, and Antigravity
 
+- **New Claude models priced.** **Fable 5.2** and **Mythos 5.2** ($8/$40, cache reads
+  $0.20 per million, fast mode $16/$80) and **Haiku 5.5** ($0.10/$0.50) now have their
+  own rows. Until now Fable 5.2 borrowed Fable 5's $10/$50 with a warning, and Haiku 5.5
+  fell to the $3/$15 default, which overstated it about 30× (6× for prompts over 100,000
+  tokens).
+- **Haiku 5.5's long-prompt price.** A request whose prompt is over 100,000 tokens
+  (cached reads and cache writes count toward it) is billed at $0.50/$2.50, every token
+  type included, the way Anthropic bills it. Each request is judged on its own.
+- **Sonnet 5.5's cheaper cache reads.** Anthropic halved them to $0.10 per million on
+  October 7, 2026. Usage from that day on is priced at the new rate; earlier usage keeps
+  the $0.20 it was billed at. The announcement gives no time of day, so the change
+  starts at midnight UTC.
+- **Which past days are re-priced.** Every day still in your Claude Code logs picks up
+  these prices. A day whose logs Claude Code has already pruned (after about 30 days)
+  keeps the cost it was archived with, because the archive keeps no token counts to
+  re-price from.
+- **Claude Duet in the limits.** Claude Duet runs entirely in Anthropic's cloud, with no
+  log on your computer and no API, so its tokens can't be priced. Its usage, background
+  checks included, draws on the same 5-hour and weekly limits, so it's already in your
+  account meters, and their info text now says so. If Anthropic reports a separate Duet
+  allowance, it shows as its own **Claude · weekly · Duet** row: the meters now read
+  limits scoped to a product as well as to a model. A product allowance at 0% with no
+  reset time is hidden until it carries usage.
 - **Antigravity as a source (zero setup).** Burnglass now reads Google Antigravity's
   conversations from `~/.gemini/antigravity/conversations/`: every model call with its
   input, cached input and output tokens, the model Antigravity used (Claude, Gemini or

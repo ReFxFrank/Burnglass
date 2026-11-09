@@ -229,7 +229,7 @@ export function CodexTokens({ cxu, hasCodexRows }) {
 }
 
 // ---- the panel -------------------------------------------------------------------------
-const LIMITS_INFO = 'Official 5-hour and weekly utilisation, not estimates. Claude (opt-in): Anthropic’s own account meter — unified across claude.ai, cloud sessions and every device — read from api.anthropic.com with your existing Claude Code login, read-only. Codex: the rate-limit snapshot your newest local Codex rollout recorded; nothing leaves your machine, but it is only as fresh as your last Codex turn.';
+const LIMITS_INFO = 'Official 5-hour and weekly utilisation, not estimates. Claude (opt-in): Anthropic’s own account meter — unified across claude.ai, Claude Duet, cloud sessions and every device — read from api.anthropic.com with your existing Claude Code login, read-only. Claude Duet runs entirely in Anthropic’s cloud and shares these 5-hour and weekly limits (its background checks included), so its usage shows up here — and as its own row if Anthropic reports a Duet allowance — but never in the dollar estimates, which come from local logs. Codex: the rate-limit snapshot your newest local Codex rollout recorded; nothing leaves your machine, but it is only as fresh as your last Codex turn.';
 
 // ---- why rate-limited: the usage-check journal + other pollers --------------------
 // payload.meters.checks (every check Burnglass made: result, the wait Anthropic

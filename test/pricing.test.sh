@@ -115,6 +115,37 @@ lines.push({ type: "assistant", timestamp: "2026-05-15T12:00:00.000Z",
 lines.push({ type: "assistant", timestamp: "2026-06-15T12:00:00.000Z",
   sessionId: "o5-s", requestId: "ro2", cwd: "/p",
   message: { id: "mo2", model: "claude-opus-5", usage: { input_tokens: 1000000, output_tokens: 1000000, speed: "fast" } } });
+// v2.3 lineup, all in October 2026 so the September totals above are untouched.
+const O = (ts, id, model, usage) => ({ type: "assistant", timestamp: ts,
+  sessionId: "oct-" + id, requestId: "roct" + id, cwd: "/p", message: { id: "moct" + id, model, usage } });
+const IOR = { input_tokens: 1000000, output_tokens: 1000000, cache_read_input_tokens: 1000000 };
+// Sonnet 5.5 cache reads halved 2026-10-07 (0.1x -> 0.05x, not retroactive).
+// The two sides carry DIFFERENT read volumes so every wrong direction differs:
+//   Oct 3: 1M reads 2+10 + 2*0.10 = 12.2   Oct 8: 2M reads 2+10 + 4*0.05 = 12.2   -> 24.4
+//   (reversed step 24.5, all-0.1x as before 24.6, retroactive all-0.05x 24.3)
+lines.push(O("2026-10-03T12:00:00.000Z", 1, "claude-sonnet-5-5", IOR));
+lines.push(O("2026-10-08T12:00:00.000Z", 2, "claude-sonnet-5-5", { ...IOR, cache_read_input_tokens: 2000000 }));
+// A dated Fable 5 id (Vertex: claude-fable-5@20260615) must price as Fable 5
+// (10/50 = 60), SILENTLY — the longer claude-fable-5-2 key must not capture
+// the "-2026…" date stamp (it would bill 8/40 = 48 and warn).
+lines.push(O("2026-10-11T12:00:00.000Z", 9, "claude-fable-5@20260615", { input_tokens: 1000000, output_tokens: 1000000 }));
+// Fable 5.2: 8+40 + 8*0.025 = 48.2, plus a fast 1M+1M at 16/80 = 96 -> 144.2
+// (fast premium 96 - 48 = 48). Mythos 5.2 = its twin: 48.2.
+lines.push(O("2026-10-10T12:00:00.000Z", 3, "claude-fable-5-2", IOR));
+lines.push(O("2026-10-10T13:00:00.000Z", 4, "claude-fable-5-2", { input_tokens: 1000000, output_tokens: 1000000, speed: "fast" }));
+lines.push(O("2026-10-10T14:00:00.000Z", 5, "claude-mythos-5-2", IOR));
+// Haiku 5.5 prompt-length tiering (prompt = input + cache reads + writes):
+//   50K in + 1M out (short)            0.05*0.1 + 0.5          = 0.505
+//   exactly 100K in (NOT over)         0.1*0.1                 = 0.01
+//   60K in + 60K read = 120K (over)    0.06*0.5 + 0.06*0.5*0.1 = 0.033
+//   60K in + 50K 5m write = 110K (over, ONLY through the write)
+//                                      0.06*0.5 + 0.05*0.5*1.25 = 0.06125   -> 0.60925
+//   (writes not counted: 0.006 + 0.05*0.1*1.25 = 0.01225 -> 0.56025)
+lines.push(O("2026-10-12T12:00:00.000Z", 6, "claude-haiku-5-5", { input_tokens: 50000, output_tokens: 1000000 }));
+lines.push(O("2026-10-12T13:00:00.000Z", 7, "claude-haiku-5-5", { input_tokens: 100000, output_tokens: 0 }));
+lines.push(O("2026-10-12T14:00:00.000Z", 8, "claude-haiku-5-5", { input_tokens: 60000, output_tokens: 0, cache_read_input_tokens: 60000 }));
+lines.push(O("2026-10-12T15:00:00.000Z", 10, "claude-haiku-5-5", { input_tokens: 60000, output_tokens: 0,
+  cache_creation: { ephemeral_5m_input_tokens: 50000, ephemeral_1h_input_tokens: 0 } }));
 fs.writeFileSync(process.argv[1] + "/projects/glm/s.jsonl",
   lines.map(JSON.stringify).join("\n") + "\n");
 ' "$CL"
@@ -317,9 +348,24 @@ const o5std = (mon("2026-05").byModel || {})["claude-opus-5"];
 const o5fast = (mon("2026-06").byModel || {})["claude-opus-5"];
 ok(o5std && Math.abs(o5std.cost - 30) < 0.005, "opus-5 standard at 5/25 = 30 (got " + (o5std ? o5std.cost.toFixed(2) : "missing") + ")");
 ok(o5fast && Math.abs(o5fast.cost - 60) < 0.005, "opus-5 fast mode at 10/50 = 60 (got " + (o5fast ? o5fast.cost.toFixed(2) : "missing") + ")");
+// v2.3: Fable/Mythos 5.2, Haiku 5.5 tiers, the dated Sonnet 5.5 read cut.
+const octM = mon("2026-10");
+for (const [m, want, why] of [
+  ["claude-sonnet-5-5", 24.4, "0.1x reads before 2026-10-07 (1M: 12.2) + 0.05x after (2M: 12.2)"],
+  ["claude-fable-5@20260615", 60, "a dated Fable 5 id prices as Fable 5, not Fable 5.2"],
+  ["claude-fable-5-2", 144.2, "8/40 + 0.025x read (48.2) + fast 16/80 (96)"],
+  ["claude-mythos-5-2", 48.2, "Fable 5.2 twin: 8/40 + 0.025x read"],
+  ["claude-haiku-5-5", 0.60925, "short 0.505 + exactly-100K base 0.01 + 120K-with-reads 0.033 + 110K-with-writes 0.06125"],
+]) {
+  const r = (octM.byModel || {})[m];
+  ok(r && Math.abs(r.cost - want) < 0.00005, m + " = $" + want + ": " + why + " (got " + (r ? r.cost.toFixed(4) : "missing") + ")");
+}
+const ofp = octM.speedSpend && octM.speedSpend.fastPremium;
+ok(typeof ofp === "number" && Math.abs(ofp - 48) < 0.005, "October fast premium = Fable 5.2 fast 96 - standard 48 = 48 (got " + ofp + ")");
 // The ONLY unknown-model warnings allowed are the two deliberate guard cases
 // — the guard must be VISIBLE (warn), every listed model must price silently.
 const unk = log.split("\n").filter((l) => /unknown model/.test(l));
+ok(!unk.some((l) => /fable-5-2|mythos-5-2|haiku-5-5|fable-5@/.test(l)), "fable-5-2 / mythos-5-2 / haiku-5-5 / dated fable-5 price silently (own rows)");
 const deliberate = /gemini-3\.5-flash-lite|gemini-2\.5-flash-preview-tts|claude-sonnet-5-6/;
 ok(unk.length === 3 && unk.every((l) => deliberate.test(l)),
    "exactly the three deliberate unknown-model warnings, nothing else (got " + unk.length + ": " + unk.join(" | ") + ")");

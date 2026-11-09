@@ -51,7 +51,7 @@ const crypto = require('crypto');
 
 // Version — keep in sync with package.json (build/make-exe.mjs enforces this).
 // The constant keeps its v1 NAME: make-exe's drift check greps for it.
-const PULSE_VERSION = '2.2.0';
+const PULSE_VERSION = '2.3.0';
 const BRAND = 'Burnglass';
 
 // BURNGLASS_<NAME> wins; PULSE_<NAME> (the v1 spelling) stays a permanent,
@@ -610,18 +610,29 @@ const PRICING = {
   // Current generation.
   // fastInput/fastOutput = the fast-mode premium (Claude Code's `/fast`, API
   // `speed: "fast"`), applied per-entry when the transcript records
-  // usage.speed === 'fast'. Only Opus 5.5 ($8/$40), Opus 5 and Opus 4.8
-  // ($10/$50) have fast mode: 4.7 rejects the flag and 4.6 runs standard and
-  // bills standard, so neither carries a fast row. Cache multipliers stack on top of the fast rate,
-  // which falls out of pricing cache tokens off price.input (per the docs).
+  // usage.speed === 'fast'. Fast mode exists on Fable/Mythos 5.2 ($16/$80),
+  // Opus 5.5 ($8/$40), Opus 5 and Opus 4.8 ($10/$50; 4.8's ends 2026-11-30 —
+  // earlier fast entries keep their premium): 4.7 rejects the flag and 4.6
+  // runs standard and bills standard, so neither carries a fast row. Cache
+  // multipliers stack on top of the fast rate, which falls out of pricing
+  // cache tokens off price.input (per the docs).
   // cacheReadMult = per-row cache-READ multiplier when a model departs from the
-  // standard 0.10×: Fable 5.1 / Mythos 5.1 bill cache reads at $0.25/M (0.025×),
-  // Opus 5.5 at $0.20/M (0.05×).
+  // standard 0.10×: Fable/Mythos 5.1 + 5.2 bill cache reads at 0.025× ($0.25/M
+  // and $0.20/M), Opus 5.5 and Sonnet 5.5 at 0.05× ($0.20/M and $0.10/M).
+  // longContext = prompt-length tiering (Haiku 5.5): a request whose prompt —
+  // input + cache reads + cache writes — is OVER `over` tokens bills every
+  // category at the higher input/output (cache rates scale off input).
+  // Per-request, so applied per entry (claudePromptTokens).
   // Mythos = the Glasswing-only twins of Fable (same list price). Mythos
   // Preview (deprecated → Mythos 5) is priced per Anthropic's Project Glasswing
   // page: $25/$125 — its cache multipliers were never published (standard
   // 1.25×/2×/0.1× assumed). Explicit keys only: an unknown future mythos id
   // must still LOG rather than silently take a guessed rate.
+  // Fable 5.2 / Mythos 5.2: $8/$40, 0.025× reads ($0.20/M), writes $10/$16
+  // (the standard 1.25×/2×), fast mode $16/$80. Verified 2026-11-09 against
+  // platform.claude.com pricing + fast-mode pages.
+  'claude-fable-5-2':  { input: 8,  output: 40, cacheReadMult: 0.025, fastInput: 16, fastOutput: 80 },
+  'claude-mythos-5-2': { input: 8,  output: 40, cacheReadMult: 0.025, fastInput: 16, fastOutput: 80 },
   'claude-fable-5-1':  { input: 10, output: 50, cacheReadMult: 0.025 },
   'claude-mythos-5-1': { input: 10, output: 50, cacheReadMult: 0.025 },
   'claude-fable-5':    { input: 10, output: 50 },
@@ -641,13 +652,21 @@ const PRICING = {
   // $3/$15 step-up never happened), so the row is plain. priceFor still
   // honours intro* fields for any future time-limited launch price.
   // Sonnet 5.5 (2026-09-28; Claude Code's default Sonnet since 2.1.284): the
-  // same prices as Sonnet 5 incl. the standard 1.25x/2x/0.1x cache ($2.50 /
-  // $4 / $0.20), no fast mode, no intro price. Verified 2026-09-29 against
-  // platform.claude.com pricing + the sonnet-5-5 model page.
-  'claude-sonnet-5-5': { input: 2,  output: 10 },
+  // same prices as Sonnet 5 ($2/$10, writes $2.50 / $4), no fast mode, no
+  // intro price. Cache reads launched at the standard 0.1× ($0.20/M); on
+  // 2026-10-07 Anthropic halved them to 0.05× ($0.10/M), not retroactively —
+  // hence the dated step. The announcement gives the day but no time, so the
+  // step starts at 00:00 UTC (a few hours either way, reads only). Verified
+  // 2026-11-09 against platform.claude.com pricing.
+  'claude-sonnet-5-5': { input: 2,  output: 10, cacheReadMult: 0.05,
+    history: [{ untilMs: Date.parse('2026-10-07T00:00:00Z'), cacheReadMult: 0.1 }] },
   'claude-sonnet-5':   { input: 2,  output: 10 },
   'claude-sonnet-4-6': { input: 3,  output: 15 },
   'claude-sonnet-4-5': { input: 3,  output: 15 },
+  // Haiku 5.5: $0.10/$0.50 for prompts up to 100,000 tokens, $0.50/$2.50 over
+  // (the threshold counts cache reads + writes too; each request on its own).
+  // Standard cache multipliers on both tiers. Verified 2026-11-09.
+  'claude-haiku-5-5':  { input: 0.1, output: 0.5, longContext: { over: 100000, input: 0.5, output: 2.5 } },
   'claude-haiku-4-5':  { input: 1,  output: 5 },
 
   // Older strings that still appear in real history
@@ -768,15 +787,28 @@ function canonicalClaudeModel(model) {
     .replace(/-v\d+(?::\d+)?$/, '')
     .replace(/@(\d{8})$/, '-$1');
 }
-function priceFor(model, ts, speed, listPrice) {
+// Prompt length of one Claude-path entry as Anthropic's long-context tiering
+// counts it: every input token, cached or not.
+function claudePromptTokens(e) {
+  return (e.inputTokens || 0) + (e.cacheRead || 0) + (e.cacheWrite5m || 0) + (e.cacheWrite1h || 0);
+}
+// promptTokens (optional) selects a row's `longContext` tier; callers without
+// an entry (the list-price view) get the base tier.
+function priceFor(model, ts, speed, listPrice, promptTokens) {
   const m = canonicalClaudeModel(model);
   let p = PRICING[m];
   if (!p && m) {
     // Dated / suffixed variants (e.g. claude-haiku-4-5-20251001) price as their
-    // base model: longest PRICING key that prefixes the model string wins.
+    // base model: longest PRICING key that prefixes the model string wins. A
+    // key never matches part-way through a NUMBER: every date stamp starts
+    // with "2", so without that rule claude-fable-5-2 would capture a dated
+    // Fable 5 id (claude-fable-5-20260615, e.g. Vertex's claude-fable-5@…) and
+    // bill it at Fable 5.2's rate — and likewise claude-opus-4-1 a "-4-10".
     let best = '';
     for (const key of Object.keys(PRICING)) {
-      if (key !== '__default__' && m.startsWith(key) && key.length > best.length) best = key;
+      if (key === '__default__' || !m.startsWith(key) || key.length <= best.length) continue;
+      if (/\d/.test(key[key.length - 1]) && /\d/.test(m[key.length] || '')) continue;
+      best = key;
     }
     if (best) p = PRICING[best];
     // A claude-* id whose remainder is not a date stamp (or "-latest") is a
@@ -805,9 +837,13 @@ function priceFor(model, ts, speed, listPrice) {
   const cacheWriteMult = p.cacheWriteMult != null ? p.cacheWriteMult : null;
   const webSearchPer1k = p.webSearchPer1k != null ? p.webSearchPer1k : WEB_SEARCH_PER_1K;
   // Fast mode is a per-request premium, so it wins over the (model-level)
-  // introductory price — no current model carries both.
+  // introductory price — no current model carries both. Fast pricing applies
+  // across the full context window, so it also wins over a long-context tier.
   if (speed === 'fast' && p.fastInput != null) {
     return { input: p.fastInput, output: p.fastOutput, cacheReadMult, cacheWriteMult, webSearchPer1k };
+  }
+  if (p.longContext && promptTokens > p.longContext.over) {
+    return { input: p.longContext.input, output: p.longContext.output, cacheReadMult, cacheWriteMult, webSearchPer1k };
   }
   if (p.introUntil && localDateStr(ts) <= p.introUntil) {
     return { input: p.introInput, output: p.introOutput, cacheReadMult, cacheWriteMult, webSearchPer1k };
@@ -849,7 +885,7 @@ function costForEntry(e) {
       (e.cacheRead    / 1e6) * cachedPrice
     );
   }
-  const price = priceFor(e.model, e.ts, e.speed);
+  const price = priceFor(e.model, e.ts, e.speed, false, claudePromptTokens(e));
   return claudeTokenCost(e, price) + (e.webSearches / 1000) * price.webSearchPer1k;
 }
 
@@ -888,7 +924,7 @@ function cacheEconomicsForEntry(e) {
     // denominator with tokens that contributed $0 of the savings above it.
     return { read: p.input > 0 ? read : 0, saved: (read / 1e6) * (p.input - cached) * im * fm, writePremium: wp };
   }
-  const price = priceFor(e.model, e.ts, e.speed);
+  const price = priceFor(e.model, e.ts, e.speed, false, claudePromptTokens(e));
   const geo = e.geoUs ? INFERENCE_GEO_US_MULT : 1; // the surcharge scales savings and premiums alike
   const [w5, w1] = claudeWriteMults(price);
   return {
@@ -908,7 +944,7 @@ function cacheEconomicsForEntry(e) {
 // table, forced to standard.
 function standardCostForEntry(e) {
   if (e.provider === 'openai') return openaiTokenCost(e, priceForOpenAI(e.model, e.ts), 'standard');
-  const price = priceFor(e.model, e.ts, 'standard');
+  const price = priceFor(e.model, e.ts, 'standard', false, claudePromptTokens(e));
   return claudeTokenCost(e, price) + (e.webSearches / 1000) * price.webSearchPer1k;
 }
 
@@ -5556,12 +5592,20 @@ function refreshAccountMeters(done, trigger) {
     }
     // Newer accounts report per-model weekly windows (the /usage panel's
     // "Weekly · Fable" row) in a limits[] array — kind "weekly_scoped" with
-    // scope.model.display_name — not as dedicated seven_day_* keys.
+    // scope.model.display_name — not as dedicated seven_day_* keys. The same
+    // array can scope a window to a product SURFACE instead
+    // (scope.surface.display_name — e.g. "apps", or a Claude Duet allowance);
+    // those render the same way, keyed surface_scoped:*. Claude Duet has no
+    // local log and no API, so a surface row is the only Duet-specific number
+    // Burnglass can ever show; otherwise its usage lives inside the shared
+    // 5-hour / weekly windows. A surface row that duplicates a legacy key
+    // ("apps" vs seven_day_oauth_apps) is deduped by label like a model row.
     if (Array.isArray(j.limits)) {
       for (const lim of j.limits) {
         if (!lim || typeof lim !== 'object' || lim.kind !== 'weekly_scoped') continue;
-        const name = lim.scope && lim.scope.model && typeof lim.scope.model.display_name === 'string'
-          ? lim.scope.model.display_name.trim() : '';
+        const scopeName = (s) => (s && typeof s.display_name === 'string' ? s.display_name.trim() : '');
+        const modelName = scopeName(lim.scope && lim.scope.model);
+        const name = modelName || scopeName(lim.scope && lim.scope.surface);
         if (!name || typeof lim.percent !== 'number' || !isFinite(lim.percent)) continue;
         const pct = lim.percent; // "Share of the window used, 0-100" — same scale as utilization
         let resetsAt = null;
@@ -5573,7 +5617,13 @@ function refreshAccountMeters(done, trigger) {
         const label = 'Claude · weekly · ' + name;
         // Skip if a legacy key already produced this row (e.g. seven_day_opus).
         if (buckets.some((b) => b.label.toLowerCase() === label.toLowerCase())) continue;
-        buckets.push({ key: 'model_scoped:' + name.toLowerCase(), label, pct: Math.max(0, Math.min(100, pct)), resetsAt });
+        // A surface window at 0% with no reset is an allowance that is not in
+        // use (the same rule that hides undisclosed top-level keys): rendering
+        // it would pin an empty, never-resetting bar on the card. It appears
+        // as soon as it carries usage or a reset time.
+        if (!modelName && pct <= 0 && resetsAt == null) continue;
+        const kind = modelName ? 'model_scoped:' : 'surface_scoped:';
+        buckets.push({ key: kind + name.toLowerCase(), label, pct: Math.max(0, Math.min(100, pct)), resetsAt });
       }
     }
     // Stable, meaningful order: 5h, then overall weekly, then scoped windows.

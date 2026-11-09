@@ -101,8 +101,16 @@ if (m && m.buckets) {
      "an undisclosed bucket WITH usage still shows (label=" + (tang && tang.label) + " pct=" + (tang && tang.pct) + ")");
   const cw = m.buckets.find((b) => b.key === "seven_day_cowork");
   ok(cw && cw.label === "Claude · weekly · Cowork", "seven_day_cowork labelled (got " + (cw && cw.label) + ")");
-  ok(!m.buckets.some((b) => /Nope|apps|Broken/i.test(b.label)),
-     "wrong-kind / surface-scoped / malformed limits entries ignored");
+  ok(!m.buckets.some((b) => /Nope|Broken/i.test(b.label)),
+     "wrong-kind / malformed limits entries ignored");
+  // surface-scoped weekly windows (scope.surface — e.g. a Claude Duet allowance)
+  const duet = m.buckets.find((b) => b.key === "surface_scoped:duet");
+  ok(duet && duet.pct === 41 && duet.label === "Claude · weekly · Duet" && duet.resetsAt > Date.now(),
+     "surface-scoped Duet row from limits[] (label=" + (duet && duet.label) + " pct=" + (duet && duet.pct) + ")");
+  const appsRows = m.buckets.filter((b) => /weekly · apps/i.test(b.label));
+  ok(appsRows.length === 1 && appsRows[0].key === "seven_day_oauth_apps",
+     "surface-scoped apps deduped against legacy seven_day_oauth_apps (" + appsRows.length + " row)");
+  ok(!m.buckets.some((b) => /idlesurface/i.test(b.key)), "a surface window at 0% with no reset stays hidden");
   ok(m.buckets[0].key === "five_hour" && m.buckets[1].key === "seven_day",
      "order: 5h, overall weekly, then scoped [" + m.buckets.map((b) => b.key).join(", ") + "]");
 }
