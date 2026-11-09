@@ -4409,6 +4409,7 @@ function computeAlerts(meters, codexMeters) {
   const out = [];
   const consider = (b, provider) => {
     if (!b || typeof b.pct !== 'number' || b.stale) return;
+    if (typeof b.key === 'string' && b.key.startsWith(METER_SHARE_PREFIX)) return; // a slice, not a limit
     // A window that's already maxed out isn't one you're *approaching* — you've
     // hit it. Drop it from the warning banner (and its notifications) so a
     // reached limit doesn't sit stacked next to genuinely-approaching windows.
@@ -5499,6 +5500,23 @@ function parseMeterBucket(key, v) {
   return { key, label: known || 'Claude · ' + key.replace(/_/g, ' '), pct: Math.max(0, Math.min(100, pct)), resetsAt };
 }
 
+// Claude Duet runs in Anthropic's cloud (no local logs) but draws on the same
+// weekly limit. The endpoint's seven_day_breakdown.rows split the weekly USAGE
+// by product — percents of what was used (they sum to 100), not of the limit —
+// so Duet's slice of the limit is its share × the weekly utilization. Shown
+// only once Duet has used something. It is a slice of the weekly window, not a
+// limit of its own, so limit alerts skip it (the weekly row already alerts).
+const METER_SHARE_PREFIX = 'weekly_share:';
+function duetShareBucket(breakdown, buckets) {
+  const rows = breakdown && Array.isArray(breakdown.rows) ? breakdown.rows : [];
+  const row = rows.find((r) => r && r.key === 'claude_duet');
+  if (!row || typeof row.percent !== 'number' || !isFinite(row.percent) || !(row.percent > 0)) return null;
+  const wk = buckets.find((b) => b.key === 'seven_day' || b.key === 'seven_day_overall');
+  if (!wk) return null;
+  const share = Math.max(0, Math.min(100, row.percent));
+  return { key: METER_SHARE_PREFIX + 'claude_duet', label: 'Claude · weekly · Duet (share)', pct: wk.pct * share / 100, resetsAt: wk.resetsAt };
+}
+
 function refreshAccountMeters(done, trigger) {
   if (!metersEnabled()) { metersState.status = 'off'; return done && done(metersState); }
   if (metersInFlight) return done && done(metersState);
@@ -5626,6 +5644,8 @@ function refreshAccountMeters(done, trigger) {
         buckets.push({ key: kind + name.toLowerCase(), label, pct: Math.max(0, Math.min(100, pct)), resetsAt });
       }
     }
+    const duet = duetShareBucket(j.seven_day_breakdown, buckets);
+    if (duet) buckets.push(duet);
     // Stable, meaningful order: 5h, then overall weekly, then scoped windows.
     const rank = (k) => (k === 'five_hour' ? 0 : k === 'seven_day' || k === 'seven_day_overall' ? 1 : 2);
     buckets.sort((a, b) => rank(a.key) - rank(b.key) || a.key.localeCompare(b.key));

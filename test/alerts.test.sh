@@ -63,6 +63,9 @@ http.createServer((q, s) => {
     limits: [ { kind: "weekly_scoped", group: "g", percent: 100,
                 resets_at: new Date(Date.now()+4*86400e3).toISOString(),
                 scope: { model: { display_name: "Fable" } } } ],
+    // Duet used 90% of the 96% week -> an 86.4% share row, a slice of the
+    // weekly window: it must NOT raise its own limit alert.
+    seven_day_breakdown: { rows: [ { key: "claude_duet", display_name: "Claude Duet", percent: 90 } ] },
   }));
 }).listen(4877, "127.0.0.1", () => console.log("mock up"));
 ' >/dev/null 2>&1 &
@@ -102,6 +105,8 @@ const by = {}; for (const a of A) by[a.key] = a;
 ok(by["claude:seven_day"] && by["claude:seven_day"].threshold === 95, "weekly 96% -> alert at threshold 95");
 ok(by["claude:five_hour"] && by["claude:five_hour"].threshold === 80, "5h 82% -> alert at threshold 80 (not 95)");
 ok(!by["claude:seven_day_opus"], "Opus 40% -> no alert (below 80)");
+const duetRow = ((require(TMP + "/def.json").meters || {}).buckets || []).find((b) => b.key === "weekly_share:claude_duet");
+ok(duetRow && Math.round(duetRow.pct) === 86 && !A.some((a) => /weekly_share/.test(a.key)), "Duet share 86% shows as a meter but raises no alert");
 ok(by["codex:codex_secondary"] && by["codex:codex_secondary"].threshold === 80 && by["codex:codex_secondary"].provider === "codex",
    "Codex weekly 90% -> alert, provider codex (" + JSON.stringify(by["codex:codex_secondary"] && {t:by["codex:codex_secondary"].threshold,p:by["codex:codex_secondary"].provider}) + ")");
 ok(/^Claude · /.test((by["claude:seven_day"]||{}).label || "") && /^Codex · /.test((by["codex:codex_secondary"]||{}).label || ""), "labels carry provider prefix");
