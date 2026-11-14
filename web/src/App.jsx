@@ -634,6 +634,7 @@ function liveStatus(data, error) {
     if (an.ultracode) parts.push('Ultracode');
     else if (an.effort) parts.push(effortLabel(an.effort));
     if (an.sessions) parts.push(an.sessions + (an.sessions === 1 ? ' session' : ' sessions'));
+    if (an.subagents) parts.push(an.subagents + (an.subagents === 1 ? ' subagent' : ' subagents'));
   }
   const stale = !!(data.latestTs && data.generatedAt - data.latestTs > 3 * 3600 * 1000);
   return { tone: 'ok', head, parts, latest: data.latestTs ? ago(data.latestTs) : null, stale };

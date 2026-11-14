@@ -1207,10 +1207,10 @@ function openaiTokenCost(e, p, speed) {
 // ---------------------------------------------------------------------------
 // GOOGLE / GEMINI PRICING
 // $/MTok at Google Gemini API list prices (ai.google.dev/gemini-api/docs/pricing),
-// July 2026. Reached via the Gemini CLI (source 'gemini'), whose logs carry the
-// real per-turn token counts. On a paid key these are actual API rates; on the
+// November 2026. Reached via the Gemini CLI (source 'gemini') and Antigravity
+// (source 'antigravity'). On a paid key these are actual API rates; on the
 // free tier they express relative usage, same caveat as the other tables.
-// Context caching bills cached input at ~10% of the input rate. Longest-prefix
+// Context caching bills cached input at ~10% of the input rate (5% on Gemini 4). Longest-prefix
 // match, but fallback is allowed ONLY for snapshot-style suffixes
 // (-preview/-latest/-exp/-thinking plus an optional date/build stamp, or a
 // bare stamp like -001). Tier and modality suffixes (-lite, -8b, -image,
@@ -1220,6 +1220,12 @@ function openaiTokenCost(e, p, speed) {
 // OpenAI table's -mini/-pro).
 // ---------------------------------------------------------------------------
 const PRICING_GOOGLE = {
+  'gemini-4-carbon':       { input: 2,    output: 10,   cachedInput: 0.10 },  // intro through 2026-11-30
+  'gemini-4-argon':        { input: 2,    output: 10,   cachedInput: 0.10 },  // intro through 2026-11-30
+  'gemini-4-hydrogen':     { input: 1.5,  output: 7.5,  cachedInput: 0.075 },
+  'gemini-3.8-flash':      { input: 0.75, output: 3.75 }, // intro through 2026-12-31
+  'gemini-3.7-flash':      { input: 0.75, output: 3.75 }, // intro through 2026-12-31
+  'gemini-3.6-flash':      { input: 0.75, output: 3.75 },
   'gemini-3-pro':          { input: 2,    output: 12 },
   'gemini-3.1-pro':        { input: 2,    output: 12 },
   'gemini-3.5-flash':      { input: 1.5,  output: 9 },
@@ -2200,9 +2206,10 @@ function parseCodexFile(filePath) {
   }
   const convSid = groupSid || sid || path.basename(filePath, '.jsonl');
   // A subagent rollout only ever signals "the session's helpers are busy".
+  const subActiveTs = isSub && (convKind === 'prompt' || convKind === 'tool_use' || convKind === 'tool_result') ? convTs : 0;
   const conv = convKind
-    ? (isSub ? { provider: 'codex', sessionId: convSid, kind: null, ts: 0, open: [], sideTs: convTs }
-      : { provider: 'codex', sessionId: convSid, kind: convKind, ts: convTs, open: Array.from(openCalls.values()), sideTs: 0 })
+    ? (isSub ? { provider: 'codex', sessionId: convSid, kind: null, ts: 0, open: [], sideTs: convTs, subActiveTs }
+      : { provider: 'codex', sessionId: convSid, kind: convKind, ts: convTs, open: Array.from(openCalls.values()), sideTs: 0, subActiveTs: 0 })
     : null;
   return { entries, sessionMeta, ultracodeSessions: [], effortEvents: [], codexRateSnapshot: rateSnapshot, conv };
 }
@@ -3040,9 +3047,11 @@ function parseAll() {
   const conv = Object.create(null);
   for (const { entries, sessionMeta: sm, ultracodeSessions: us, effortEvents: ev, codexRateSnapshot: rs, conv: c } of fileCache.values()) {
     if (c && c.sessionId) {
-      const cur = conv[c.sessionId] || (conv[c.sessionId] = { provider: c.provider, kind: null, ts: 0, open: [], sideTs: 0 });
+      const cur = conv[c.sessionId] || (conv[c.sessionId] = { provider: c.provider, kind: null, ts: 0, open: [], sideTs: 0, sideFiles: [], subFiles: [] });
       if (c.kind && c.ts >= cur.ts) { cur.kind = c.kind; cur.ts = c.ts; cur.open = c.open; cur.provider = c.provider; }
       if (c.sideTs > cur.sideTs) cur.sideTs = c.sideTs;
+      if (!c.kind && c.sideTs > 0) cur.sideFiles.push(c.sideTs);
+      if (c.subActiveTs > 0) cur.subFiles.push(c.subActiveTs);
     }
     for (const e of entries) {
       const prevIdx = globalSeen.get(e.key);
@@ -4345,6 +4354,9 @@ function buildSummary(sourceFilter, opts) {
   payload.sourceFilter = appliedFilter;
   // What the agent is doing right now (not source-scoped: it's live state).
   payload.agentState = computeAgentState(conv, now);
+  if (payload.activeNow) {
+    payload.activeNow.subagents = payload.agentState ? payload.agentState.subagents : 0;
+  }
   // Surface what Pulse is actually reading, so a wrong-directory setup (e.g.
   // Claude Code under WSL while Pulse runs in native Windows) is diagnosable.
   payload.claudeDir = claudeDir();
@@ -7109,13 +7121,32 @@ function convState(c, now) {
 const REG_BUSY_MAX_MS = Number(envv('REG_BUSY_MAX_MS')) || 6 * 60 * 60 * 1000; // env: test hook
 const REG_IDLE_MAX_MS = 24 * 60 * 60 * 1000;
 
-// → { provider, state, sessions, source } for the most urgent live session,
+// Count running subagents for one live session:
+//   - Claude: max(open Agent/Task tool_use calls on main thread, subagent files active within SIDE_ACTIVE_MS)
+//   - Codex: subagent rollouts still in an active turn within LIVE_STATE_MAX_AGE_MS
+function sessionSubagents(c, state, now) {
+  if (!c) return 0;
+  if (c.provider === 'claude') {
+    const openSubs = (state === 'working' || state === 'waiting')
+      ? (c.open || []).filter((n) => n === 'Agent' || n === 'Task').length : 0;
+    const activeSide = (c.sideFiles || []).filter((t) => now - t <= SIDE_ACTIVE_MS).length;
+    return Math.max(openSubs, activeSide);
+  }
+  if (c.provider === 'codex') {
+    return (c.subFiles || []).filter((t) => now - t <= LIVE_STATE_MAX_AGE_MS).length;
+  }
+  return 0;
+}
+
+// → { provider, state, sessions, subagents, source } for the most urgent live session,
 // or null. Ranking: waiting > working > thinking > idle.
 function computeAgentState(conv, now) {
   conv = conv || {};
   const states = [];
   const reg = claudeLiveRegistry(now);
   let trusted = 0;
+  let subagents = 0;
+  const countedSids = new Set();
   // `claude --resume` keeps the sessionId, so a crashed process's record and
   // the resumed one can share it: only the newest may borrow the transcript
   // as its sign of life, or the leftover would never age out.
@@ -7138,7 +7169,14 @@ function computeAgentState(conv, now) {
     } else if (r.status === 'idle') {
       if (now - lastSign <= REG_IDLE_MAX_MS) state = sideLive ? 'working' : 'idle';
     }
-    if (state) { trusted++; states.push({ provider: 'claude', state, source: 'claude-status' }); }
+    if (state) {
+      trusted++;
+      states.push({ provider: 'claude', state, source: 'claude-status' });
+      if (r.sessionId && !countedSids.has(r.sessionId)) {
+        subagents += sessionSubagents(c, state, now);
+        countedSids.add(r.sessionId);
+      }
+    }
   }
   // The registry is authoritative for Claude whenever it lists a trusted
   // live session: a session missing from it has exited. Otherwise (older
@@ -7148,7 +7186,13 @@ function computeAgentState(conv, now) {
     const c = conv[sid];
     if (c.provider === 'claude' && trusted) continue;
     const state = convState(c, now);
-    if (state) states.push({ provider: c.provider, state, source: 'transcript' });
+    if (state) {
+      states.push({ provider: c.provider, state, source: 'transcript' });
+      if (!countedSids.has(sid)) {
+        subagents += sessionSubagents(c, state, now);
+        countedSids.add(sid);
+      }
+    }
   }
   if (!states.length) return null;
   let best = states[0];
@@ -7158,7 +7202,7 @@ function computeAgentState(conv, now) {
     const cur = byProvider[s.provider];
     if (!cur || LIVE_STATE_RANK[s.state] > LIVE_STATE_RANK[cur]) byProvider[s.provider] = s.state;
   }
-  return { provider: best.provider, state: best.state, sessions: states.length, source: best.source, byProvider };
+  return { provider: best.provider, state: best.state, sessions: states.length, subagents, source: best.source, byProvider };
 }
 
 // Human model name for the presence line: claude-opus-5-5 → "Opus 5.5",
@@ -7355,6 +7399,7 @@ function buildDiscordActivity() {
   if (an && an.provider === prov && cfg.discordShowModel !== false) {
     const parts = [prettyModelName(an.model), an.ultracode ? 'Ultracode' : effortLabel(an.effort)];
     if (an.sessions > 0) parts.push(an.sessions + (an.sessions === 1 ? ' session' : ' sessions'));
+    if (an.subagents > 0) parts.push(an.subagents + (an.subagents === 1 ? ' subagent' : ' subagents'));
     const line = parts.filter(Boolean).join(' · ').slice(0, 128);
     if (line.length >= 2) state = line; // Discord rejects a 1-char state
   }
