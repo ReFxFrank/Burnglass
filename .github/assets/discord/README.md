@@ -48,6 +48,20 @@ None of them is built in. Codex has a single image slot (**Codex** in the dashbo
 and paste that link into the slot. Burnglass never sees a Codex session waiting on you
 (Codex doesn't log approval requests), so `codex-waiting.gif` only completes the set.
 
+## Antigravity set
+
+`antigravity-working.gif`, `antigravity-thinking.gif`, `antigravity-waiting.gif` and
+`antigravity-idle.gif` (160 px), each with a `-512.gif` copy, are pixel art drawn for
+Burnglass: a four-pointed star in the Gemini colours. It floats over a filling code bar
+while working, watches a trail of dots while thinking, waits beside an amber "!" while
+waiting on you, and sleeps with its colours dimmed while idle. Same rules and loop
+lengths as the Codex set.
+
+None of them is built in either. Antigravity has a single image slot (**Antigravity** in
+the dashboard, `discordAntigravityImage` in the config); link one the same way. Burnglass
+reads only "working" and "idle" from Antigravity, so the thinking and waiting GIFs only
+complete the set.
+
 ## Source and licence
 
 The four state GIFs are rendered from the animated SVGs in
@@ -66,4 +80,5 @@ Clawd is Anthropic's character. All the Clawd GIFs in this folder, `clawd-pixel.
 included, are unofficial fan art and are not affiliated with or endorsed by
 Anthropic.
 
-The Codex set is unofficial too and is not affiliated with or endorsed by OpenAI.
+The Codex and Antigravity sets are unofficial too and are not affiliated with or
+endorsed by OpenAI or Google.
