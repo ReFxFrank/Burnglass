@@ -1,7 +1,14 @@
 # Changelog
 
-## Unreleased
+## v2.4.0 — Gemini 4, animated Codex and Antigravity on Discord, and a safe test suite on Windows
 
+- **Gemini 3.6–3.8 and Gemini 4 priced.** `gemini-4-carbon` and `gemini-4-argon` ($2/$10,
+  cached input $0.10), `gemini-4-hydrogen` ($1.50/$7.50, cached $0.075) and
+  `gemini-3.6/3.7/3.8-flash` ($0.75/$3.75) now have their own rows, reached through the
+  Gemini CLI and Antigravity. Gemini 4 Carbon/Argon and 3.7/3.8 Flash are introductory
+  prices; they stay as listed here until Google publishes the regular ones.
+- **Running subagents on Discord.** The model line adds "· N subagents" while subagents
+  are running for the tool on show.
 - **Codex and Antigravity get animated Discord art.** With their image slot empty, Codex
   now shows the animated terminal and Antigravity the animated Gemini star, and the image
   follows the live state the way Clawd does. A link you set still wins, and an empty
