@@ -160,12 +160,16 @@ node -e '
 const fs = require("fs");
 const now = Date.now();
 const iso = (ms) => new Date(ms).toISOString();
-const MODELS = ["gemini-3-pro", "gemini-3.1-pro", "gemini-3.5-flash", "gemini-3-flash",
+const MODELS = ["gemini-4-carbon", "gemini-4-argon", "gemini-4-hydrogen",
+                "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash",
+                "gemini-3-pro", "gemini-3.1-pro", "gemini-3.5-flash", "gemini-3-flash",
                 "gemini-3.1-flash-lite", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite",
                 "gemini-3-pro-preview-11-2025", "gemini-3.5-flash-lite", "gemini-2.5-flash-preview-tts"];
 fs.writeFileSync(process.argv[1] + "/tmp/proj/chats/session-p.jsonl",
   MODELS.map((m, i) => ({ id: "gp" + i, sessionId: "gp-s", timestamp: iso(now - (25 - i) * 60e3), model: m,
     tokens: { input: 1000000, output: 1000000, cached: 0, thoughts: 0, tool: 0, total: 2000000 } }))
+    .concat([{ id: "gp-g4h-cache", sessionId: "gp-s", timestamp: iso(now - 60e3), model: "gemini-4-hydrogen",
+      tokens: { input: 1000000, output: 0, cached: 1000000, thoughts: 0, tool: 0, total: 1000000 } }])
     .map(JSON.stringify).join("\n") + "\n");
 ' "$GEM"
 
@@ -284,7 +288,9 @@ for (const [m, want] of Object.entries(GLM)) {
 }
 // Gemini via ~/.gemini — Google list prices (input$ + output$ for 1M+1M),
 // including the dated -preview fallback to its base row:
-const GOOG = { "gemini-3-pro": 14, "gemini-3.1-pro": 14, "gemini-3.5-flash": 10.5, "gemini-3-flash": 3.5,
+const GOOG = { "gemini-4-carbon": 12, "gemini-4-argon": 12, "gemini-4-hydrogen": 9.075,
+               "gemini-3.8-flash": 4.5, "gemini-3.7-flash": 4.5, "gemini-3.6-flash": 4.5,
+               "gemini-3-pro": 14, "gemini-3.1-pro": 14, "gemini-3.5-flash": 10.5, "gemini-3-flash": 3.5,
                "gemini-3.1-flash-lite": 1.75, "gemini-2.5-pro": 11.25, "gemini-2.5-flash": 2.8,
                "gemini-2.5-flash-lite": 0.5, "gemini-3-pro-preview-11-2025": 14 };
 for (const [m, want] of Object.entries(GOOG)) {
