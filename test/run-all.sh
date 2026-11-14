@@ -8,6 +8,7 @@ DIR=$(cd "$(dirname "$0")" && pwd)
 # Antigravity, Continue, Cline or Roo usage. Suites that test an agent set
 # their own fixture folder, which overrides these.
 NOAGENT="${TMPDIR:-/tmp}/burnglass-no-agents-$$"
+export CODEX_DIR="${CODEX_DIR:-$NOAGENT/codex}"
 export GEMINI_DIR="${GEMINI_DIR:-$NOAGENT/gemini}" ANTIGRAVITY_DIR="${ANTIGRAVITY_DIR:-$NOAGENT/antigravity}"
 export CONTINUE_DIR="${CONTINUE_DIR:-$NOAGENT/continue}" CLINE_DIR="${CLINE_DIR:-$NOAGENT/cline}" ROO_DIR="${ROO_DIR:-$NOAGENT/roo}"
 FAILED=0

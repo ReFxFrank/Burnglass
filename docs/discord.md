@@ -39,8 +39,8 @@ application instead, set `{"discordClientId": "…"}`.
 ## Images that follow what you're doing
 
 The large image shows Claude art while you use Claude Code, Codex art while you use
-Codex, your Antigravity image (or the Burnglass art) while you use Antigravity, and
-Burnglass art when you're idle. For Claude it also follows the live state:
+Codex, Antigravity art while you use Antigravity, and Burnglass art when you're idle.
+For Claude it also follows the live state:
 
 | State | When | Dashboard slot | Config key |
 | --- | --- | --- | --- |
@@ -53,14 +53,19 @@ Burnglass art when you're idle. For Claude it also follows the live state:
 | **Idle** | None of Claude Code, Codex or Antigravity has been active for 15 minutes | Idle | `discordLargeImage` |
 
 **Built-in art (since v2.0.1):** with nothing set, the four Claude slots show the
-animated Clawd below (hammering, typing, "!", asleep); Codex shows the OpenAI mark, and
-Idle and an empty Antigravity slot the Burnglass mark. The Clawd GIFs are `https://` links to the 512 px files in this
-repository, pinned to the `v2.0.0` tag so they never change
-(`https://raw.githubusercontent.com/ReFxFrank/Burnglass/v2.0.0/.github/assets/discord/<state>-512.gif`).
+animated Clawd below (hammering, typing, "!", asleep), Codex the animated terminal and
+Antigravity the animated Gemini star (both follow the live state too), and Idle the
+Burnglass mark. The GIFs are `https://` links to the 512 px files in this repository,
+pinned so they never change: the Clawd set to the `v2.0.0` tag
+(`https://raw.githubusercontent.com/ReFxFrank/Burnglass/v2.0.0/.github/assets/discord/<state>-512.gif`),
+the Codex and Antigravity sets to the commit that added them
+(`…/Burnglass/6ded8285b7f84b7098ebdee062d5c4aec42eb6b5/.github/assets/discord/codex-<state>-512.gif`,
+same for `antigravity-`).
 Discord's media proxy loads them; Burnglass itself makes no request. For a Claude state,
 the order is: that state's own slot, then your **Claude Code** image, then the built-in
-Clawd. `"discordShowState": false` turns live state off and shows the static `claude`
-art instead.
+Clawd. Codex uses its own slot, then the built-in GIF; Antigravity uses its own slot,
+then your **Idle** image, then the built-in GIF. `"discordShowState": false` turns live
+state off and shows the static `claude`, `codex` and Burnglass art instead.
 
 With presence on, **System → Discord images** has a field for each slot. Each field takes
 an **art-asset key** or an **`https://` link**; an empty field falls back to the built-in
@@ -72,8 +77,9 @@ art. Click **Save images** and the new art is published straight away.
 - **No flicker:** Claude switches between working and thinking every few seconds, and
   each image swap makes viewers reload a GIF. So a switch between those two must hold for
   45 seconds before the image changes; *waiting* and *idle* switch at once.
-- **Codex** shows *working* or *thinking* in the image's hover text, but has no per-state
-  images.
+- **Codex** and **Antigravity** have one slot each. Left empty, the built-in GIF for the
+  live state is shown (Codex: working, thinking or idle; Antigravity: working or idle);
+  an image you set is used for every state.
 - `{"discordShowState": false}` turns the state-following images and hover text off.
 
 ## Animated GIFs: the Clawd set
@@ -173,7 +179,7 @@ disappears on Discord's dark themes.
 | `discordRotateSecs` | `45` | Seconds per page, 15 to 300. |
 | `discordShowModel` | on | `false` hides the model · effort · sessions line. |
 | `discordShowState` | on | `false` turns off the state-following images and hover text. |
-| `discordClaudeImage` · `discordClaudeWorkingImage` · `discordClaudeThinkingImage` · `discordClaudeWaitingImage` · `discordCodexImage` · `discordAntigravityImage` · `discordLargeImage` | built-in art (Claude slots: the animated Clawd) | One art-asset key or `https://` link per slot (see the table above). |
+| `discordClaudeImage` · `discordClaudeWorkingImage` · `discordClaudeThinkingImage` · `discordClaudeWaitingImage` · `discordCodexImage` · `discordAntigravityImage` · `discordLargeImage` | built-in art (Claude slots: the animated Clawd; Codex and Antigravity: their animated sets) | One art-asset key or `https://` link per slot (see the table above). |
 
 The dashboard's **Save images** button uses `POST /api/discord/images`; see the
 [HTTP API](api.md).

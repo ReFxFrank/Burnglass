@@ -109,8 +109,9 @@ ok(s.activeNow && s.activeNow.provider === "antigravity" && s.activeNow.model ==
   "activeNow follows the newest Antigravity call (got " + JSON.stringify(s.activeNow) + ")");
 ok(idle.agentState && idle.agentState.provider === "antigravity" && idle.agentState.state === "idle",
   "status IDLE in conversation_summaries.db alone → idle, despite the cached conversation parse (got " + JSON.stringify(idle.agentState) + ")");
-ok(s.discord && s.discord.images && s.discord.images.antigravity === "https://x.test/ag.png" && s.discord.images.defaults.antigravity === "pulse",
-  "discord payload exposes the antigravity image slot (default: the idle art)");
+const AG_DFLT = "https://raw.githubusercontent.com/ReFxFrank/Burnglass/6ded8285b7f84b7098ebdee062d5c4aec42eb6b5/.github/assets/discord/antigravity-idle-512.gif";
+ok(s.discord && s.discord.images && s.discord.images.antigravity === "https://x.test/ag.png" && s.discord.images.defaults.antigravity === AG_DFLT,
+  "discord payload exposes the antigravity image slot (default: the animated idle art)");
 const frames = fs.readFileSync(T + "/frames.log", "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
 const marks = Object.fromEntries(fs.readFileSync(T + "/marks.txt", "utf8").trim().split("\n").map((l) => l.split(" ").slice(1)));
 const lastAct = (n) => { for (let i = Math.min(Number(n), frames.length) - 1; i >= 0; i--) { const a = frames[i].payload && frames[i].payload.args && frames[i].payload.args.activity; if (a) return a; } return null; };
