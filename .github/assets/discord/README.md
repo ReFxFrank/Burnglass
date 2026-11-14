@@ -33,6 +33,21 @@ are left out.
 `clawd-pixel.gif` (512 px) is a separate, hand-drawn pixel Clawd made for
 Burnglass: it blinks, shuffles its legs and throws both claws up (3.6 s loop).
 
+## Codex set
+
+`codex-working.gif`, `codex-thinking.gif`, `codex-waiting.gif` and `codex-idle.gif`
+(160 px), each with a `-512.gif` copy, are pixel art drawn for Burnglass: a small
+terminal with a face on its screen. It types on a keyboard while working, looks up at a
+trail of dots while thinking, hops under a yellow "!" while waiting on you, and sleeps
+while idle. They follow the same rules as the Clawd set: transparent, loop forever,
+sampled at 25 fps, 5 px per art pixel at 160 px and 16 px at 512 px. Loops: working
+1.2 s, thinking 2.4 s, waiting 2 s, idle 3 s.
+
+None of them is built in. Codex has a single image slot (**Codex** in the dashboard,
+`discordCodexImage` in the config), so pick one, host it at a public `https://` link
+and paste that link into the slot. Burnglass never sees a Codex session waiting on you
+(Codex doesn't log approval requests), so `codex-waiting.gif` only completes the set.
+
 ## Source and licence
 
 The four state GIFs are rendered from the animated SVGs in
@@ -47,6 +62,8 @@ full licence text is in [`LICENSE-clawd-tank.txt`](LICENSE-clawd-tank.txt).
 | waiting | `clawd-notification.svg` |
 | idle | `clawd-sleeping.svg` |
 
-Clawd is Anthropic's character. All the GIFs in this folder, `clawd-pixel.gif`
+Clawd is Anthropic's character. All the Clawd GIFs in this folder, `clawd-pixel.gif`
 included, are unofficial fan art and are not affiliated with or endorsed by
 Anthropic.
+
+The Codex set is unofficial too and is not affiliated with or endorsed by OpenAI.
