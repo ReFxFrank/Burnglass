@@ -4355,7 +4355,8 @@ function buildSummary(sourceFilter, opts) {
   // What the agent is doing right now (not source-scoped: it's live state).
   payload.agentState = computeAgentState(conv, now);
   if (payload.activeNow) {
-    payload.activeNow.subagents = payload.agentState ? payload.agentState.subagents : 0;
+    const byP = payload.agentState && payload.agentState.subagentsByProvider;
+    payload.activeNow.subagents = (byP && byP[payload.activeNow.provider]) || 0;
   }
   // Surface what Pulse is actually reading, so a wrong-directory setup (e.g.
   // Claude Code under WSL while Pulse runs in native Windows) is diagnosable.
@@ -7138,7 +7139,7 @@ function sessionSubagents(c, state, now) {
   return 0;
 }
 
-// → { provider, state, sessions, subagents, source } for the most urgent live session,
+// → { provider, state, sessions, subagents, subagentsByProvider, source } for the most urgent live session,
 // or null. Ranking: waiting > working > thinking > idle.
 function computeAgentState(conv, now) {
   conv = conv || {};
@@ -7146,7 +7147,13 @@ function computeAgentState(conv, now) {
   const reg = claudeLiveRegistry(now);
   let trusted = 0;
   let subagents = 0;
+  const subagentsByProvider = {};
   const countedSids = new Set();
+  const addSubagents = (prov, n) => {
+    if (!n) return;
+    subagents += n;
+    subagentsByProvider[prov] = (subagentsByProvider[prov] || 0) + n;
+  };
   // `claude --resume` keeps the sessionId, so a crashed process's record and
   // the resumed one can share it: only the newest may borrow the transcript
   // as its sign of life, or the leftover would never age out.
@@ -7173,7 +7180,7 @@ function computeAgentState(conv, now) {
       trusted++;
       states.push({ provider: 'claude', state, source: 'claude-status' });
       if (r.sessionId && !countedSids.has(r.sessionId)) {
-        subagents += sessionSubagents(c, state, now);
+        addSubagents('claude', sessionSubagents(c, state, now));
         countedSids.add(r.sessionId);
       }
     }
@@ -7189,7 +7196,7 @@ function computeAgentState(conv, now) {
     if (state) {
       states.push({ provider: c.provider, state, source: 'transcript' });
       if (!countedSids.has(sid)) {
-        subagents += sessionSubagents(c, state, now);
+        addSubagents(c.provider, sessionSubagents(c, state, now));
         countedSids.add(sid);
       }
     }
@@ -7202,7 +7209,7 @@ function computeAgentState(conv, now) {
     const cur = byProvider[s.provider];
     if (!cur || LIVE_STATE_RANK[s.state] > LIVE_STATE_RANK[cur]) byProvider[s.provider] = s.state;
   }
-  return { provider: best.provider, state: best.state, sessions: states.length, subagents, source: best.source, byProvider };
+  return { provider: best.provider, state: best.state, sessions: states.length, subagents, subagentsByProvider, source: best.source, byProvider };
 }
 
 // Human model name for the presence line: claude-opus-5-5 → "Opus 5.5",
@@ -7308,6 +7315,11 @@ const DISCORD_STATE_TEXT = { working: 'working', thinking: 'thinking', waiting: 
 // has always covered every state) > this default. discordShowState:false =
 // static art (discordClaudeImage || 'claude'), as before.
 const DISCORD_DEFAULT_ART_BASE = 'https://raw.githubusercontent.com/ReFxFrank/Burnglass/v2.0.0/.github/assets/discord/';
+// Built-in animated Codex and Antigravity art: the GIFs added in PR #4. No
+// release tag holds them yet, so the base is PINNED to the FULL merge-commit
+// SHA (a short SHA can turn ambiguous and 404 later). Same rules as the Clawd
+// base: never move or delete these files at that commit; a new set gets a new base.
+const DISCORD_EXTRA_ART_BASE = 'https://raw.githubusercontent.com/ReFxFrank/Burnglass/6ded8285b7f84b7098ebdee062d5c4aec42eb6b5/.github/assets/discord/';
 // The Claude Code large image for a live state (working|thinking|waiting|idle|
 // null): the user's state link > their Claude Code image > the built-in
 // animated Clawd (idle/unknown → asleep); state art off → static art.
@@ -7316,11 +7328,35 @@ function discordClaudeArt(cfg, live) {
   return (slot && cfg[slot]) || cfg.discordClaudeImage ||
     (cfg.discordShowState === false ? 'claude' : DISCORD_DEFAULT_CLAUDE_ART[slot ? live : 'idle']);
 }
+// Codex / Antigravity large image: the user's own image (for Antigravity, its
+// slot and then the Idle image, as before) > the built-in animated GIF for the
+// live state (idle/unknown → idle); state art off → the old static key.
+function discordProviderArt(custom, table, fallbackKey, cfg, live) {
+  if (custom) return custom;
+  if (cfg.discordShowState === false) return fallbackKey;
+  return table[live && DISCORD_STATE_SLOTS[live] ? live : 'idle'];
+}
+function discordAntigravityArt(cfg, live) {
+  return discordProviderArt(cfg.discordAntigravityImage || cfg.discordLargeImage,
+    DISCORD_DEFAULT_ANTIGRAVITY_ART, 'pulse', cfg, live);
+}
 const DISCORD_DEFAULT_CLAUDE_ART = {
   working: DISCORD_DEFAULT_ART_BASE + 'working-512.gif',   // hammering
   thinking: DISCORD_DEFAULT_ART_BASE + 'thinking-512.gif', // typing
   waiting: DISCORD_DEFAULT_ART_BASE + 'waiting-512.gif',   // "!" — waiting on you
   idle: DISCORD_DEFAULT_ART_BASE + 'idle-512.gif',         // asleep between turns
+};
+const DISCORD_DEFAULT_CODEX_ART = {
+  working: DISCORD_EXTRA_ART_BASE + 'codex-working-512.gif',
+  thinking: DISCORD_EXTRA_ART_BASE + 'codex-thinking-512.gif',
+  waiting: DISCORD_EXTRA_ART_BASE + 'codex-waiting-512.gif',
+  idle: DISCORD_EXTRA_ART_BASE + 'codex-idle-512.gif',
+};
+const DISCORD_DEFAULT_ANTIGRAVITY_ART = {
+  working: DISCORD_EXTRA_ART_BASE + 'antigravity-working-512.gif',
+  thinking: DISCORD_EXTRA_ART_BASE + 'antigravity-thinking-512.gif',
+  waiting: DISCORD_EXTRA_ART_BASE + 'antigravity-waiting-512.gif',
+  idle: DISCORD_EXTRA_ART_BASE + 'antigravity-idle-512.gif',
 };
 // Working ↔ thinking flip every few seconds — faster than a 15 s tick can
 // show honestly, and every image swap makes viewers reload a GIF. Once one of
@@ -7379,11 +7415,11 @@ function buildDiscordActivity() {
   if (shown.prov && shown.state && shown.state !== 'idle') prov = shown.prov;
   const live = shown.prov === prov ? shown.state : null;
   const claudeArt = discordClaudeArt(cfg, live);
-  // Antigravity has no art key in the shared Discord application, so its
-  // slot falls back to the idle art unless the user sets one.
-  const asset = prov === 'codex' ? (cfg.discordCodexImage || 'codex')
+  const codexArt = discordProviderArt(cfg.discordCodexImage, DISCORD_DEFAULT_CODEX_ART, 'codex', cfg, live);
+  const antigravityArt = discordAntigravityArt(cfg, live);
+  const asset = prov === 'codex' ? codexArt
     : prov === 'claude' ? claudeArt
-    : prov === 'antigravity' ? (cfg.discordAntigravityImage || cfg.discordLargeImage || 'pulse')
+    : prov === 'antigravity' ? antigravityArt
     : (cfg.discordLargeImage || 'pulse');
   const verb = live && DISCORD_STATE_TEXT[live];
   const assetText = prov === 'codex' ? (verb ? 'OpenAI Codex · ' + verb : 'Using OpenAI Codex')
@@ -7504,7 +7540,9 @@ function discordImagesForPayload() {
 const DISCORD_IMAGE_DEFAULTS = {
   claude: DISCORD_DEFAULT_CLAUDE_ART.idle, claudeWorking: DISCORD_DEFAULT_CLAUDE_ART.working,
   claudeThinking: DISCORD_DEFAULT_CLAUDE_ART.thinking, claudeWaiting: DISCORD_DEFAULT_CLAUDE_ART.waiting,
-  codex: 'codex', antigravity: 'pulse', idle: 'pulse',
+  codex: DISCORD_DEFAULT_CODEX_ART.idle,
+  antigravity: DISCORD_DEFAULT_ANTIGRAVITY_ART.idle,
+  idle: 'pulse',
 };
 function discordForPayload() {
   const images = discordImagesForPayload();
@@ -11302,6 +11340,7 @@ module.exports = {
   PRICING, priceFor, costForEntry, normalize, dedupKey,
   computeBlocks, floorToHour, aggregate, parseAll, tokensOf, localDateStr,
   psQuote, trayScript, summarizeTrayOutput, integrationTargetExists, sameEntry, discordClaudeArt, DISCORD_DEFAULT_CLAUDE_ART,
+  discordProviderArt, discordAntigravityArt, DISCORD_DEFAULT_CODEX_ART, DISCORD_DEFAULT_ANTIGRAVITY_ART,
   parseFile, parseEffortArgs, parseEffortStdout, mergeModes, annotateModes, discordIpcCandidates,
   fmtMoney, parseEcbXml, currencyInfo, usableCurrency, statusLineToolName,
   sqliteOpen, sqliteTable, pbFields, parseAntigravityFile, antigravityModel,

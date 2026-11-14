@@ -43,10 +43,11 @@ while idle. They follow the same rules as the Clawd set: transparent, loop forev
 sampled at 25 fps, 5 px per art pixel at 160 px and 16 px at 512 px. Loops: working
 1.2 s, thinking 2.4 s, waiting 2 s, idle 3 s.
 
-None of them is built in. Codex has a single image slot (**Codex** in the dashboard,
-`discordCodexImage` in the config), so pick one, host it at a public `https://` link
-and paste that link into the slot. Burnglass never sees a Codex session waiting on you
-(Codex doesn't log approval requests), so `codex-waiting.gif` only completes the set.
+They are the built-in art for an empty **Codex** slot (`discordCodexImage`), linked
+through the commit that added them
+(`https://raw.githubusercontent.com/ReFxFrank/Burnglass/6ded8285b7f84b7098ebdee062d5c4aec42eb6b5/.github/assets/discord/`),
+so never move or delete them. Burnglass never sees a Codex session waiting on you (Codex
+doesn't log approval requests), so `codex-waiting.gif` only completes the set.
 
 ## Antigravity set
 
@@ -57,10 +58,10 @@ while working, watches a trail of dots while thinking, waits beside an amber "!"
 waiting on you, and sleeps with its colours dimmed while idle. Same rules and loop
 lengths as the Codex set.
 
-None of them is built in either. Antigravity has a single image slot (**Antigravity** in
-the dashboard, `discordAntigravityImage` in the config); link one the same way. Burnglass
-reads only "working" and "idle" from Antigravity, so the thinking and waiting GIFs only
-complete the set.
+They are the built-in art for an empty **Antigravity** slot (`discordAntigravityImage`)
+when no Idle image is set, linked through the same commit. Burnglass reads only
+"working" and "idle" from Antigravity, so the thinking and waiting GIFs only complete the
+set.
 
 ## Source and licence
 

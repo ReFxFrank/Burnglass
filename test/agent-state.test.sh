@@ -118,6 +118,10 @@ switch (scen) {
   case 'parallel-partial-noreg': clearReg(); break;
   case 'subagents-open': clearReg(); clearCodex(); rm(sub); reg(livePid, 's1', 'busy');
     w(main, [prompt(30), subTools(20), toolResult(10, 'tS3')]); break; // 2 open subagents (Agent + Task)
+  case 'codex-active-no-claude-sub':
+    rollout('parent', { session_id: 'root-1', id: 'root-1', source: 'cli' }, [
+      ev(8, 'turn_context', { model: 'gpt-5-2025-08-07' }),
+      ev(5, 'event_msg', { type: 'token_count', info: { last_token_usage: { input_tokens: 100, output_tokens: 50 } } })]); break;
   case 'codex-partial': reg(livePid, 's1', 'idle'); w(main, [prompt(60), reply(50, 'y')]);
     rollout('parent', { session_id: 'root-1', id: 'root-1', source: 'cli' }, [
       ev(40, 'event_msg', { type: 'task_started' }),
@@ -226,6 +230,9 @@ fx codex-child;        chk codex-child "$(q)"
 fx parallel-partial;       chk parallel-partial "$(q)"
 fx parallel-partial-noreg; chk parallel-partial-noreg "$(q)"
 fx subagents-open;         chk subagents-open "$(q)"
+fx codex-active-no-claude-sub
+chk codex-active-no-claude-sub "$(curl -s "http://127.0.0.1:$PORT/api/summary" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const d=JSON.parse(s),an=d.activeNow;console.log(an?an.provider+":"+(an.subagents||0):"null")})')"
+fx codex-working;      chk codex-working "$(q)"
 fx codex-partial;          chk codex-partial "$(q)"
 fx side-past-expiry;       chk side-past-expiry "$(q)"
 fx bash-mode;              chk bash-mode "$(q)"
@@ -327,6 +334,7 @@ const want = {
   "no-registry-prompt": "claude:thinking:0", "no-registry-ask": "claude:waiting:0", "no-registry-stale": "null",
   "codex-working": "codex:working:0", "codex-done": "claude:idle:0", "codex-child": "codex:working:1",
   "parallel-partial": "claude:working:0", "subagents-open": "claude:working:2",
+  "codex-active-no-claude-sub": "codex:0",
   "parallel-partial-noreg": "claude:working:0", "codex-partial": "codex:working:0",
   "side-past-expiry": "claude:working:1", "bash-mode": "claude:thinking:0", "bash-context": "claude:idle:0", "stale-reg": "codex:working:0",
   "codex-resume-orphan": "codex:thinking:0", "img-node": "claude:waiting:0", "img-other": "claude:idle:0",
@@ -345,6 +353,7 @@ const why = {
   "codex-done": "Codex task_complete -> idle, Claude idle", "codex-child": "a busy Codex subagent rollout makes its parent session working",
   "parallel-partial": "2 parallel tools, 1 result back -> still working",
   "subagents-open": "2 open Agent/Task tool calls -> 2 running subagents",
+  "codex-active-no-claude-sub": "activeNow.subagents stays scoped to activeNow.provider (does not leak Claude subagents onto Codex)",
   "parallel-partial-noreg": "same via transcript fallback",
   "codex-partial": "Codex: 2 calls, 1 output -> still working", "side-past-expiry": "main quiet 20 min but a subagent wrote 5 s ago -> working",
   "bash-mode": "a ! shell command is answered by default (respondToBashCommands) -> thinking",
@@ -371,9 +380,10 @@ ok(img("quiet-waiting") === "https://x.test/waiting.gif | Claude Code · waiting
 ok(img("recent-idle") === "https://x.test/claude.gif | Using Claude Code", "D: between turns -> the Claude Code image (" + img("recent-idle") + ")");
 ok(img("showstate-off") === "https://x.test/claude.gif | Using Claude Code", "D: discordShowState:false ignores live state (" + img("showstate-off") + ")");
 const hopImgs = [];
+const CX_WORK = "https://raw.githubusercontent.com/ReFxFrank/Burnglass/6ded8285b7f84b7098ebdee062d5c4aec42eb6b5/.github/assets/discord/codex-working-512.gif";
 for (let i = marks["hop-before"]; i < marks["hop-after"]; i++) { const f = frames[i];
   if (f.op === 1 && f.payload.cmd === "SET_ACTIVITY" && f.payload.args.activity) hopImgs.push(f.payload.args.activity.assets.large_image); }
-ok(img("hop-before").startsWith("codex |") && hopImgs.every((x) => x === "codex"),
+ok(img("hop-before").startsWith(CX_WORK + " |") && hopImgs.every((x) => x === CX_WORK),
    "D: Claude flipping tool/think while Codex works does not hop the art between providers (" + [img("hop-before")].concat(hopImgs).join(" ; ") + ")");
 ok(img("cross") === "https://x.test/thinking.gif | Claude Code · thinking",
    "D: the hold never carries a state across providers (" + img("cross") + ")");

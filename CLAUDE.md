@@ -132,6 +132,10 @@ can see and breaks that handoff:
   `v2.0.0` tag's `.github/assets/discord/` via raw.githubusercontent.com): every
   2.0.1+ presence shows them, so the tag and those four `-512.gif` files at it
   must stay forever.
+- The built-in animated Codex / Antigravity links (`DISCORD_EXTRA_ART_BASE` =
+  the FULL merge commit `6ded8285b7f84b7098ebdee062d5c4aec42eb6b5` of PR #4,
+  no tag held them yet): the eight `codex-*-512.gif` / `antigravity-*-512.gif`
+  files at that commit must stay forever too.
 - Discord client id `DISCORD_CLIENT_ID_DEFAULT` and the art keys `claude`,
   `codex` and **`pulse`** (the idle key — the art behind it is swapped, the
   key is not; a new key would blank the idle art until uploaded + cached).

@@ -302,8 +302,17 @@ ok(hActs.length >= 2 && hActs[0].payload.args.activity.assets.large_image === "h
      "I: discordShowState:false -> static art, no built-in GIF");
   for (const [k, u] of Object.entries(D)) ok(u.length <= 256 && /^https:\/\/[^/\\?#@]/.test(u), "I: " + k + " default passes the presence URL rules (" + u.length + " chars)");
   const dflt = require(SP + "/h-sum.json").discord.images.defaults || {};
-  ok(dflt.claudeWorking === D.working && dflt.claude === D.idle && dflt.codex === "codex" && dflt.idle === "pulse",
+  const E = "https://raw.githubusercontent.com/ReFxFrank/Burnglass/6ded8285b7f84b7098ebdee062d5c4aec42eb6b5/.github/assets/discord/";
+  ok(dflt.claudeWorking === D.working && dflt.claude === D.idle && dflt.codex === E + "codex-idle-512.gif" && dflt.antigravity === E + "antigravity-idle-512.gif" && dflt.idle === "pulse",
      "I: payload.discord.images.defaults says what an empty slot shows (additive)");
+  const { discordProviderArt: pArt, DISCORD_DEFAULT_CODEX_ART: CXD, DISCORD_DEFAULT_ANTIGRAVITY_ART: AGD } = require(process.argv[3] + "/server.js");
+  ok(pArt(null, CXD, "codex", {}, "working") === E + "codex-working-512.gif" && pArt(null, AGD, "pulse", {}, "thinking") === E + "antigravity-thinking-512.gif" && pArt(null, AGD, "pulse", { discordShowState: false }, "working") === "pulse" && pArt("https://x.test/c.gif", CXD, "codex", {}, "working") === "https://x.test/c.gif",
+     "I: Codex and Antigravity use their animated GIFs by default, static fallback when discordShowState:false, and custom override when set");
+  const { discordAntigravityArt: agArt } = require(process.argv[3] + "/server.js");
+  ok(agArt({}, "working") === E + "antigravity-working-512.gif" && agArt({ discordLargeImage: "https://x.test/idle.gif" }, "working") === "https://x.test/idle.gif" &&
+     agArt({ discordAntigravityImage: "https://x.test/ag.gif", discordLargeImage: "https://x.test/idle.gif" }, "working") === "https://x.test/ag.gif" &&
+     agArt({ discordShowState: false }, "working") === "pulse",
+     "I: an empty Antigravity slot still uses the Idle image first, then the animated star");
 }
 // ---- J: Unix socket search follows the documented Discord order, incl. TMP / TEMP
 if (process.platform !== "win32") {

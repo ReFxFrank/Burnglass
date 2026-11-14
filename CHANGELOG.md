@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Codex and Antigravity get animated Discord art.** With their image slot empty, Codex
+  now shows the animated terminal and Antigravity the animated Gemini star, and the image
+  follows the live state the way Clawd does. A link you set still wins, and an empty
+  Antigravity slot still uses your Idle image first. The GIFs are linked at a fixed commit,
+  so they can't change under you.
+- **Subagent counts stay with their tool.** The Discord line and `activeNow.subagents`
+  added Claude Code's running subagents to Codex or Antigravity when one of those was the
+  active tool.
+- **`test/run-all.sh` keeps away from real Codex sessions.** It pointed every other agent
+  at an empty folder but not Codex, so `currency` failed on a machine with Codex logs.
 - **A file named `.burnglass` is never deleted (Windows).** If something that isn't a folder
   already sits at `~/.burnglass`, the move from `~/.pulse` now stops and Burnglass keeps
   running from `~/.pulse`, as designed. On Windows the move used to replace that file

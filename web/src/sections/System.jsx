@@ -749,14 +749,16 @@ function Integrations({ data, notify, thresholds, ovr }) {
 // purpose — rendering the link here would make the dashboard fetch it.
 // Empty Claude slots show the built-in ANIMATED Clawd (server
 // DISCORD_DEFAULT_CLAUDE_ART, links pinned to the v2.0.0 tag); a state slot
-// left empty uses the Claude Code image first when one is set.
+// left empty uses the Claude Code image first when one is set. Empty Codex /
+// Antigravity slots show their animated sets (DISCORD_EXTRA_ART_BASE); an empty
+// Antigravity slot still uses the Idle image first when one is set.
 const DISCORD_IMAGE_ROWS = [
   ['claude', 'Claude Code', 'built-in: Clawd asleep (animated)'],
   ['claudeWorking', 'Claude — working', 'built-in: Clawd hammering (animated)'],
   ['claudeThinking', 'Claude — thinking', 'built-in: Clawd typing (animated)'],
   ['claudeWaiting', 'Claude — waiting on you', 'built-in: Clawd with a “!” (animated)'],
-  ['codex', 'Codex', 'codex (uploaded art)'],
-  ['antigravity', 'Antigravity', 'empty: the Idle image'],
+  ['codex', 'Codex', 'built-in: Codex terminal (animated)'],
+  ['antigravity', 'Antigravity', 'empty: the Idle image, else the Gemini star (animated)'],
   ['idle', 'Idle', 'pulse (uploaded art)'],
 ];
 const rowValues = (src) => Object.fromEntries(DISCORD_IMAGE_ROWS.map(([k]) => [k, (src && src[k]) || '']));
