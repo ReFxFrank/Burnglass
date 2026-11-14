@@ -29,6 +29,13 @@ function okBody() {
     // A documented newer key gets a proper label
     seven_day_cowork: { utilization: 10, resets_at: new Date(Date.now() + 3 * 86400e3).toISOString() },
     seven_day_oauth_apps: { utilization: 12, resets_at: new Date(Date.now() + 3 * 86400e3).toISOString() },
+    // Weekly usage split by product (shares of what was used, sum 100):
+    // Claude Duet's slice becomes its own row (40% of 61% weekly = 24.4%).
+    seven_day_breakdown: { rows: [
+      { key: 'claude_code', display_name: 'Claude Code', percent: 60 },
+      { key: 'chat', display_name: 'Chats', percent: 0 },
+      { key: 'claude_duet', display_name: 'Claude Duet', percent: 40 },
+    ] },
     limits: [
       // the real thing: per-model weekly window
       { kind: 'weekly_scoped', group: 'g', percent: 76, resets_at: new Date(Date.now() + 3 * 86400e3).toISOString(),

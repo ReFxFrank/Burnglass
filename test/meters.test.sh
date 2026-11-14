@@ -111,6 +111,11 @@ if (m && m.buckets) {
   ok(appsRows.length === 1 && appsRows[0].key === "seven_day_oauth_apps",
      "surface-scoped apps deduped against legacy seven_day_oauth_apps (" + appsRows.length + " row)");
   ok(!m.buckets.some((b) => /idlesurface/i.test(b.key)), "a surface window at 0% with no reset stays hidden");
+  const wk = m.buckets.find((b) => b.key === "seven_day");
+  const duetShare = m.buckets.find((b) => b.key === "weekly_share:claude_duet");
+  ok(duetShare && Math.abs(duetShare.pct - 24.4) < 1e-9 && duetShare.label === "Claude · weekly · Duet (share)" && wk && duetShare.resetsAt === wk.resetsAt,
+     "Claude Duet row = its breakdown share x weekly (label=" + (duetShare && duetShare.label) + " pct=" + (duetShare && duetShare.pct) + ")");
+  ok(!m.buckets.some((b) => /claude_code|chat/.test(b.key)), "only Duet gets a share row");
   ok(m.buckets[0].key === "five_hour" && m.buckets[1].key === "seven_day",
      "order: 5h, overall weekly, then scoped [" + m.buckets.map((b) => b.key).join(", ") + "]");
 }
